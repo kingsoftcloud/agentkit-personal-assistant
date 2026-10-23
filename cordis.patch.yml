@@ -1,3 +1,6 @@
-# The plugin intentionally has no runtime patch in the initial skeleton.
-# Future host/client contributions must use documented DSH extension points.
-[]
+# DSH bundle entry for the standalone Personal Assistant plugin.
+# Product defaults (panel disabled and no auto-connect) are owned by the
+# application metadata/feature gate; the Loader only sees this composition row.
+- insert:
+    - id: personal-assistant
+      name: '@kingsoftcloud/agentkit-personal-assistant'
