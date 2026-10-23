@@ -18,7 +18,7 @@ The plugin does not use a DSH private module or a profile name as a tenant bound
 ## Package surfaces
 
 - `@kingsoftcloud/agentkit-personal-assistant` — DSH Host entry (`apply`, `createRuntime`).
-- `@kingsoftcloud/agentkit-personal-assistant/client` — browser-safe client adapter for the official gateway/remotes service.
+- `@kingsoftcloud/agentkit-personal-assistant/client` — browser-safe gateway adapter plus the public DSH `inject/apply` entry that contributes the default-closed panel and sidebar row.
 - `@kingsoftcloud/agentkit-personal-assistant/bot-registry` — multi-Bot identity and policy registry.
 - `@kingsoftcloud/agentkit-personal-assistant/computer-broker` — runtime-side broker client and lease manager.
 - `@kingsoftcloud/agentkit-personal-assistant/computer-broker-protocol` — validated v1 message shapes.
@@ -74,7 +74,7 @@ npm run check
 npm run pack:check
 ```
 
-The project uses only Node built-ins for the skeleton and has no dependency on DSH private source. The eventual UI should be built on the documented DSH client gateway/remotes APIs and should keep the same disabled-by-default behavior.
+The client entry uses the documented DSH `slots` service and contributes an inert default-closed panel/sidebar row. It uses no private DSH source; a later UI revision can replace the text components while keeping the same disabled-by-default and no-auto-connect contract.
 
 ## Reference and licensing
 
