@@ -44,4 +44,46 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
   });
 }
 
+/**
+ * Public DSH client entry contract. The loader calls `apply(ctx)` after the
+ * renderer and layout services are available. The default panel is inert:
+ * it does not select itself, open a gateway, or create a Computer connection.
+ * The returned strings are valid ReactNodes and keep this skeleton free of a
+ * private React/DOM dependency; the product UI can replace these slot entries
+ * with a real component in a later plugin revision.
+ */
+export const inject = Object.freeze(['slots']);
+export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
+export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({
+  enabled: false,
+  autoConnect: false,
+});
+
+export function PersonalAssistantPanel() {
+  return 'Personal Assistant is disabled by default. Enable the plugin to connect.';
+}
+
+export function PersonalAssistantPanelIcon() {
+  return 'PA';
+}
+
+export function apply(ctx) {
+  if (!ctx?.slots || typeof ctx.slots.inject !== 'function' || typeof ctx.slots.register !== 'function') {
+    throw new TypeError('Personal Assistant client requires the public DSH slots service');
+  }
+  ctx.slots.inject('main', () => ctx.slots.register(
+    { name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID },
+    PersonalAssistantPanel,
+  ));
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
+    {
+      name: 'sidebar.panellist',
+      id: PERSONAL_ASSISTANT_PANEL_ID,
+      order: 90,
+      label: 'Personal Assistant',
+    },
+    PersonalAssistantPanelIcon,
+  ));
+}
+
 export const createClientPlugin = createPersonalAssistantClient;

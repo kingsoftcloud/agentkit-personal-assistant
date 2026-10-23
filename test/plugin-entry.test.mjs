@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { apply, createRuntime, name } from '../src/index.mjs';
-import { createPersonalAssistantClient, PersonalAssistantGatewayUnavailableError } from '../src/client/index.mjs';
+import {
+  apply as applyClient,
+  createPersonalAssistantClient,
+  PersonalAssistantGatewayUnavailableError,
+  PersonalAssistantPanel,
+  PersonalAssistantPanelIcon,
+  PERSONAL_ASSISTANT_CLIENT_DEFAULTS,
+  PERSONAL_ASSISTANT_PANEL_ID,
+  inject as clientInject,
+} from '../src/client/index.mjs';
 
 test('host entry is disabled and has no implicit Computer connection', () => {
   const runtime = apply({ kind: 'test-context' }, { bots: [{ botId: 'writer', systemPromptRevision: 'w1' }] });
@@ -28,4 +37,32 @@ test('client exposes broker-backed browser and terminal operations without auto-
   assert.deepEqual(requests.map(item => item.payload.action), ['open', 'snapshot', 'terminal.exec', 'terminal.exec']);
   assert.equal(requests[0].payload.profileId, 'profile-1');
   assert.equal(requests[2].payload.args.language, 'shell');
+});
+
+
+test('public DSH client entry registers a closed main panel and sidebar row', () => {
+  const entries = [];
+  const ctx = {
+    slots: {
+      inject(name, factory) {
+        entries.push(factory());
+        assert.ok(['main', 'sidebar.panellist'].includes(name));
+      },
+      register(definition, component) {
+        return { definition, component };
+      },
+    },
+  };
+  applyClient(ctx);
+  assert.deepEqual(clientInject, ['slots']);
+  assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist']);
+  assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
+  assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
+  assert.equal(entries[0].component(), 'Personal Assistant is disabled by default. Enable the plugin to connect.');
+  assert.equal(entries[1].component(), 'PA');
+  assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
+});
+
+test('client apply rejects a context without the public DSH slots service', () => {
+  assert.throws(() => applyClient({}), /public DSH slots service/);
 });
