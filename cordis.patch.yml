@@ -1,0 +1,3 @@
+# The plugin intentionally has no runtime patch in the initial skeleton.
+# Future host/client contributions must use documented DSH extension points.
+[]

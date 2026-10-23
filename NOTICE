@@ -1,0 +1,7 @@
+AgentKit Personal Assistant
+Copyright 2026 Kingsoft Cloud.
+
+This project is an original implementation of a DSH plugin. It does not copy
+source code from DeepSeek-Bot or DSH private modules. DeepSeek-Bot is used only
+as a public design reference for long-lived Bots, persistent state, and plugin
+boundaries. Any future source reuse must preserve its Apache-2.0 notices.

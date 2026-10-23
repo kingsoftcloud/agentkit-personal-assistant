@@ -1,0 +1,61 @@
+{
+  "name": "@kingsoftcloud/agentkit-personal-assistant",
+  "version": "0.1.0",
+  "description": "Standalone personal assistant DSH plugin with multi-Bot profiles and an explicit Cloud Computer Broker boundary.",
+  "homepage": "https://github.com/kingsoftcloud/agentkit-personal-assistant",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kingsoftcloud/agentkit-personal-assistant.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kingsoftcloud/agentkit-personal-assistant/issues"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.23.4",
+    "dsh": "0.2.1-rc.2"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./client": "./src/client/index.mjs",
+    "./manifest": "./personal-assistant.plugin.json",
+    "./bot-registry": "./src/bot-registry.mjs",
+    "./computer-broker": "./src/computer-broker.mjs",
+    "./computer-broker-protocol": "./src/computer-broker-protocol.mjs"
+  },
+  "files": [
+    "src",
+    "personal-assistant.plugin.json",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/index.mjs && node --check src/bot-registry.mjs && node --check src/computer-broker-protocol.mjs && node --check src/computer-broker.mjs && node --check src/client/index.mjs && npm test",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
