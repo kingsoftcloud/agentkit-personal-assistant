@@ -48,6 +48,7 @@ function object(value, field) {
 export function createLeaseRequest(input = {}) {
   return Object.freeze({
     protocol: COMPUTER_BROKER_PROTOCOL,
+    ...(input.userId === undefined ? {} : { userId: text(input.userId, 'userId') }),
     assistantId: text(input.assistantId, 'assistantId'),
     botId: text(input.botId, 'botId'),
     computerId: text(input.computerId, 'computerId'),
@@ -60,6 +61,7 @@ export function createLeaseRequest(input = {}) {
 export function createReleaseRequest(input = {}) {
   return Object.freeze({
     protocol: COMPUTER_BROKER_PROTOCOL,
+    ...(input.userId === undefined ? {} : { userId: text(input.userId, 'userId') }),
     assistantId: text(input.assistantId, 'assistantId'),
     botId: text(input.botId, 'botId'),
     computerId: text(input.computerId, 'computerId'),
@@ -73,6 +75,7 @@ export function createActionRequest(input = {}) {
   if (!COMPUTER_ACTION_NAMES.includes(action)) throw new TypeError(`Unsupported computer action: ${action}`);
   return Object.freeze({
     protocol: COMPUTER_BROKER_PROTOCOL,
+    ...(input.userId === undefined ? {} : { userId: text(input.userId, 'userId') }),
     assistantId: text(input.assistantId, 'assistantId'),
     botId: text(input.botId, 'botId'),
     computerId: text(input.computerId, 'computerId'),
@@ -86,6 +89,7 @@ export function createActionRequest(input = {}) {
 export function createStatusRequest(input = {}) {
   return Object.freeze({
     protocol: COMPUTER_BROKER_PROTOCOL,
+    ...(input.userId === undefined ? {} : { userId: text(input.userId, 'userId') }),
     assistantId: text(input.assistantId, 'assistantId'),
     botId: text(input.botId, 'botId'),
     computerId: text(input.computerId, 'computerId'),

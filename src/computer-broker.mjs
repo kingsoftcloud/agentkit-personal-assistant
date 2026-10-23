@@ -7,6 +7,76 @@ import {
   createStatusRequest,
 } from './computer-broker-protocol.mjs';
 
+const BROKER_PATHS = Object.freeze({
+  'computer.status': '/broker/status',
+  'computer.lease.acquire': '/broker/lease/acquire',
+  'computer.lease.release': '/broker/lease/release',
+  'computer.action': '/broker/action',
+});
+
+function loopbackHost(value) {
+  const host = String(value || '').replace(/^\[|\]$/gu, '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+/**
+ * HTTP transport for the localhost Computer Broker sidecar.
+ *
+ * The runtime and Computer containers share a network namespace. Keeping this
+ * transport loopback-only prevents a bad deployment from turning the broker
+ * into a cluster-reachable control endpoint. Tests can inject fetchImpl, but
+ * production callers should use the default fetch implementation.
+ */
+export function createHttpComputerBrokerTransport({ baseUrl, fetchImpl = globalThis.fetch, timeoutMs = 30_000 } = {}) {
+  if (typeof baseUrl !== 'string' || !baseUrl.trim()) throw new TypeError('baseUrl must be a non-empty string');
+  let endpoint;
+  try { endpoint = new URL(baseUrl); } catch { throw new TypeError('baseUrl must be a valid URL'); }
+  if (!['http:', 'https:'].includes(endpoint.protocol)) throw new TypeError('baseUrl must use http or https');
+  if (endpoint.username || endpoint.password) throw new TypeError('baseUrl must not contain credentials');
+  if (!loopbackHost(endpoint.hostname)) throw new TypeError('Computer Broker URL must resolve to loopback');
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 300_000) throw new TypeError('timeoutMs must be between 1 and 300000');
+  if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function');
+
+  return Object.freeze({
+    endpoint: endpoint.toString(),
+    async request(operation, payload) {
+      const path = BROKER_PATHS[operation];
+      if (!path) throw new TypeError(`Unsupported computer broker operation: ${operation}`);
+      const target = new URL(path, endpoint);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let response;
+      try {
+        response = await fetchImpl(target, {
+          method: 'POST',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        const wrapped = new Error(`Computer Broker request failed: ${error?.message || 'network error'}`);
+        wrapped.code = error?.name === 'AbortError' ? 'COMPUTER_BROKER_TIMEOUT' : 'COMPUTER_BROKER_UNAVAILABLE';
+        wrapped.cause = error;
+        throw wrapped;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      let body = {};
+      try { body = await response.json(); } catch {
+        body = { error: `Computer Broker returned non-JSON response (${response.status})` };
+      }
+      if (!response.ok) {
+        const error = new Error(body.error || `Computer Broker returned HTTP ${response.status}`);
+        error.code = body.error || 'COMPUTER_BROKER_FAILED';
+        error.status = response.status;
+        throw error;
+      }
+      return body;
+    },
+  });
+}
+
 export class ComputerBrokerUnavailableError extends Error {
   constructor(message = 'Cloud Computer Broker is not connected') {
     super(message);

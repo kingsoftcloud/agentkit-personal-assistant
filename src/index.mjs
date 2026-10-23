@@ -1,5 +1,9 @@
 import { BotRegistry } from './bot-registry.mjs';
 import { createComputerBrokerClient } from './computer-broker.mjs';
+import { createComputerToolset } from './cloud-computer-tools.mjs';
+import { createScheduleManager } from './schedule-manager.mjs';
+import { workspaceDir } from './workspace.mjs';
+export { IMPLEMENTED_RUNTIME_CAPABILITIES } from './implementation-capabilities.mjs';
 
 export const name = '@kingsoftcloud/agentkit-personal-assistant';
 export const inject = Object.freeze([
@@ -18,12 +22,21 @@ export const inject = Object.freeze([
 export function createRuntime(ctx, config = {}) {
   const registry = new BotRegistry({ profileId: config.profileId ?? 'default', bots: config.bots ?? [] });
   const computerBroker = config.computerBroker ?? createComputerBrokerClient({ transport: config.computerTransport });
+  const scheduleManager = config.scheduleManager ?? createScheduleManager({ now: config.now });
+  const workspace = workspaceDir(config.workspace);
+  const createBotComputerToolset = ({ botId, ...options } = {}) => createComputerToolset({
+    broker: computerBroker, userId: config.userId, assistantId: config.assistantId, computerId: config.computerId,
+    botId: botId ?? config.botId, ...options,
+  });
   return Object.freeze({
     ctx,
     config: Object.freeze({ ...config }),
     enabled: config.enabled === true,
     registry,
     computerBroker,
+    scheduleManager,
+    workspace,
+    createComputerToolset: createBotComputerToolset,
   });
 }
 
@@ -37,6 +50,10 @@ export {
   ComputerLeaseConflictError,
   ComputerLeaseManager,
   createComputerBrokerClient,
+  createHttpComputerBrokerTransport,
   createMockComputerBroker,
 } from './computer-broker.mjs';
 export * from './computer-broker-protocol.mjs';
+export * from './cloud-computer-tools.mjs';
+export * from './schedule-manager.mjs';
+export * from './workspace.mjs';

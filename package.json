@@ -23,10 +23,16 @@
     "./bot-registry": "./src/bot-registry.mjs",
     "./computer-broker": "./src/computer-broker.mjs",
     "./computer-broker-protocol": "./src/computer-broker-protocol.mjs",
-    "./plugin-manifest": "./src/plugin-manifest.mjs"
+    "./plugin-manifest": "./src/plugin-manifest.mjs",
+    "./cloud-computer-tools": "./src/cloud-computer-tools.mjs",
+    "./schedule-manager": "./src/schedule-manager.mjs",
+    "./workspace": "./src/workspace.mjs",
+    "./implementation-capabilities": "./src/implementation-capabilities.mjs"
   },
   "files": [
     "src",
+    "runtime",
+    "scripts",
     "personal-assistant.plugin.json",
     "cordis.patch.yml",
     "README.md",
@@ -36,8 +42,9 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/index.mjs && node --check src/bot-registry.mjs && node --check src/computer-broker-protocol.mjs && node --check src/computer-broker.mjs && node --check src/client/index.mjs && npm test",
-    "pack:check": "npm pack --dry-run"
+    "check": "node --check src/index.mjs && node --check src/bot-registry.mjs && node --check src/computer-broker-protocol.mjs && node --check src/computer-broker.mjs && node --check src/client/index.mjs && npm test && node --check src/cloud-computer-tools.mjs && node --check src/implementation-capabilities.mjs && node --check src/schedule-manager.mjs && node --check src/workspace.mjs && node --check runtime/assistant-runtime.mjs && node --check runtime/computer-agentd.mjs",
+    "pack:check": "npm pack --dry-run",
+    "build:artifacts": "node scripts/build-artifacts.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5"

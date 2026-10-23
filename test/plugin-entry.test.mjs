@@ -16,3 +16,16 @@ test('client adapter requires an explicit gateway', async () => {
   assert.throws(() => client.listBots(), PersonalAssistantGatewayUnavailableError);
   assert.equal(createRuntime(null, { enabled: true }).enabled, true);
 });
+
+test('client exposes broker-backed browser and terminal operations without auto-connect', async () => {
+  const requests = [];
+  const client = createPersonalAssistantClient({ profileId: 'profile-1', gateway: { request: async (operation, payload) => { requests.push({ operation, payload }); return { ok: true }; } } });
+  client.selectBot('researcher');
+  await client.browserOpen('https://example.com');
+  await client.browserSnapshot();
+  await client.cloudBash('printf ok');
+  await client.cloudRunCode('python', 'print(1)');
+  assert.deepEqual(requests.map(item => item.payload.action), ['open', 'snapshot', 'terminal.exec', 'terminal.exec']);
+  assert.equal(requests[0].payload.profileId, 'profile-1');
+  assert.equal(requests[2].payload.args.language, 'shell');
+});

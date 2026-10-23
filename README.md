@@ -2,7 +2,7 @@
 
 `@kingsoftcloud/agentkit-personal-assistant` is the standalone DSH plugin project for the cloud personal assistant. DSH remains the host/runtime foundation; this repository owns the assistant product surface, multi-Bot registry, and the explicit boundary to a user's dedicated Cloud Computer.
 
-This repository is an initial, executable contract skeleton. It does **not** claim to connect to a real Cloud Computer, create a Pod, control a display, or execute a terminal command. A deployment must provide a documented `Computer Broker` transport before those operations can be enabled.
+This repository is an executable broker-backed implementation. It does not create a Pod or expose a computer outside the loopback broker; a deployment supplies the two images and the per-user `Computer Broker` sidecar boundary.
 
 ## Design boundary
 
@@ -57,14 +57,14 @@ console.log(bot.memoryNamespace)
 
 ## Computer Broker contract
 
-The runtime sends validated messages through a supplied transport:
+The runtime sends validated messages through a supplied transport (the runtime image uses the localhost HTTP transport):
 
 - `computer.status`
 - `computer.lease.acquire`
 - `computer.lease.release`
 - `computer.action`
 
-Every lease and action is bound to `assistantId`, `botId`, `computerId`, and `taskId`. The action surface is intentionally small (`open`, `screenshot`, `click`, `type`, `files.*`, `terminal.exec`, and so on). The runtime cannot access a display or a host shell directly. `createMockComputerBroker()` is available only for contract tests and marks every result as `simulated: true`.
+Every lease and action is bound to `userId`, `assistantId`, `botId`, `computerId`, and `taskId`. The implemented tool surface covers bounded browser actions and `terminal.exec`; the runtime cannot access a display or a host shell directly. `createMockComputerBroker()` is available only for contract tests and marks every result as `simulated: true`.
 
 ## Development
 
@@ -79,3 +79,17 @@ The project uses only Node built-ins for the skeleton and has no dependency on D
 ## Reference and licensing
 
 The multi-Bot/persistent-state shape was informed by public behavior in [DeepSeek-Bot](https://github.com/Fei2411/DeepSeek-Bot). No DeepSeek-Bot source is copied in this skeleton. If code is later reused, preserve its Apache-2.0 license and notices as described in [`NOTICE`](./NOTICE).
+
+## Computer-backed capabilities
+
+The browser and code-execution capabilities are implemented as broker-backed DSH
+ tools. `createComputerToolset()` registers the bounded browser actions and
+`cloud_bash`/`cloud_run_code` actions only after a Bot task requests them. The
+first action acquires a per-computer lease; `dispose()` releases it. The runtime
+never launches Chromium or a shell itself. The `personal-assistant-computer`
+image runs `computer-agentd` and owns those operations, including CDP, GUI,
+terminal isolation, and egress policy.
+
+The same project exports `ScheduleManager` and the managed workspace contract.
+Both are profile-local; the runtime image persists their state under the paths
+injected by runtime-service (`WORKSPACE_PATH` and the assistant state path).

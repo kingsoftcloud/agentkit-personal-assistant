@@ -1,0 +1,89 @@
+import { createServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import { createCloudBrowser } from './cloud-browser.mjs';
+import { createCloudExecutor } from './cloud-execution.mjs';
+
+const host = process.env.COMPUTER_HOST || '127.0.0.1';
+const port = Number(process.env.COMPUTER_PORT || 8787);
+const workspace = process.env.AGENTKIT_WORKSPACE_DIR || '/workspace';
+const identity = Object.freeze({ userId: process.env.USER_ID || '', assistantId: process.env.ASSISTANT_ID || '', computerId: process.env.COMPUTER_ID || '' });
+const leases = new Map();
+let browser;
+let executor;
+const send = (response, status, body) => {
+  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  response.end(JSON.stringify(body));
+};
+const readBody = request => new Promise((resolve, reject) => {
+  const chunks = [];
+  request.on('data', chunk => chunks.push(chunk));
+  request.on('end', () => {
+    try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (error) { reject(error); }
+  });
+  request.on('error', reject);
+});
+function identityMatches(body) {
+  return body.userId === identity.userId && body.assistantId === identity.assistantId && body.computerId === identity.computerId;
+}
+function expireLeases() {
+  const now = Date.now();
+  for (const [computerId, lease] of leases) if (!Number.isFinite(lease.expiresAt) || lease.expiresAt <= now) leases.delete(computerId);
+}
+function leaseFor(body) {
+  expireLeases();
+  const lease = leases.get(body.computerId);
+  if (!identityMatches(body) || !lease || lease.leaseId !== body.leaseId || lease.taskId !== body.taskId || lease.expiresAt <= Date.now()) throw new Error('COMPUTER_LEASE_REQUIRED');
+  return lease;
+}
+async function action(body) {
+  leaseFor(body);
+  const args = body.args || {};
+  if (body.action === 'open') return (browser ||= createCloudBrowser({ workspace })).open(args.url);
+  if (body.action === 'snapshot') return browser?.snapshot();
+  if (body.action === 'click') return browser?.click(args);
+  if (body.action === 'type') return browser?.type(args);
+  if (body.action === 'press') return browser?.press(args);
+  if (body.action === 'screenshot') return browser?.screenshot();
+  if (body.action === 'download') return browser?.download(args);
+  if (body.action === 'stop') return browser?.close();
+  if (body.action === 'terminal.exec') {
+    executor ||= createCloudExecutor({ workspaceRoot: workspace });
+    return args.language === 'shell' ? executor.runBash(args) : executor.runCode(args);
+  }
+  throw new Error(`unsupported computer action: ${body.action}`);
+}
+const server = createServer(async (request, response) => {
+  if (request.method === 'GET' && request.url === '/health') return send(response, 200, { status: 'ok', ...identity });
+  if (request.method === 'GET' && request.url === '/v1/status') return send(response, 200, { status: 'ready', ...identity, capabilities: ['computer-broker/v1'] });
+  if (request.method !== 'POST' || !request.url?.startsWith('/broker/')) return send(response, 404, { error: 'not_found' });
+  try {
+    const body = await readBody(request);
+    if (request.url === '/broker/status') {
+      if (!identityMatches(body)) return send(response, 403, { error: 'COMPUTER_IDENTITY_MISMATCH' });
+      return send(response, 200, { protocol: body.protocol, computerId: identity.computerId, connected: true });
+    }
+    if (request.url === '/broker/lease/acquire') {
+      expireLeases();
+      if (!identityMatches(body)) return send(response, 403, { error: 'COMPUTER_IDENTITY_MISMATCH' });
+      if (leases.has(body.computerId)) return send(response, 409, { error: 'COMPUTER_LEASE_CONFLICT' });
+      const ttlMs = Number(body.ttlMs || 60000);
+      if (!Number.isSafeInteger(ttlMs) || ttlMs < 1000 || ttlMs > 300000) return send(response, 400, { error: 'COMPUTER_LEASE_TTL_INVALID' });
+      const lease = { leaseId: randomUUID(), ...body, expiresAt: Date.now() + ttlMs };
+      leases.set(body.computerId, lease);
+      return send(response, 200, { protocol: body.protocol, lease });
+    }
+    if (request.url === '/broker/lease/release') {
+      const lease = leases.get(body.computerId);
+      const released = Boolean(lease && identityMatches(body) && lease.leaseId === body.leaseId);
+      if (released) leases.delete(body.computerId);
+      return send(response, 200, { protocol: body.protocol, released });
+    }
+    if (request.url === '/broker/action') return send(response, 200, { protocol: body.protocol, ...(await action(body)) });
+    return send(response, 404, { error: 'not_found' });
+  } catch (error) {
+    return send(response, 400, { error: error?.code || error?.message || 'COMPUTER_ACTION_FAILED' });
+  }
+});
+server.listen(port, host);
+const close = async () => { await browser?.dispose?.(); executor?.dispose?.(); server.close(() => process.exit(0)); };
+process.on('SIGTERM', close);
