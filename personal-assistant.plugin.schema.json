@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentkit-personal-assistant.plugin/v1",
+  "title": "AgentKit Personal Assistant plugin metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "pluginId", "version", "compatibility", "metadata"],
+  "properties": {
+    "format": { "const": "agentkit-personal-assistant.plugin/v1" },
+    "pluginId": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "minLength": 1 },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requiredDsh", "requiredHostApi", "requiredHostContract"],
+      "properties": {
+        "requiredDsh": { "type": "string", "minLength": 1 },
+        "requiredHostApi": { "type": "string", "minLength": 1 },
+        "requiredHostContract": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defaultEnabled", "autoConnect", "capabilities", "contributes", "entrypoints"],
+      "properties": {
+        "defaultEnabled": { "type": "boolean" },
+        "autoConnect": { "type": "boolean" },
+        "capabilities": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "contributes": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "entrypoints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "client"],
+          "properties": {
+            "host": { "const": "." },
+            "client": { "const": "./client" }
+          }
+        }
+      }
+    }
+  }
+}

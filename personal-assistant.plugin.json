@@ -1,23 +1,26 @@
 {
-  "id": "@kingsoftcloud/agentkit-personal-assistant",
+  "$schema": "./personal-assistant.plugin.schema.json",
+  "format": "agentkit-personal-assistant.plugin/v1",
+  "pluginId": "@kingsoftcloud/agentkit-personal-assistant",
   "version": "0.1.0",
-  "requiredHostApi": "dsh-native/0.2.1-rc.2",
-  "requiredDsh": "0.2.1-rc.2",
-  "requiredHostContract": 1,
-  "defaultEnabled": false,
-  "autoConnect": false,
-  "capabilities": [
-    "personal-assistant.bots",
-    "personal-assistant.sessions",
-    "personal-assistant.memory",
-    "personal-assistant.computer-broker"
-  ],
-  "contributes": [
-    "route",
-    "resource",
-    "command",
-    "settings"
-  ],
-  "host": "./src/index.mjs",
-  "client": "./src/client/index.mjs"
+  "compatibility": {
+    "requiredDsh": "0.2.1-rc.2",
+    "requiredHostApi": "dsh-native/0.2.1-rc.2",
+    "requiredHostContract": 1
+  },
+  "metadata": {
+    "defaultEnabled": false,
+    "autoConnect": false,
+    "capabilities": [
+      "personal-assistant.bots",
+      "personal-assistant.sessions",
+      "personal-assistant.memory",
+      "personal-assistant.computer-broker"
+    ],
+    "contributes": ["route", "resource", "command", "settings"],
+    "entrypoints": {
+      "host": ".",
+      "client": "./client"
+    }
+  }
 }

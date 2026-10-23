@@ -13,7 +13,7 @@ One cloud sub-user owns one Personal Assistant Pod. The Pod is planned to run tw
 
 A single user can create several logical Bots in the assistant runtime. Each Bot has its own `botId`, system prompt revision, memory namespace, and tool policy. Bots can share the user's Computer only through a lease. The lease prevents two Bots from driving the same GUI at the same time.
 
-The plugin does not use a DSH private module or a profile name as a tenant boundary. It uses public DSH injection names and a versioned application protocol. Persistent storage, session persistence, and real Computer authentication will be wired by the host integration once their public contracts are available.
+The plugin does not use a DSH private module or a profile name as a tenant boundary. DSH loader inputs are limited to `package.json.dsh.bundle.patch` and `package.json.dsh.client.{platform,inject,external,immediately}`; the package root and `./client` exports are the Host and browser entrypoints. It uses public DSH injection names and a versioned application protocol. Persistent storage, session persistence, and real Computer authentication will be wired by the host integration once their public contracts are available.
 
 ## Package surfaces
 
@@ -22,9 +22,10 @@ The plugin does not use a DSH private module or a profile name as a tenant bound
 - `@kingsoftcloud/agentkit-personal-assistant/bot-registry` — multi-Bot identity and policy registry.
 - `@kingsoftcloud/agentkit-personal-assistant/computer-broker` — runtime-side broker client and lease manager.
 - `@kingsoftcloud/agentkit-personal-assistant/computer-broker-protocol` — validated v1 message shapes.
-- `@kingsoftcloud/agentkit-personal-assistant/manifest` — plugin manifest.
+- `@kingsoftcloud/agentkit-personal-assistant/manifest` — application metadata manifest.
+- `@kingsoftcloud/agentkit-personal-assistant/plugin-manifest` — validators for the DSH package subset and application metadata.
 
-The manifest is intentionally `defaultEnabled: false` and `autoConnect: false`. Studio can ship the package in its catalog without showing a panel or opening a cloud connection until the user enables it.
+The application manifest records `metadata.defaultEnabled: false` and `metadata.autoConnect: false`. Those are AgentKit product metadata, validated by `src/plugin-manifest.mjs`; DSH itself only reads the supported `package.json.dsh` fields. Studio can ship the package in its catalog without showing a panel or opening a cloud connection until the user enables it.
 
 ## Multi-Bot example
 
