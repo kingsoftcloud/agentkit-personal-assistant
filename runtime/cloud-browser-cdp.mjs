@@ -19,9 +19,10 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  * most managed containers, so the egress proxy stays authoritative for network
  * policy; `--proxy-bypass-list=<-loopback>` keeps loopback inside the proxy too.
  */
-export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800' }) {
+export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false }) {
   return [
-    '--headless=new', '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
+    ...(desktop ? ['--kiosk', '--ozone-platform=x11'] : ['--headless=new']),
+    '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync',
     '--disable-background-networking', '--disable-breakpad', '--disable-crash-reporter',
     '--disable-translate', '--mute-audio', '--hide-scrollbars',
@@ -67,14 +68,15 @@ export async function launchChromium({
   chromium, proxy, userDataDir = createProfileDir(), spawn = spawnChild,
   launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, now = Date.now, pollMs = 25,
 } = {}) {
-  const args = chromiumArgs({ userDataDir, proxy });
+  const desktop = process.env.AGENTKIT_DESKTOP_MODE === '1';
+  const args = chromiumArgs({ userDataDir, proxy, desktop });
   const stderr = { text: '', bytes: 0 };
   let child;
   try {
     child = spawn(chromium, args, {
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp' },
+      env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp', ...(desktop ? { DISPLAY: process.env.DISPLAY || ':99' } : {}) },
     });
   } catch (error) {
     rmSync(userDataDir, { recursive: true, force: true });

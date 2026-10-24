@@ -44,6 +44,7 @@ const results = [
   await pack('runtime', [
     ['bin/assistant-runtime', join(root, 'scripts', 'assistant-runtime-launcher.sh')],
     ['runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
+    ['runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
     ['src', join(root, 'src')],
   ]),
   await pack('computer', [
@@ -52,6 +53,7 @@ const results = [
     ['runtime/cloud-browser.mjs', join(root, 'runtime', 'cloud-browser.mjs')],
     ['runtime/cloud-browser-cdp.mjs', join(root, 'runtime', 'cloud-browser-cdp.mjs')],
     ['runtime/cloud-execution.mjs', join(root, 'runtime', 'cloud-execution.mjs')],
+    ['runtime/desktop-session.mjs', join(root, 'runtime', 'desktop-session.mjs')],
   ]),
 ];
 console.log(JSON.stringify({ node: process.versions.node, artifacts: results }, null, 2));

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createCloudBrowser } from './cloud-browser.mjs';
 import { createCloudExecutor } from './cloud-execution.mjs';
+import { createDesktopController } from './desktop-session.mjs';
 
 const host = process.env.COMPUTER_HOST || '127.0.0.1';
 const port = Number(process.env.COMPUTER_PORT || 8787);
@@ -10,6 +11,7 @@ const identity = Object.freeze({ userId: process.env.USER_ID || '', assistantId:
 const leases = new Map();
 let browser;
 let executor;
+const desktop = createDesktopController();
 const send = (response, status, body) => {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(body));
@@ -52,6 +54,17 @@ async function action(body) {
   }
   throw new Error(`unsupported computer action: ${body.action}`);
 }
+function desktopIdentity(body) {
+  if (!identityMatches(body)) throw Object.assign(new Error('COMPUTER_IDENTITY_MISMATCH'), { code: 'COMPUTER_IDENTITY_MISMATCH', status: 403 });
+  return { userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId };
+}
+function desktopLease(body) {
+  const lease = leases.get(body.computerId);
+  if (!lease || lease.leaseId !== body.leaseId || lease.taskId !== body.taskId || lease.expiresAt <= Date.now()) {
+    throw Object.assign(new Error('COMPUTER_LEASE_REQUIRED'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+  }
+  return lease;
+}
 const server = createServer(async (request, response) => {
   if (request.method === 'GET' && request.url === '/health') return send(response, 200, { status: 'ok', ...identity });
   if (request.method === 'GET' && request.url === '/v1/status') return send(response, 200, { status: 'ready', ...identity, capabilities: ['computer-broker/v1'] });
@@ -75,15 +88,36 @@ const server = createServer(async (request, response) => {
     if (request.url === '/broker/lease/release') {
       const lease = leases.get(body.computerId);
       const released = Boolean(lease && identityMatches(body) && lease.leaseId === body.leaseId);
-      if (released) leases.delete(body.computerId);
+      if (released) { leases.delete(body.computerId); desktop.closeSessionsForLease(body.leaseId); }
       return send(response, 200, { protocol: body.protocol, released });
     }
     if (request.url === '/broker/action') return send(response, 200, { protocol: body.protocol, ...(await action(body)) });
+    if (request.url === '/broker/desktop/session') {
+      const desktopIdentityValue = desktopIdentity(body);
+      expireLeases();
+      const lease = body.leaseId ? desktopLease({ ...body, ...desktopIdentityValue }) : null;
+      return send(response, 200, await desktop.openSession({ identity: desktopIdentityValue, controllable: Boolean(lease), leaseId: lease?.leaseId || null, taskId: lease?.taskId || null }));
+    }
+    if (request.url === '/broker/desktop/frame') {
+      desktopIdentity(body);
+      return send(response, 200, await desktop.frame({ sessionId: body.sessionId, afterSeq: body.afterSeq }));
+    }
+    if (request.url === '/broker/desktop/input') {
+      desktopIdentity(body);
+      const session = desktop.getSession(body.sessionId);
+      if (!session || session.identity.computerId !== identity.computerId) throw Object.assign(new Error('DESKTOP_SESSION_NOT_FOUND'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+      desktopLease({ ...body, computerId: identity.computerId });
+      return send(response, 202, await desktop.input({ sessionId: body.sessionId, event: body.event }));
+    }
+    if (request.url === '/broker/desktop/close') {
+      desktopIdentity(body);
+      return send(response, 200, { closed: desktop.closeSession(body.sessionId) });
+    }
     return send(response, 404, { error: 'not_found' });
   } catch (error) {
-    return send(response, 400, { error: error?.code || error?.message || 'COMPUTER_ACTION_FAILED' });
+    return send(response, Number(error?.status) || 400, { error: error?.code || error?.message || 'COMPUTER_ACTION_FAILED' });
   }
 });
 server.listen(port, host);
-const close = async () => { await browser?.dispose?.(); executor?.dispose?.(); server.close(() => process.exit(0)); };
+const close = async () => { await browser?.dispose?.(); executor?.dispose?.(); desktop.dispose(); server.close(() => process.exit(0)); };
 process.on('SIGTERM', close);

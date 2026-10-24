@@ -4,6 +4,7 @@ import { createComputerBrokerClient, createHttpComputerBrokerTransport } from '.
 import { createComputerToolset } from '../src/cloud-computer-tools.mjs';
 import { BotRegistry } from '../src/bot-registry.mjs';
 import { createPersonalAssistantStateStore } from '../src/persistent-state.mjs';
+import { attachDesktopWebSocket } from './desktop-ws.mjs';
 
 const values = new Map();
 for (let index = 2; index < process.argv.length; index += 1) {
@@ -27,6 +28,7 @@ const capabilities = String(values.get('capabilities') || process.env.AGENTKIT_P
 const workspace = values.get('workspace') || process.env.WORKSPACE_PATH || process.env.AGENTKIT_WORKSPACE_DIR || '/workspace';
 const artifacts = values.get('artifacts') || process.env.AGENTKIT_ARTIFACTS_DIR || `${workspace}/files`;
 const state = values.get('state') || process.env.ASSISTANT_STATE_PATH || process.env.AGENTKIT_STATE_DIR || `${workspace}/.agentkit/state`;
+const runtimeToken = process.env.AGENTKIT_RUNTIME_TOKEN || '';
 const registryPath = values.get('bot-registry') || process.env.BOT_REGISTRY_PATH;
 await mkdir(workspace, { recursive: true, mode: 0o700 });
 await mkdir(artifacts, { recursive: true, mode: 0o750 });
@@ -53,6 +55,16 @@ const readBody = request => new Promise((resolve, reject) => {
   });
   request.on('error', reject);
 });
+const requireRuntimeToken = request => {
+  const authorization = String(request.headers.authorization || '');
+  if (!runtimeToken || authorization !== `Bearer ${runtimeToken}`) throw Object.assign(new Error('runtime token required'), { code: 'RUNTIME_UNAUTHORIZED', status: 401 });
+};
+const brokerDesktopRequest = async (path, body) => {
+  const result = await fetch(`${brokerEndpoint}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, userId, assistantId, computerId }) });
+  const payload = await result.json().catch(() => ({ error: 'COMPUTER_BROKER_INVALID_RESPONSE' }));
+  if (!result.ok) throw Object.assign(new Error(payload.error || 'computer broker request failed'), { code: payload.error || 'COMPUTER_BROKER_REQUEST_FAILED', status: result.status });
+  return payload;
+};
 const botIdOf = value => {
   const botId = String(value ?? '').trim();
   if (!botId) throw Object.assign(new Error('botId is required'), { code: 'BOT_REQUIRED' });
@@ -153,6 +165,10 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/v1/computer/status') return send(response, 200, await computerStatus(body));
     if (url.pathname === '/v1/computer/action') return send(response, 200, await computerAction(body));
     if (url.pathname === '/v1/computer/smoke') return send(response, 200, await computerSmoke(body));
+    if (url.pathname === '/v1/computer/desktop/session') { requireRuntimeToken(request); return send(response, 200, await brokerDesktopRequest('/broker/desktop/session', { botId: botIdOf(body.botId), taskId: taskIdOf(body.taskId), leaseId: body.leaseId || undefined })); }
+    if (url.pathname === '/v1/computer/desktop/frame') { requireRuntimeToken(request); return send(response, 200, await brokerDesktopRequest('/broker/desktop/frame', { sessionId: body.sessionId, afterSeq: body.afterSeq })); }
+    if (url.pathname === '/v1/computer/desktop/input') { requireRuntimeToken(request); return send(response, 202, await brokerDesktopRequest('/broker/desktop/input', { sessionId: body.sessionId, botId: botIdOf(body.botId), taskId: taskIdOf(body.taskId), leaseId: body.leaseId, event: body.event })); }
+    if (url.pathname === '/v1/computer/desktop/close') { requireRuntimeToken(request); return send(response, 200, await brokerDesktopRequest('/broker/desktop/close', { sessionId: body.sessionId })); }
     if (url.pathname === '/v1/sessions') return send(response, 201, await sessionCreate(body));
     if (sessionResource(url.pathname)?.resource === 'messages') return send(response, 201, await messageWrite(body, sessionResource(url.pathname).sessionId));
     if (sessionResource(url.pathname)?.resource === 'turns') return send(response, 202, await turnWrite(body, sessionResource(url.pathname).sessionId));
@@ -164,6 +180,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
+attachDesktopWebSocket({ server, runtimeToken, brokerDesktopRequest, botIdOf, taskIdOf });
 server.listen(port, host);
 const close = () => server.close(() => process.exit(0));
 process.on('SIGTERM', close);
