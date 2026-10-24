@@ -34,10 +34,12 @@ export function createDesktopController({
   exec = execFile,
   now = () => Date.now(),
   capture = null,
+  terminal = true,
 } = {}) {
   const sessions = new Map();
   let xvfb;
   let wm;
+  let terminalProcess;
   let displayReady;
   let lastActivityAt = 0;
   let sequence = 0;
@@ -55,6 +57,11 @@ export function createDesktopController({
     wm = spawn('fluxbox', ['-display', display, '-no-slit', '-no-toolbar'], { env: environment, stdio: 'ignore' });
     wm.once?.('exit', () => { wm = undefined; });
   };
+  const spawnTerminal = () => {
+    if (!terminal || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
+    terminalProcess = spawn('xterm', ['-display', display, '-geometry', '96x28+20+20', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
+    terminalProcess.once?.('exit', () => { terminalProcess = undefined; });
+  };
   const waitDisplay = async () => {
     if (displayReady) return displayReady;
     displayReady = (async () => {
@@ -67,6 +74,7 @@ export function createDesktopController({
       }
       if (now() >= deadline) throw Object.assign(new Error(`Xvfb display ${display} did not become ready`), { code: 'DESKTOP_DISPLAY_UNAVAILABLE', cause: lastError });
       spawnWindowManager();
+      spawnTerminal();
       return true;
     })();
     try { await displayReady; } catch (error) { displayReady = undefined; throw error; }
@@ -167,10 +175,11 @@ export function createDesktopController({
     pressedButtons.clear();
     if (wm) { try { wm.kill('SIGTERM'); } catch {} wm = undefined; }
     if (xvfb) { try { xvfb.kill('SIGTERM'); } catch {} xvfb = undefined; }
+    if (terminalProcess) { try { terminalProcess.kill('SIGTERM'); } catch {} terminalProcess = undefined; }
     displayReady = undefined;
   };
   const dispose = () => { disposed = true; sessions.clear(); stopDisplay(); };
-  const stats = () => ({ display, width, height, sessions: sessions.size, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), lastActivityAt });
+  const stats = () => ({ display, width, height, sessions: sessions.size, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), lastActivityAt });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
   return Object.freeze({ openSession, getSession, frame, input, closeSession, closeSessionsForLease, ensureDisplay, dispose, stats, injectInput, captureFrame });

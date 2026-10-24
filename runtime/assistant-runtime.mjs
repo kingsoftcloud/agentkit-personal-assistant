@@ -180,7 +180,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, brokerDesktopRequest, botIdOf, taskIdOf });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, botIdOf, taskIdOf });
 server.listen(port, host);
 const close = () => server.close(() => process.exit(0));
 process.on('SIGTERM', close);

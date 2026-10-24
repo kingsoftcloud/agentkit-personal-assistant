@@ -28,22 +28,26 @@ function parseFrames(state, chunk, onFrame) {
   }
 }
 
-export function attachDesktopWebSocket({ server, runtimeToken, brokerDesktopRequest, botIdOf, taskIdOf }) {
+export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, botIdOf, taskIdOf }) {
   server.on('upgrade', (request, socket, head) => {
-    if (new URL(request.url || '/', 'http://desktop.local').pathname !== '/v1/computer/desktop/ws') { socket.destroy(); return; }
+    const pathname = new URL(request.url || '/', 'http://desktop.local').pathname;
+    if (!['/v1/desktop/ws', '/v1/computer/desktop/ws'].includes(pathname)) { socket.destroy(); return; }
     const authorization = String(request.headers.authorization || '');
-    if (!runtimeToken || authorization !== `Bearer ${runtimeToken}`) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
+    const trustedSession = String(request.headers['x-agentengine-desktop-session'] || '');
+    const trustedAssistant = String(request.headers['x-agentengine-desktop-assistant-id'] || '');
+    if ((!runtimeToken || authorization !== `Bearer ${runtimeToken}`) && (!trustedSession || trustedAssistant !== assistantId)) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
     const requested = String(request.headers['sec-websocket-protocol'] || '').split(',').map(value => value.trim()).filter(Boolean);
     const protocol = requested.find(value => value === PROTOCOL) || PROTOCOL;
     const key = request.headers['sec-websocket-key'];
     if (!key) { socket.destroy(); return; }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept(key)}\r\nSec-WebSocket-Protocol: ${protocol}\r\n\r\n`);
     if (head?.length) socket.unshift(head);
-    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, closed: false, lastInputAt: Date.now(), timer: null, frameBusy: false };
+    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, lastInputAt: Date.now(), timer: null, frameBusy: false };
     const send = value => { if (!state.closed) socket.write(jsonFrame(value)); };
     const close = async () => {
       if (state.closed) return; state.closed = true; if (state.timer) clearTimeout(state.timer);
       if (state.sessionId) await brokerDesktopRequest('/broker/desktop/close', { sessionId: state.sessionId }).catch(() => {});
+      if (state.autoLease && state.leaseId) await brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId }).catch(() => {});
       try { socket.end(frame(8)); } catch {}
     };
     const poll = async () => {
@@ -72,6 +76,10 @@ export function attachDesktopWebSocket({ server, runtimeToken, brokerDesktopRequ
       try {
         if (body.type === 'open') {
           state.botId = botIdOf(body.botId); state.taskId = taskIdOf(body.taskId); state.leaseId = body.leaseId || null;
+          if (body.mode === 'control' && !state.leaseId) {
+            const acquired = await brokerDesktopRequest('/broker/lease/acquire', { botId: state.botId, taskId: state.taskId, idempotencyKey: `desktop-ws:${state.botId}:${state.taskId}:${Date.now()}`, ttlMs: 120000 });
+            state.leaseId = acquired.lease?.leaseId || null; state.autoLease = true;
+          }
           const opened = await brokerDesktopRequest('/broker/desktop/session', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId || undefined });
           state.sessionId = opened.sessionId; send({ type: 'ready', ...opened, protocol: PROTOCOL }); poll(); return;
         }
