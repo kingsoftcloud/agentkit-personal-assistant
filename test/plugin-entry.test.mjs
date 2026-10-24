@@ -12,6 +12,7 @@ import {
   PERSONAL_ASSISTANT_PANEL_ID,
   inject as clientInject,
 } from '../src/client/index.mjs';
+import { mapDisplayPoint, nextPollDelay, framePayload, isInputEventWritable } from '../src/client/desktop-view.mjs';
 
 test('host entry is disabled and has no implicit Computer connection', () => {
   const runtime = apply({ kind: 'test-context' }, { bots: [{ botId: 'writer', systemPromptRevision: 'w1' }] });
@@ -67,6 +68,22 @@ test('client exposes broker-backed browser and terminal operations without auto-
   assert.equal(requests[2].payload.args.language, 'shell');
 });
 
+test('client desktop ticket and frame operations stay on the gateway RPC boundary', async () => {
+  const requests = [];
+  const client = createPersonalAssistantClient({ profileId: 'profile-1', gateway: { request: async (operation, payload) => { requests.push({ operation, payload }); return { ok: true }; } } });
+  client.selectBot('researcher');
+  await client.desktop.ticket({ mode: 'control' });
+  await client.desktop.frame({ sessionId: 'session-1', afterSeq: 4 });
+  await client.desktop.input({ sessionId: 'session-1', event: { type: 'keyDown', key: 'Tab' } });
+  await client.desktop.close({ sessionId: 'session-1' });
+  assert.deepEqual(requests.map(item => item.operation), [
+    'personal-assistant.desktop.ticket', 'personal-assistant.desktop.frame',
+    'personal-assistant.desktop.input', 'personal-assistant.desktop.session.close',
+  ]);
+  assert.equal(requests[0].payload.botId, 'researcher');
+  assert.equal(requests.every(item => !Object.hasOwn(item.payload, 'token')), true);
+});
+
 test('client maps durable session, memory, and schedule operations to the public gateway', async () => {
   const requests = [];
   const client = createPersonalAssistantClient({ gateway: { request: async (operation, payload) => { requests.push({ operation, payload }); return { ok: true }; } } });
@@ -109,13 +126,23 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
     },
   };
   applyClient(ctx);
-  assert.deepEqual(clientInject, ['slots']);
+  assert.deepEqual(clientInject, ['slots', 'remote']);
   assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist']);
   assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[0].component(), 'Personal Assistant is disabled by default. Enable the plugin to connect.');
   assert.equal(entries[1].component(), 'PA');
   assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
+});
+
+test('desktop client maps display coordinates and drops oversized/stale frames', () => {
+  assert.deepEqual(mapDisplayPoint({ clientX: 50, clientY: 25, rect: { left: 0, top: 0, width: 640, height: 400 } }), { x: 100, y: 50 });
+  assert.equal(framePayload({ seq: 1, format: 'jpeg', width: 1280, height: 800, bytes: 300 * 1024, data: 'YQ==' }).seq, 1);
+  assert.equal(framePayload({ seq: 2, bytes: 300 * 1024 + 1, data: 'YQ==' }), null);
+  assert.equal(nextPollDelay({ lastInputAt: Date.now() - 10_001 }), 1_000);
+  assert.equal(nextPollDelay({ lastInputAt: Date.now() }), 100);
+  assert.equal(isInputEventWritable({ connected: true, readOnly: false }), true);
+  assert.equal(isInputEventWritable({ connected: true, readOnly: true }), false);
 });
 
 test('client apply rejects a context without the public DSH slots service', () => {
