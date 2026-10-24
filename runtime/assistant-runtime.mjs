@@ -3,6 +3,7 @@ import { readFile, mkdir } from 'node:fs/promises';
 import { createComputerBrokerClient, createHttpComputerBrokerTransport } from '../src/computer-broker.mjs';
 import { createComputerToolset } from '../src/cloud-computer-tools.mjs';
 import { BotRegistry } from '../src/bot-registry.mjs';
+import { createPersonalAssistantStateStore } from '../src/persistent-state.mjs';
 
 const values = new Map();
 for (let index = 2; index < process.argv.length; index += 1) {
@@ -30,6 +31,7 @@ const registryPath = values.get('bot-registry') || process.env.BOT_REGISTRY_PATH
 await mkdir(workspace, { recursive: true, mode: 0o700 });
 await mkdir(artifacts, { recursive: true, mode: 0o750 });
 await mkdir(state, { recursive: true, mode: 0o700 });
+const stateStore = await createPersonalAssistantStateStore(state).init();
 let bots = [];
 if (registryPath) {
   const parsed = JSON.parse(await readFile(registryPath, 'utf8'));
@@ -97,15 +99,41 @@ const computerSmoke = async body => {
   }
 };
 
+const urlOf = request => new URL(request.url || '/', `http://${host}:${port}`);
+const stateBotId = value => botIdOf(value);
+const sessionCreate = async body => {
+  const botId = stateBotId(body.botId);
+  return stateStore.createSession({ botId, title: body.title, metadata: body.metadata });
+};
+const memoryWrite = async body => {
+  const botId = stateBotId(body.botId);
+  return stateStore.putMemory({ botId, key: body.key, content: body.content, metadata: body.metadata });
+};
+const scheduleWrite = async body => {
+  const botId = stateBotId(body.botId);
+  return stateStore.putSchedule({ botId, scheduleId: body.scheduleId, runAt: body.runAt, metadata: body.metadata });
+};
+
 const server = createServer(async (request, response) => {
   try {
-    if (request.method === 'GET' && (request.url === '/health' || request.url === '/readyz')) return send(response, 200, { status: 'ok', assistantId, computerId, userId, bots: registry.list().length, capabilities, workspace, artifacts, state });
-    if (request.method === 'GET' && request.url === '/v1/bots') return send(response, 200, { bots: registry.list() });
+    const url = urlOf(request);
+    if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/readyz')) return send(response, 200, { status: 'ok', assistantId, computerId, userId, bots: registry.list().length, capabilities, workspace, artifacts, state });
+    if (request.method === 'GET' && url.pathname === '/v1/bots') return send(response, 200, { bots: registry.list() });
+    if (request.method === 'GET' && url.pathname === '/v1/sessions') return send(response, 200, { sessions: await stateStore.sessions(stateBotId(url.searchParams.get('botId'))) });
+    if (request.method === 'GET' && url.pathname === '/v1/memory') return send(response, 200, { memories: await stateStore.memory(stateBotId(url.searchParams.get('botId')), url.searchParams.get('query') || '') });
+    if (request.method === 'GET' && url.pathname === '/v1/schedules') return send(response, 200, { schedules: await stateStore.schedules(stateBotId(url.searchParams.get('botId'))) });
+    if (request.method === 'DELETE' && url.pathname.startsWith('/v1/schedules/')) {
+      const removed = await stateStore.removeSchedule(stateBotId(url.searchParams.get('botId')), decodeURIComponent(url.pathname.slice('/v1/schedules/'.length)));
+      return send(response, 200, { removed });
+    }
     if (request.method !== 'POST') return send(response, 404, { error: 'not_found' });
     const body = await readBody(request);
-    if (request.url === '/v1/computer/status') return send(response, 200, await computerStatus(body));
-    if (request.url === '/v1/computer/action') return send(response, 200, await computerAction(body));
-    if (request.url === '/v1/computer/smoke') return send(response, 200, await computerSmoke(body));
+    if (url.pathname === '/v1/computer/status') return send(response, 200, await computerStatus(body));
+    if (url.pathname === '/v1/computer/action') return send(response, 200, await computerAction(body));
+    if (url.pathname === '/v1/computer/smoke') return send(response, 200, await computerSmoke(body));
+    if (url.pathname === '/v1/sessions') return send(response, 201, await sessionCreate(body));
+    if (url.pathname === '/v1/memory') return send(response, 201, await memoryWrite(body));
+    if (url.pathname === '/v1/schedules') return send(response, 201, await scheduleWrite(body));
     return send(response, 404, { error: 'not_found' });
   } catch (error) {
     const status = Number.isInteger(error?.status) && error.status >= 400 && error.status < 600 ? error.status : 400;

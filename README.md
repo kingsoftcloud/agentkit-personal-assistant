@@ -13,7 +13,7 @@ One cloud sub-user owns one Personal Assistant Pod. The Pod is planned to run tw
 
 A single user can create several logical Bots in the assistant runtime. Each Bot has its own `botId`, system prompt revision, memory namespace, and tool policy. Bots can share the user's Computer only through a lease. The lease prevents two Bots from driving the same GUI at the same time.
 
-The plugin does not use a DSH private module or a profile name as a tenant boundary. DSH loader inputs are limited to `package.json.dsh.bundle.patch` and `package.json.dsh.client.{platform,inject,external,immediately}`; the package root and `./client` exports are the Host and browser entrypoints. It uses public DSH injection names and a versioned application protocol. Persistent storage, session persistence, and real Computer authentication will be wired by the host integration once their public contracts are available.
+The plugin does not use a DSH private module or a profile name as a tenant boundary. DSH loader inputs are limited to `package.json.dsh.bundle.patch` and `package.json.dsh.client.{platform,inject,external,immediately}`; the package root and `./client` exports are the Host and browser entrypoints. It uses public DSH injection names and a versioned application protocol. The runtime stores sessions, Bot memory records, and schedules as profile-local JSON collections under `ASSISTANT_STATE_PATH`; the PVC is retained independently from the plugin bundle lifecycle.
 
 ## Package surfaces
 
@@ -90,6 +90,8 @@ never launches Chromium or a shell itself. The `personal-assistant-computer`
 image runs `computer-agentd` and owns those operations, including CDP, GUI,
 terminal isolation, and egress policy.
 
-The same project exports `ScheduleManager` and the managed workspace contract.
-Both are profile-local; the runtime image persists their state under the paths
-injected by runtime-service (`WORKSPACE_PATH` and the assistant state path).
+The same project exports `ScheduleManager`, `PersonalAssistantStateStore`, and
+the managed workspace contract. The runtime exposes `GET/POST /v1/sessions`,
+`GET/POST /v1/memory`, and `GET/POST/DELETE /v1/schedules`; all are profile-local
+and persist under the paths injected by runtime-service (`WORKSPACE_PATH` and
+the assistant state path).
