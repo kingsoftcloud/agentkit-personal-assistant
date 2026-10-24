@@ -111,7 +111,9 @@ export function createDesktopController({
   const pasteText = async text => {
     await ensureDisplay();
     await new Promise((resolve, reject) => {
-      const child = spawn('xclip', ['-selection', 'clipboard', '-display', display], { env: environment, stdio: ['pipe', 'ignore', 'pipe'] });
+      // Keep one clipboard owner per paste; without -loops 1 xclip remains
+      // resident forever waiting for future selection requests.
+      const child = spawn('xclip', ['-selection', 'clipboard', '-display', display, '-loops', '1'], { env: environment, stdio: ['pipe', 'ignore', 'pipe'] });
       const errors = [];
       child.stderr?.on('data', chunk => errors.push(chunk));
       child.once('error', reject);
