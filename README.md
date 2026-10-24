@@ -95,9 +95,9 @@ the managed workspace contract. The runtime exposes `GET/POST /v1/sessions`,
 durable session `messages` and `turns`, `GET/POST /v1/memory`, and
 `GET/POST/DELETE /v1/schedules`; all are profile-local and persist under the
 paths injected by runtime-service (`WORKSPACE_PATH` and the assistant state
-path). A submitted turn is durably queued for the DSH Session Controller; the
-controller/model adapter remains the next integration boundary rather than a
-fake local inference loop.
+path). The standalone HTTP runtime persists a submitted turn as `queued` until
+a DSH Session Controller bridge is present; it never runs a fake local
+inference loop.
 
 When the Host process has injected the public DSH `sessionController`, the Host
 entry exposes `runtime.submitTurn(...)`. It resolves or creates the requested
