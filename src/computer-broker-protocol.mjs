@@ -14,6 +14,7 @@ export const COMPUTER_BROKER_ACTIONS = Object.freeze([
 ]);
 export const COMPUTER_ACTION_NAMES = Object.freeze([
   'open',
+  'snapshot',
   'screenshot',
   'stream',
   'click',
