@@ -84,11 +84,18 @@ The multi-Bot/persistent-state shape was informed by public behavior in [DeepSee
 
 The browser and code-execution capabilities are implemented as broker-backed DSH
  tools. `createComputerToolset()` registers the bounded browser actions and
-`cloud_bash`/`cloud_run_code` actions only after a Bot task requests them. The
-first action acquires a per-computer lease; `dispose()` releases it. The runtime
-never launches Chromium or a shell itself. The `personal-assistant-computer`
-image runs `computer-agentd` and owns those operations, including CDP, GUI,
-terminal isolation, and egress policy.
+`cloud_bash`/`cloud_run_code` actions. The first action acquires a per-computer
+lease; `dispose()` releases it. The runtime never launches Chromium or a shell
+itself. The `personal-assistant-computer` image runs `computer-agentd` and owns
+those operations, including the Xvfb/fluxbox GUI, Chromium/CDP, terminal
+isolation, and egress policy.
+
+The computer image ships the standard automation toolchain in this release:
+Python 3, Bash/shell, Git, OpenSSH client, Chromium, and the DSH skill runtime
+are built in and are not feature switches. `cloud_run_code` exposes JavaScript
+and Python; `cloud_bash` can invoke the bundled shell, Git, SSH, and skill
+commands inside the broker's lease and sandbox. DSH itself and the plugin Host
+remain Node.js processes in the separate assistant-runtime image.
 
 The same project exports `ScheduleManager`, `PersonalAssistantStateStore`, and
 the managed workspace contract. The runtime exposes `GET/POST /v1/sessions`,

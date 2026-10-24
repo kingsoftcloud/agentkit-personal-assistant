@@ -11,7 +11,23 @@ const identity = Object.freeze({ userId: process.env.USER_ID || '', assistantId:
 const leases = new Map();
 let browser;
 let executor;
-const desktop = createDesktopController();
+let desktop;
+const closeDesktopBrowser = async () => {
+  if (!browser) return;
+  const current = browser;
+  browser = undefined;
+  await current.close?.().catch?.(() => {});
+  await current.dispose?.().catch?.(() => {});
+};
+const ensureDesktopBrowser = async () => {
+  browser ||= createCloudBrowser({ workspace });
+  if (!browser.available) throw Object.assign(new Error(browser.resolution?.reason || 'desktop browser unavailable'), { code: 'ASSISTANT_BROWSER_UNAVAILABLE', status: 503 });
+  // A visible browser window is part of the desktop session.  The desktop
+  // mode launcher uses DISPLAY=:99 and kiosk/X11 flags; this is intentionally
+  // separate from the headless cloud_browser tool path.
+  return browser.open('https://example.com');
+};
+desktop = createDesktopController({ onStop: closeDesktopBrowser });
 const send = (response, status, body) => {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(body));
@@ -100,7 +116,10 @@ const server = createServer(async (request, response) => {
       const desktopIdentityValue = desktopIdentity(body);
       expireLeases();
       const lease = body.leaseId ? desktopLease({ ...body, ...desktopIdentityValue }) : null;
-      return send(response, 200, await desktop.openSession({ identity: desktopIdentityValue, controllable: Boolean(lease), leaseId: lease?.leaseId || null, taskId: lease?.taskId || null }));
+      const opened = await desktop.openSession({ identity: desktopIdentityValue, controllable: Boolean(lease), leaseId: lease?.leaseId || null, taskId: lease?.taskId || null });
+      try { await ensureDesktopBrowser(); }
+      catch (error) { desktop.closeSession(opened.sessionId); throw error; }
+      return send(response, 200, opened);
     }
     if (request.url === '/broker/desktop/frame') {
       desktopIdentity(body);
@@ -119,7 +138,9 @@ const server = createServer(async (request, response) => {
     }
     if (request.url === '/broker/desktop/close') {
       desktopIdentity(body);
-      return send(response, 200, { closed: desktop.closeSession(body.sessionId) });
+      const closed = desktop.closeSession(body.sessionId);
+      if (desktop.stats().sessions === 0) await closeDesktopBrowser();
+      return send(response, 200, { closed });
     }
     return send(response, 404, { error: 'not_found' });
   } catch (error) {

@@ -46,6 +46,14 @@ const results = [
     ['runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
     ['src', join(root, 'src')],
+    // The cloud runtime is a real DSH host. Keep a self-contained plugin
+    // package beside the stateful launcher so the DSH profile can resolve it
+    // without reaching an npm registry at pod start.
+    ['plugin/package.json', join(root, 'package.json')],
+    ['plugin/cordis.patch.yml', join(root, 'cordis.patch.yml')],
+    ['plugin/personal-assistant.plugin.json', join(root, 'personal-assistant.plugin.json')],
+    ['plugin/personal-assistant.plugin.schema.json', join(root, 'personal-assistant.plugin.schema.json')],
+    ['plugin/src', join(root, 'src')],
   ]),
   await pack('computer', [
     ['bin/computer-agentd', join(root, 'scripts', 'computer-agentd-launcher.sh')],

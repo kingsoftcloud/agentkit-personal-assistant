@@ -35,6 +35,7 @@ export function createDesktopController({
   now = () => Date.now(),
   capture = null,
   terminal = true,
+  onStop = null,
 } = {}) {
   const sessions = new Map();
   let xvfb;
@@ -69,7 +70,9 @@ export function createDesktopController({
       const deadline = now() + 5000;
       let lastError;
       while (now() < deadline) {
-        try { await exec('xdpyinfo', ['-display', display], { env: environment, maxBuffer: 32 * 1024 }); break; }
+        // 1280x800 X11 visuals can make xdpyinfo exceed 32 KiB; the probe is
+        // only a readiness check and must not reject a healthy Xvfb display.
+        try { await exec('xdpyinfo', ['-display', display], { env: environment, maxBuffer: 128 * 1024 }); break; }
         catch (error) { lastError = error; await new Promise(resolve => setTimeout(resolve, 50)); }
       }
       if (now() >= deadline) throw Object.assign(new Error(`Xvfb display ${display} did not become ready`), { code: 'DESKTOP_DISPLAY_UNAVAILABLE', cause: lastError });
@@ -105,6 +108,20 @@ export function createDesktopController({
     await ensureDisplay();
     await exec('xdotool', args, { env: environment, maxBuffer: 32 * 1024 });
   };
+  const pasteText = async text => {
+    await ensureDisplay();
+    await new Promise((resolve, reject) => {
+      const child = spawn('xclip', ['-selection', 'clipboard', '-display', display], { env: environment, stdio: ['pipe', 'ignore', 'pipe'] });
+      const errors = [];
+      child.stderr?.on('data', chunk => errors.push(chunk));
+      child.once('error', reject);
+      child.once('close', code => code === 0 ? resolve() : reject(Object.assign(new Error(Buffer.concat(errors).toString('utf8') || `xclip exited ${code}`), { code: 'DESKTOP_CLIPBOARD_FAILED' })));
+      child.stdin.end(text, 'utf8');
+    });
+    // xdotool's type action only accepts X keysyms and rejects CJK/emoji. The
+    // clipboard path preserves UTF-8 and leaves modifier state untouched.
+    return runXdotool(['key', 'ctrl+shift+v']);
+  };
   const injectInput = async event => {
     if (!event || typeof event !== 'object') throw inputError('event must be an object');
     const type = safeText(event.type, 'event.type', 32);
@@ -125,12 +142,12 @@ export function createDesktopController({
     }
     if (type === 'text') {
       const text = safeText(event.text, 'event.text', 16 * 1024);
-      return runXdotool(['type', '--clearmodifiers', '--delay', '1', '--', text]);
+      return pasteText(text);
     }
     if (type === 'key') {
       const key = safeText(event.key, 'event.key', 64);
       if (!/^[A-Za-z0-9+_:-]+$/u.test(key)) throw inputError('event.key contains unsupported characters');
-      return runXdotool(['key', '--clearmodifiers', key]);
+      return runXdotool(['key', key]);
     }
     throw inputError(`unsupported desktop input type: ${type}`);
   };
@@ -177,6 +194,7 @@ export function createDesktopController({
     if (xvfb) { try { xvfb.kill('SIGTERM'); } catch {} xvfb = undefined; }
     if (terminalProcess) { try { terminalProcess.kill('SIGTERM'); } catch {} terminalProcess = undefined; }
     displayReady = undefined;
+    try { void onStop?.(); } catch { /* cleanup callback is best effort */ }
   };
   const dispose = () => { disposed = true; sessions.clear(); stopDisplay(); };
   const stats = () => ({ display, width, height, sessions: sessions.size, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), lastActivityAt });
