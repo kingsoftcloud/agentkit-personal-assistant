@@ -92,6 +92,9 @@ terminal isolation, and egress policy.
 
 The same project exports `ScheduleManager`, `PersonalAssistantStateStore`, and
 the managed workspace contract. The runtime exposes `GET/POST /v1/sessions`,
-`GET/POST /v1/memory`, and `GET/POST/DELETE /v1/schedules`; all are profile-local
-and persist under the paths injected by runtime-service (`WORKSPACE_PATH` and
-the assistant state path).
+durable session `messages` and `turns`, `GET/POST /v1/memory`, and
+`GET/POST/DELETE /v1/schedules`; all are profile-local and persist under the
+paths injected by runtime-service (`WORKSPACE_PATH` and the assistant state
+path). A submitted turn is durably queued for the DSH Session Controller; the
+controller/model adapter remains the next integration boundary rather than a
+fake local inference loop.
