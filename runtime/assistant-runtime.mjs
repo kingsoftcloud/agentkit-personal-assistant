@@ -113,6 +113,20 @@ const scheduleWrite = async body => {
   const botId = stateBotId(body.botId);
   return stateStore.putSchedule({ botId, scheduleId: body.scheduleId, runAt: body.runAt, metadata: body.metadata });
 };
+const sessionResource = pathname => {
+  const match = pathname.match(/^\/v1\/sessions\/([^/]+)\/(messages|turns)$/u);
+  return match ? { sessionId: decodeURIComponent(match[1]), resource: match[2] } : null;
+};
+const messageWrite = async (body, sessionId) => {
+  const botId = stateBotId(body.botId);
+  return stateStore.appendMessage({ botId, sessionId, role: body.role, content: body.content, metadata: body.metadata });
+};
+const turnWrite = async (body, sessionId) => {
+  const botId = stateBotId(body.botId);
+  const turn = await stateStore.createTurn({ botId, sessionId, input: body.input, metadata: body.metadata });
+  const message = await stateStore.appendMessage({ botId, sessionId, role: 'user', content: body.input, metadata: { turnId: turn.turnId } });
+  return { ...turn, messageId: message.messageId, execution: 'queued-for-dsh-session-controller' };
+};
 
 const server = createServer(async (request, response) => {
   try {
@@ -120,6 +134,14 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/readyz')) return send(response, 200, { status: 'ok', assistantId, computerId, userId, bots: registry.list().length, capabilities, workspace, artifacts, state });
     if (request.method === 'GET' && url.pathname === '/v1/bots') return send(response, 200, { bots: registry.list() });
     if (request.method === 'GET' && url.pathname === '/v1/sessions') return send(response, 200, { sessions: await stateStore.sessions(stateBotId(url.searchParams.get('botId'))) });
+    if (request.method === 'GET' && sessionResource(url.pathname)?.resource === 'messages') {
+      const resource = sessionResource(url.pathname);
+      return send(response, 200, { messages: await stateStore.messages({ botId: stateBotId(url.searchParams.get('botId')), sessionId: resource.sessionId }) });
+    }
+    if (request.method === 'GET' && sessionResource(url.pathname)?.resource === 'turns') {
+      const resource = sessionResource(url.pathname);
+      return send(response, 200, { turns: await stateStore.turns(stateBotId(url.searchParams.get('botId')), resource.sessionId) });
+    }
     if (request.method === 'GET' && url.pathname === '/v1/memory') return send(response, 200, { memories: await stateStore.memory(stateBotId(url.searchParams.get('botId')), url.searchParams.get('query') || '') });
     if (request.method === 'GET' && url.pathname === '/v1/schedules') return send(response, 200, { schedules: await stateStore.schedules(stateBotId(url.searchParams.get('botId'))) });
     if (request.method === 'DELETE' && url.pathname.startsWith('/v1/schedules/')) {
@@ -132,6 +154,8 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/v1/computer/action') return send(response, 200, await computerAction(body));
     if (url.pathname === '/v1/computer/smoke') return send(response, 200, await computerSmoke(body));
     if (url.pathname === '/v1/sessions') return send(response, 201, await sessionCreate(body));
+    if (sessionResource(url.pathname)?.resource === 'messages') return send(response, 201, await messageWrite(body, sessionResource(url.pathname).sessionId));
+    if (sessionResource(url.pathname)?.resource === 'turns') return send(response, 202, await turnWrite(body, sessionResource(url.pathname).sessionId));
     if (url.pathname === '/v1/memory') return send(response, 201, await memoryWrite(body));
     if (url.pathname === '/v1/schedules') return send(response, 201, await scheduleWrite(body));
     return send(response, 404, { error: 'not_found' });

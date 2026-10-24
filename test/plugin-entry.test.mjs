@@ -45,6 +45,10 @@ test('client maps durable session, memory, and schedule operations to the public
   client.selectBot('researcher');
   await client.createSession({ title: 'Plan' });
   await client.listSessions();
+  await client.listMessages('session-1');
+  await client.appendMessage('session-1', { role: 'user', content: 'hello' });
+  await client.listTurns('session-1');
+  await client.submitTurn('session-1', { input: 'continue' });
   await client.remember({ key: 'project', content: 'marker' });
   await client.searchMemory('marker');
   await client.createSchedule({ scheduleId: 'review', runAt: 123 });
@@ -52,12 +56,14 @@ test('client maps durable session, memory, and schedule operations to the public
   await client.deleteSchedule('review');
   assert.deepEqual(requests.map(item => item.operation), [
     'personal-assistant.sessions.create', 'personal-assistant.sessions.list',
+    'personal-assistant.sessions.messages.list', 'personal-assistant.sessions.messages.append',
+    'personal-assistant.sessions.turns.list', 'personal-assistant.sessions.turns.submit',
     'personal-assistant.memory.upsert', 'personal-assistant.memory.search',
     'personal-assistant.schedules.create', 'personal-assistant.schedules.list',
     'personal-assistant.schedules.delete',
   ]);
   assert.equal(requests[0].payload.botId, 'researcher');
-  assert.equal(requests[2].payload.key, 'project');
+  assert.equal(requests.find(item => item.operation === 'personal-assistant.memory.upsert').payload.key, 'project');
 });
 
 

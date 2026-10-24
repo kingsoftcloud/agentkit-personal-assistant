@@ -32,7 +32,7 @@ export class PersonalAssistantStateStore {
 
   async init() {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
-    for (const name of ['sessions', 'memory', 'schedules']) {
+    for (const name of ['sessions', 'memory', 'schedules', 'messages', 'turns']) {
       const path = this.file(name);
       try { await readFile(path, 'utf8'); } catch (error) {
         if (error?.code !== 'ENOENT') throw error;
@@ -76,6 +76,61 @@ export class PersonalAssistantStateStore {
   async sessions(botId) {
     const id = identifier(botId, 'botId');
     return (await this.read('sessions')).filter(row => row.botId === id);
+  }
+
+  messages({ botId, sessionId } = {}) {
+    const id = identifier(botId, 'botId');
+    const session = identifier(sessionId, 'sessionId');
+    return this.read('messages').then(rows => rows.filter(row => row.botId === id && row.sessionId === session));
+  }
+
+  appendMessage({ botId, sessionId, role, content, metadata = {} } = {}) {
+    const id = identifier(botId, 'botId');
+    const session = identifier(sessionId, 'sessionId');
+    const messageRole = identifier(role, 'role');
+    if (!['system', 'user', 'assistant', 'tool'].includes(messageRole)) {
+      throw Object.assign(new TypeError('role is invalid'), { code: 'MESSAGE_ROLE_INVALID' });
+    }
+    const value = text(content, 'content');
+    return this.mutate('messages', rows => {
+      const message = Object.freeze({
+        messageId: `message-${randomUUID()}`,
+        botId: id,
+        sessionId: session,
+        role: messageRole,
+        content: value,
+        metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {},
+        createdAt: new Date().toISOString(),
+      });
+      rows.push(message);
+      return message;
+    });
+  }
+
+  turns(botId, sessionId) {
+    const id = identifier(botId, 'botId');
+    const session = identifier(sessionId, 'sessionId');
+    return this.read('turns').then(rows => rows.filter(row => row.botId === id && row.sessionId === session));
+  }
+
+  createTurn({ botId, sessionId, input, metadata = {} } = {}) {
+    const id = identifier(botId, 'botId');
+    const session = identifier(sessionId, 'sessionId');
+    const value = text(input, 'input');
+    return this.mutate('turns', rows => {
+      const turn = Object.freeze({
+        turnId: `turn-${randomUUID()}`,
+        botId: id,
+        sessionId: session,
+        input: value,
+        status: 'queued',
+        metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {},
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      rows.push(turn);
+      return turn;
+    });
   }
 
   createSession({ botId, title = '', metadata = {} } = {}) {
