@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { apply, createRuntime, name } from '../src/index.mjs';
+import { DshSessionControllerUnavailableError } from '../src/dsh-session-bridge.mjs';
 import {
   apply as applyClient,
   createPersonalAssistantClient,
@@ -24,6 +25,33 @@ test('client adapter requires an explicit gateway', async () => {
   const client = createPersonalAssistantClient();
   assert.throws(() => client.listBots(), PersonalAssistantGatewayUnavailableError);
   assert.equal(createRuntime(null, { enabled: true }).enabled, true);
+});
+
+test('host bridge admits a turn through the public DSH Session Controller', async () => {
+  const calls = [];
+  const promptSections = [];
+  const agent = { ctx: { get(name) { return name === 'systemPrompt' ? { section: section => promptSections.push(section) } : undefined; } } };
+  const controller = {
+    async projections() { return undefined; },
+    async create(request) { calls.push({ op: 'create', request }); },
+    async resolveAgent() { return { agent }; },
+    async prompt(request) { calls.push({ op: 'prompt', request }); return { accepted: true }; },
+  };
+  const runtime = createRuntime({ sessionController: controller }, {
+    profileId: 'profile-1',
+    bots: [{ botId: 'researcher', systemPromptRevision: 'r1', systemPrompt: 'You are a research assistant.', agentPreset: 'researcher-preset' }],
+  });
+  const result = await runtime.submitTurn({ botId: 'researcher', sessionId: 'session-1', input: 'open the browser' });
+  assert.equal(result.execution, 'dsh-session-controller');
+  assert.equal(calls[0].request.agentPreset, 'researcher-preset');
+  assert.equal(calls[1].request.content[0].text, 'open the browser');
+  assert.equal(calls[1].request.mode, 'queue');
+  assert.equal(promptSections[0].text, 'You are a research assistant.');
+});
+
+test('host bridge fails closed when DSH Session Controller is absent', async () => {
+  const runtime = createRuntime({});
+  await assert.rejects(() => runtime.submitTurn({ botId: 'researcher', sessionId: 'session-1', input: 'hello' }), DshSessionControllerUnavailableError);
 });
 
 test('client exposes broker-backed browser and terminal operations without auto-connect', async () => {

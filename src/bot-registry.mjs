@@ -70,6 +70,7 @@ export function normalizeBotDefinition(input = {}, profileId = 'default') {
   const displayName = requiredString(input.displayName ?? input.name ?? botId, 'displayName');
   const systemPromptRevision = requiredString(input.systemPromptRevision, 'systemPromptRevision');
   const systemPrompt = input.systemPrompt === undefined ? undefined : requiredString(input.systemPrompt, 'systemPrompt');
+  const agentPreset = input.agentPreset === undefined ? undefined : requiredString(input.agentPreset, 'agentPreset');
   const memoryNamespace = input.memoryNamespace === undefined
     ? `assistant:${normalizedProfile}:bot:${botId}`
     : requiredString(input.memoryNamespace, 'memoryNamespace');
@@ -80,6 +81,7 @@ export function normalizeBotDefinition(input = {}, profileId = 'default') {
     displayName,
     systemPromptRevision,
     ...(systemPrompt === undefined ? {} : { systemPrompt }),
+    ...(agentPreset === undefined ? {} : { agentPreset }),
     memoryNamespace,
     toolPolicy: input.toolPolicy ?? {},
     metadata: Object.freeze({ ...metadata }),
@@ -136,6 +138,7 @@ export class BotRegistry {
       botId: bot.botId,
       systemPromptRevision: bot.systemPromptRevision,
       ...(bot.systemPrompt === undefined ? {} : { systemPrompt: bot.systemPrompt }),
+      ...(bot.agentPreset === undefined ? {} : { agentPreset: bot.agentPreset }),
       memoryNamespace: bot.memoryNamespace,
       toolPolicy: bot.toolPolicy,
     };

@@ -28,7 +28,8 @@
     "./schedule-manager": "./src/schedule-manager.mjs",
     "./persistent-state": "./src/persistent-state.mjs",
     "./workspace": "./src/workspace.mjs",
-    "./implementation-capabilities": "./src/implementation-capabilities.mjs"
+    "./implementation-capabilities": "./src/implementation-capabilities.mjs",
+    "./dsh-session-bridge": "./src/dsh-session-bridge.mjs"
   },
   "files": [
     "src",
@@ -43,7 +44,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "check": "node --check src/index.mjs && node --check src/bot-registry.mjs && node --check src/computer-broker-protocol.mjs && node --check src/computer-broker.mjs && node --check src/client/index.mjs && npm test && node --check src/cloud-computer-tools.mjs && node --check src/implementation-capabilities.mjs && node --check src/persistent-state.mjs && node --check src/schedule-manager.mjs && node --check src/workspace.mjs && node --check runtime/assistant-runtime.mjs && node --check runtime/computer-agentd.mjs",
+    "check": "node --check src/index.mjs && node --check src/bot-registry.mjs && node --check src/computer-broker-protocol.mjs && node --check src/computer-broker.mjs && node --check src/client/index.mjs && npm test && node --check src/cloud-computer-tools.mjs && node --check src/dsh-session-bridge.mjs && node --check src/implementation-capabilities.mjs && node --check src/persistent-state.mjs && node --check src/schedule-manager.mjs && node --check src/workspace.mjs && node --check runtime/assistant-runtime.mjs && node --check runtime/computer-agentd.mjs",
     "pack:check": "npm pack --dry-run",
     "build:artifacts": "node scripts/build-artifacts.mjs"
   },

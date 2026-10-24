@@ -98,3 +98,13 @@ paths injected by runtime-service (`WORKSPACE_PATH` and the assistant state
 path). A submitted turn is durably queued for the DSH Session Controller; the
 controller/model adapter remains the next integration boundary rather than a
 fake local inference loop.
+
+When the Host process has injected the public DSH `sessionController`, the Host
+entry exposes `runtime.submitTurn(...)`. It resolves or creates the requested
+Session and calls `sessionController.prompt(...)`; the returned receipt is
+marked `execution: "dsh-session-controller"` only after DSH accepts the prompt.
+A Host without that service fails with
+`DSH_SESSION_CONTROLLER_UNAVAILABLE`. The standalone cloud HTTP artifact still
+has no in-process DSH Host, so its durable HTTP turn endpoint remains an
+explicit queue until runtime-service supplies a Session Controller bridge; it
+must never be presented as completed model work.

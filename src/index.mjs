@@ -3,7 +3,9 @@ import { createComputerBrokerClient } from './computer-broker.mjs';
 import { createComputerToolset } from './cloud-computer-tools.mjs';
 import { createScheduleManager } from './schedule-manager.mjs';
 import { workspaceDir } from './workspace.mjs';
+import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 export { IMPLEMENTED_RUNTIME_CAPABILITIES } from './implementation-capabilities.mjs';
+export { DshSessionControllerUnavailableError, createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 
 export const name = '@kingsoftcloud/agentkit-personal-assistant';
 export const inject = Object.freeze([
@@ -24,6 +26,11 @@ export function createRuntime(ctx, config = {}) {
   const computerBroker = config.computerBroker ?? createComputerBrokerClient({ transport: config.computerTransport });
   const scheduleManager = config.scheduleManager ?? createScheduleManager({ now: config.now });
   const workspace = workspaceDir(config.workspace);
+  const turnBridge = config.turnBridge ?? createDshTurnBridge({
+    ctx,
+    sessionController: config.sessionController ?? sessionControllerFromContext(ctx),
+    registry,
+  });
   const createBotComputerToolset = ({ botId, ...options } = {}) => createComputerToolset({
     broker: computerBroker, userId: config.userId, assistantId: config.assistantId, computerId: config.computerId,
     botId: botId ?? config.botId, ...options,
@@ -36,6 +43,8 @@ export function createRuntime(ctx, config = {}) {
     computerBroker,
     scheduleManager,
     workspace,
+    turnBridge,
+    submitTurn: turnBridge.submitTurn,
     createComputerToolset: createBotComputerToolset,
   });
 }
