@@ -28,7 +28,7 @@ function parseFrames(state, chunk, onFrame) {
   }
 }
 
-export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, botIdOf, taskIdOf }) {
+export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf }) {
   server.on('upgrade', (request, socket, head) => {
     const pathname = new URL(request.url || '/', 'http://desktop.local').pathname;
     if (!['/v1/desktop/ws', '/v1/computer/desktop/ws'].includes(pathname)) { socket.destroy(); return; }
@@ -54,11 +54,11 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       if (state.closed || !state.sessionId || state.frameBusy) return;
       state.frameBusy = true;
       try {
-        const result = await brokerDesktopRequest('/broker/desktop/frame', { sessionId: state.sessionId });
+        const result = brokerDesktopFrameBinary ? await brokerDesktopFrameBinary({ sessionId: state.sessionId }) : await brokerDesktopRequest('/broker/desktop/frame', { sessionId: state.sessionId });
         if (!result.unchanged && result.data) {
           const metadata = { type: 'frame', seq: result.seq, format: result.format, width: result.width, height: result.height, bytes: result.bytes };
           send(metadata);
-          const bytes = Buffer.from(result.data, 'base64');
+          const bytes = Buffer.isBuffer(result.data) ? result.data : Buffer.from(result.data, 'base64');
           if (bytes.length > maxFrame) throw Object.assign(new Error('desktop frame too large'), { code: 'DESKTOP_FRAME_TOO_LARGE' });
           if (!state.closed) socket.write(frame(2, bytes));
         } else send({ type: 'frame', seq: result.seq, unchanged: true, width: result.width, height: result.height });

@@ -16,6 +16,10 @@ const send = (response, status, body) => {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(body));
 };
+const sendFrame = (response, status, frame) => {
+  response.writeHead(status, { 'content-type': 'image/jpeg', 'cache-control': 'no-store', 'x-desktop-seq': String(frame.seq || 0), 'x-desktop-width': String(frame.width || 1280), 'x-desktop-height': String(frame.height || 800), 'x-desktop-bytes': String(frame.bytes || 0), ...(frame.unchanged ? { 'x-desktop-unchanged': '1' } : {}) });
+  if (frame.data && !frame.unchanged) response.end(Buffer.from(frame.data, 'base64')); else response.end();
+};
 const readBody = request => new Promise((resolve, reject) => {
   const chunks = [];
   request.on('data', chunk => chunks.push(chunk));
@@ -101,6 +105,10 @@ const server = createServer(async (request, response) => {
     if (request.url === '/broker/desktop/frame') {
       desktopIdentity(body);
       return send(response, 200, await desktop.frame({ sessionId: body.sessionId, afterSeq: body.afterSeq }));
+    }
+    if (request.url === '/broker/desktop/frame-binary') {
+      desktopIdentity(body);
+      return sendFrame(response, 200, await desktop.frame({ sessionId: body.sessionId, afterSeq: body.afterSeq }));
     }
     if (request.url === '/broker/desktop/input') {
       desktopIdentity(body);

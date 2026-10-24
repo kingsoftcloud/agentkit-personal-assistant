@@ -65,6 +65,11 @@ const brokerDesktopRequest = async (path, body) => {
   if (!result.ok) throw Object.assign(new Error(payload.error || 'computer broker request failed'), { code: payload.error || 'COMPUTER_BROKER_REQUEST_FAILED', status: result.status });
   return payload;
 };
+const brokerDesktopFrameBinary = async body => {
+  const result = await fetch(`${brokerEndpoint}/broker/desktop/frame-binary`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, userId, assistantId, computerId }) });
+  if (!result.ok) { const payload = await result.json().catch(() => ({})); throw Object.assign(new Error(payload.error || 'computer frame failed'), { code: payload.error || 'COMPUTER_FRAME_FAILED', status: result.status }); }
+  return { unchanged: result.headers.get('x-desktop-unchanged') === '1', seq: Number(result.headers.get('x-desktop-seq') || 0), width: Number(result.headers.get('x-desktop-width') || 1280), height: Number(result.headers.get('x-desktop-height') || 800), bytes: Number(result.headers.get('x-desktop-bytes') || 0), data: Buffer.from(await result.arrayBuffer()) };
+};
 const botIdOf = value => {
   const botId = String(value ?? '').trim();
   if (!botId) throw Object.assign(new Error('botId is required'), { code: 'BOT_REQUIRED' });
@@ -180,7 +185,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, botIdOf, taskIdOf });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf });
 server.listen(port, host);
 const close = () => server.close(() => process.exit(0));
 process.on('SIGTERM', close);
