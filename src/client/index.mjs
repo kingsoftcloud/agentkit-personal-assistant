@@ -67,6 +67,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 import { mapDisplayPoint, normalizeDisplay } from './desktop-view.mjs';
 import { publicBotDirectory } from './bot-directory.mjs';
 export const PERSONAL_ASSISTANT_CLIENT_BUILD = typeof __PA_CLIENT_BUILD__ === 'string' ? __PA_CLIENT_BUILD__ : '开发模式';
+const FIRST_FRAME_TIMEOUT_MS = 12_000;
 let clientReact;
 export function setClientReactRuntime(runtime) { clientReact = runtime; }
 const ui = {
@@ -155,7 +156,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
           const width = display.width * scale, height = display.height * scale;
           context.fillStyle = '#10151e'; context.fillRect(0, 0, canvas.width, canvas.height);
           context.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+          const waitingForFirstFrame = current.firstFrame !== null;
           current.frames += 1; clearTimeout(current.firstFrame); current.firstFrame = null; current.retries = 0;
+          if (waitingForFirstFrame) setNotice('');
           setPhase(current.readOnly ? 'readonly' : 'ready'); setAttempt(0);
         } catch { if (current.mounted) setNotice('桌面帧无法解码，请重试'); }
         finally { bitmap?.close(); }
@@ -173,7 +176,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
     if (!reconnecting) current.retries = 0;
     current.mode = mode; current.taskId ||= `studio-desktop-${Date.now()}`;
     current.receivedSeq = -1; current.frameMetadata = null;
-    setPhase(reconnecting ? 'reconnecting' : 'connecting'); setNotice('');
+    setPhase(reconnecting ? 'reconnecting' : 'connecting'); setNotice('首次或休眠后连接可能需要数秒，请稍候。');
     try {
       const ticket = await rpc('personal-assistant.desktop.ticket', { agentId: current.config.agentId, botId: selected, mode });
       if (!current.mounted || generation !== current.generation) return;
@@ -183,7 +186,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       socket.onopen = () => {
         if (!valid()) { socket.close(); return; }
         send({ type: 'open', botId: selected, taskId: current.taskId, mode, ...(ticket.leaseId ? { leaseId: ticket.leaseId } : {}) });
-        current.firstFrame = setTimeout(() => { if (valid()) { setNotice('首帧超过 12 秒，正在重连'); socket.close(4000, 'first frame timeout'); } }, 12000);
+        current.firstFrame = setTimeout(() => { if (valid()) { setNotice('云电脑响应较慢，正在重新连接'); socket.close(4000, 'first frame timeout'); } }, FIRST_FRAME_TIMEOUT_MS);
       };
       socket.onmessage = event => {
         if (!valid()) return;
@@ -196,7 +199,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
         let value; try { value = JSON.parse(event.data); } catch { return; }
         if (value.type === 'ready') {
           current.session = value.sessionId; current.readOnly = Boolean(value.readOnly); current.display = normalizeDisplay(value.display);
-          setReadOnly(current.readOnly); return;
+          setReadOnly(current.readOnly); setNotice('云电脑已连接，正在准备桌面画面'); return;
         }
         if (value.type === 'frame') { if (!value.unchanged) current.frameMetadata = value; return; }
         if (value.type === 'closed') { if (value.retryable !== true) ended(value); return; }
@@ -272,7 +275,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
     if (event.type === 'keydown') { if (!event.repeat && input({ type: 'key', action: 'down', key: name })) state.current.pressed.add(name); }
     else { input({ type: 'key', action: 'up', key: name }); state.current.pressed.delete(name); }
   };
-  const stateText = { loading: '正在检查助理状态', idle: '准备连接', unconfigured: '个人助理尚未开通', empty: '暂时没有可用助理', 'directory-error': '暂时无法读取助理列表', connecting: '正在连接云电脑', readonly: '只读旁观', ready: '正在控制云电脑', reconnecting: '正在恢复连接', hidden: '画面已暂停', closed: '桌面连接已结束', error: '连接暂时不可用' }[phase];
+  const stateText = { loading: '正在检查助理状态', idle: '准备连接', unconfigured: '个人助理尚未开通', empty: '暂时没有可用助理', 'directory-error': '暂时无法读取助理列表', connecting: '正在启动云电脑', readonly: '只读旁观', ready: '正在控制云电脑', reconnecting: '正在恢复连接', hidden: '画面已暂停', closed: '桌面连接已结束', error: '连接暂时不可用' }[phase];
   const buttonStyle = { ...ui, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', font: 'inherit' };
   const active = ['ready', 'readonly', 'hidden', 'reconnecting'].includes(phase);
   const selectable = bots.length > 0;

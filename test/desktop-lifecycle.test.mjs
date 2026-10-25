@@ -225,6 +225,60 @@ test('panel network failure retries automatically, while a control conflict fall
   assert.equal(panel.tickets().length, count, 'stale control close must not close or restart the observer connection');
 });
 
+test('冷启动 3.401 秒及网关慢态 6.072 秒仍在原连接等待，出帧后不再触发首帧重试', async t => {
+  for (const elapsed of [3401, 6072]) {
+    await t.test(`${elapsed}ms`, async child => {
+      const panel = panelHarness(child);
+      await flush(); panel.click('连接云电脑'); await flush();
+      const socket = panel.sockets.at(-1); socket.open();
+      assert.match(panel.text(), /正在启动云电脑/u);
+      assert.match(panel.text(), /首次或休眠后连接可能需要数秒/u);
+      child.mock.timers.tick(elapsed - 280); await flush();
+      assert.equal(socket.readyState, 1);
+      assert.equal(panel.tickets().length, 1, 'slow startup does not consume a retry or request another ticket');
+      socket.message({ type: 'ready', sessionId: 'cold-desktop', readOnly: false, display: { width: 1280, height: 800 } });
+      assert.match(panel.text(), /正在准备桌面画面/u);
+      child.mock.timers.tick(280); await flush();
+      assert.equal(panel.tickets().length, 1, 'ready metadata still waits for the first JPEG on the same connection');
+      socket.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); socket.message(new ArrayBuffer(8)); await flush();
+      assert.equal(panel.drawn.length, 1);
+      assert.match(panel.text(), /正在控制云电脑/u);
+      assert.doesNotMatch(panel.text(), /首次或休眠后|正在准备桌面画面/u);
+      child.mock.timers.tick(30_000); await flush();
+      assert.equal(panel.tickets().length, 1, 'displayed first frame cancels the old deadline');
+      assert.equal(panel.sockets.length, 1);
+      assert.equal(socket.readyState, 1);
+    });
+  }
+});
+
+test('只有 ready 元数据没有 JPEG 时仍保留 12 秒截止，不无限等待', async t => {
+  const panel = panelHarness(t);
+  await flush(); panel.click('只读旁观'); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  t.mock.timers.tick(3000); await flush();
+  socket.message({ type: 'ready', sessionId: 'no-frame', readOnly: true, display: { width: 1280, height: 800 } });
+  t.mock.timers.tick(8999); await flush();
+  assert.equal(panel.tickets().length, 1);
+  t.mock.timers.tick(1); await flush();
+  assert.equal(socket.readyState, 3);
+  t.mock.timers.tick(1000); await flush();
+  assert.equal(panel.tickets().length, 2);
+});
+
+test('等待首帧时手动断开会取消截止和重连，旧 ready 不能恢复控制', async t => {
+  const panel = panelHarness(t);
+  await flush(); panel.click('连接云电脑'); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  t.mock.timers.tick(6000); await flush();
+  panel.click('断开连接'); await flush();
+  socket.message({ type: 'ready', sessionId: 'late', readOnly: false, display: { width: 1280, height: 800 } });
+  t.mock.timers.tick(120_000); await flush();
+  assert.equal(panel.tickets().length, 1);
+  assert.equal(panel.sockets.length, 1);
+  assert.doesNotMatch(panel.text(), /正在控制云电脑|无法连接云电脑/u);
+});
+
 test('panel network retries remain bounded and a first-frame timeout remains retryable', async t => {
   const panel = panelHarness(t);
   await flush(); panel.click('只读旁观'); await flush();
