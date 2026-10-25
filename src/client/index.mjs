@@ -183,7 +183,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       socket.onopen = () => {
         if (!valid()) { socket.close(); return; }
         send({ type: 'open', botId: selected, taskId: current.taskId, mode, ...(ticket.leaseId ? { leaseId: ticket.leaseId } : {}) });
-        current.firstFrame = setTimeout(() => { if (valid()) { setNotice('首帧超过 3 秒，正在重连'); socket.close(4000, 'first frame timeout'); } }, 3000);
+        current.firstFrame = setTimeout(() => { if (valid()) { setNotice('首帧超过 12 秒，正在重连'); socket.close(4000, 'first frame timeout'); } }, 12000);
       };
       socket.onmessage = event => {
         if (!valid()) return;
