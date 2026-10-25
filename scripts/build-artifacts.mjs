@@ -9,6 +9,8 @@ const exec = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const output = resolve(process.env.PA_ARTIFACT_OUTPUT || join(root, 'dist', 'artifacts'));
 if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error(`artifact build requires Node 22, got ${process.versions.node}`);
+const studioHostArchive = process.env.PA_STUDIO_HOST_TARBALL;
+if (!studioHostArchive) throw new Error('PA_STUDIO_HOST_TARBALL must reference the reviewed Studio host tarball');
 
 async function hash(path) {
   return createHash('sha256').update(await readFile(path)).digest('hex');
@@ -42,6 +44,7 @@ async function pack(role, files) {
 
 const results = [
   await pack('runtime', [
+    ['host/agentkit-studio.tgz', resolve(studioHostArchive)],
     ['bin/assistant-runtime', join(root, 'scripts', 'assistant-runtime-launcher.sh')],
     ['runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
@@ -54,6 +57,7 @@ const results = [
     ['plugin/personal-assistant.plugin.json', join(root, 'personal-assistant.plugin.json')],
     ['plugin/personal-assistant.plugin.schema.json', join(root, 'personal-assistant.plugin.schema.json')],
     ['plugin/src', join(root, 'src')],
+    ['plugin/dist/client.js', join(root, 'dist', 'client.js')],
     ['plugin/runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['plugin/runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
     ['plugin/runtime/prepare-dsh-profile.mjs', join(root, 'runtime', 'prepare-dsh-profile.mjs')],
