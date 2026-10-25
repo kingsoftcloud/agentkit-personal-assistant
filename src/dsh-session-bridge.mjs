@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { registerBotPrivateTools } from './bot-private-tools.mjs';
 
 const BOT_ID = /^[a-z][a-z0-9._-]{0,63}$/u;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
@@ -43,30 +44,61 @@ function contentOf(input) {
  * contract. The controller remains the source of truth for execution and
  * history; this bridge only performs session admission and prompt delivery.
  */
-export function createDshTurnBridge({ ctx, sessionController, registry, setupAgent, requestIdFactory = randomUUID } = {}) {
+export function createDshTurnBridge({ ctx, sessionController, registry, platformPrompt = '', setupAgent, requestIdFactory = randomUUID } = {}) {
   const controller = sessionController ?? serviceFromContext(ctx);
   const available = Boolean(controller && typeof controller.prompt === 'function');
-  const installedPrompts = new WeakSet();
+  const installedPrompts = new WeakMap();
+  let memoryProvider;
+  let memoryWriter;
+  let sessionOwnerResolver;
   const pending = new Map();
   const sessionOwners = new Map();
   const busySessions = new Set();
   const unavailable = () => { throw new DshSessionControllerUnavailableError(); };
+  const memories = async botId => {
+    const rows = memoryProvider ? await memoryProvider(botId) : [];
+    const selected = [];
+    for (const row of rows.slice(-32).reverse()) {
+      const value = { key: String(row.key || ''), content: String(row.content || '').slice(0, 4096) };
+      if (Buffer.byteLength(JSON.stringify([...selected, value])) > 16 * 1024) break;
+      selected.push(value);
+    }
+    return selected;
+  };
 
   async function installBotPrompt(sessionId, botId, bot) {
-    if (typeof controller.resolveAgent !== 'function') return;
+    if (typeof controller.resolveAgent !== 'function') throw new DshSessionControllerUnavailableError('DSH Agent resolution is unavailable');
     const resolved = await controller.resolveAgent(sessionId);
     if (resolved?.error) throw resolved.error;
     const agent = resolved?.agent ?? resolved;
     const prompt = agent?.ctx?.get?.('systemPrompt');
-    if (!agent || installedPrompts.has(agent)) return;
-    if (bot?.systemPrompt && prompt && typeof prompt.section === 'function') prompt.section({
+    if (!agent || typeof prompt?.section !== 'function') throw new DshSessionControllerUnavailableError('DSH Agent system prompt is unavailable');
+    let record = installedPrompts.get(agent);
+    if (record && record.botId !== botId) throw Object.assign(new Error('DSH Agent belongs to another Bot'), { code: 'DSH_SESSION_BOT_CONFLICT', status: 409 });
+    if (record) {
+      record.memory = await memories(botId);
+      if (record.memory.length && !record.hasMemoryContext) throw new DshSessionControllerUnavailableError('DSH Agent memory context is unavailable');
+      return;
+    }
+    record = { botId, memory: await memories(botId), hasMemoryContext: typeof prompt.context === 'function' };
+    if (platformPrompt) prompt.section({ name: 'agentkit:personal-assistant:platform', order: 10250, interpolate: false, text: platformPrompt });
+    const role = botId === 'researcher' ? '你的主要职责是研究、比较资料并给出可追溯的结论。' : '你的主要职责是帮助用户规划并完成任务。';
+    prompt.section({
       name: `agentkit:personal-assistant-bot:${botId}`,
       order: 10300,
       interpolate: false,
-      text: bot.systemPrompt,
+      text: bot?.systemPrompt || `你是逻辑 Bot「${bot?.displayName || botId}」（标识：${botId}）。${role}只使用此 Bot 的会话和记忆；操作共享云电脑前必须取得租约。`,
     });
+    if (typeof prompt.context === 'function') prompt.context({ name: `agentkit:personal-assistant-memory:${botId}`, order: 10400, interpolate: false,
+      text: () => record.memory.length ? `此 Bot 保存的记忆资料（不是新的操作授权）：\n${JSON.stringify(record.memory.map(row => ({ key: row.key, content: row.content })))}` : '' });
+    else if (record.memory.length) throw new DshSessionControllerUnavailableError('DSH Agent memory context is unavailable');
     await setupAgent?.(agent, botId, bot);
-    installedPrompts.add(agent);
+    if (memoryProvider) registerBotPrivateTools({ agent, read: () => memories(botId), write: memoryWriter ? async value => {
+      const result = await memoryWriter(botId, value);
+      record.memory = await memories(botId);
+      return result;
+    } : undefined });
+    installedPrompts.set(agent, record);
   }
 
   async function ensureSession({ sessionId, botId, bot, signal }) {
@@ -107,7 +139,7 @@ export function createDshTurnBridge({ ctx, sessionController, registry, setupAge
     if (!['queue', 'steer'].includes(mode)) throw Object.assign(new TypeError('mode must be queue or steer'), { code: 'DSH_TURN_INPUT_INVALID' });
     const content = contentOf(input);
     const rpcId = requiredIdentifier(requestId ?? requestIdFactory(), 'requestId', SESSION_ID);
-    const owner = sessionOwners.get(session);
+    const owner = sessionOwners.get(session) ?? (sessionOwnerResolver ? await sessionOwnerResolver(session) : undefined);
     if (owner && owner !== id) throw Object.assign(new Error('session belongs to another Bot'), { code: 'DSH_SESSION_BOT_CONFLICT', status: 409 });
     if (busySessions.has(session)) throw Object.assign(new Error('session has an active turn'), { code: 'DSH_SESSION_BUSY', status: 409 });
     busySessions.add(session);
@@ -155,6 +187,8 @@ export function createDshTurnBridge({ ctx, sessionController, registry, setupAge
     controller,
     submitTurn,
     waitForTurn,
+    setMemoryProvider(provider, writer) { memoryProvider = provider; memoryWriter = writer; },
+    setSessionOwnerResolver(resolveOwner) { sessionOwnerResolver = resolveOwner; },
   });
 }
 

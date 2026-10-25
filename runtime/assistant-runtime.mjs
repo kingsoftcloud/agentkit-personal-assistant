@@ -6,6 +6,8 @@ import { BotRegistry } from '../src/bot-registry.mjs';
 import { createPersonalAssistantStateStore } from '../src/persistent-state.mjs';
 import { attachDesktopWebSocket } from './desktop-ws.mjs';
 import { pathToFileURL } from 'node:url';
+import { createHash, randomUUID } from 'node:crypto';
+import { createScheduleManager } from '../src/schedule-manager.mjs';
 
 export async function startAssistantRuntime({ runtime, env = process.env, argv = [] } = {}) {
 const values = new Map();
@@ -43,6 +45,8 @@ if (registryPath) {
 }
 const registry = runtime?.registry ?? new BotRegistry({ profileId: assistantId, bots });
 const turnBridge = runtime?.turnBridge;
+turnBridge?.setMemoryProvider?.(botId => stateStore.memory(botId), (botId, value) => stateStore.putMemory({ ...value, botId }));
+turnBridge?.setSessionOwnerResolver?.(async sessionId => (await stateStore.read('sessions')).find(row => row.sessionId === sessionId)?.botId);
 
 const broker = createComputerBrokerClient({ transport: createHttpComputerBrokerTransport({ baseUrl: brokerEndpoint }) });
 
@@ -131,7 +135,16 @@ const memoryWrite = async body => {
 };
 const scheduleWrite = async body => {
   const botId = stateBotId(body.botId);
-  return stateStore.putSchedule({ botId, scheduleId: body.scheduleId, runAt: body.runAt, metadata: body.metadata });
+  if (!turnBridge?.available) throw Object.assign(new Error('cloud DSH Session Controller unavailable'), { code: 'DSH_SESSION_CONTROLLER_UNAVAILABLE', status: 503 });
+  const input = String(body.input ?? body.metadata?.input ?? '').trim();
+  if (!input || Buffer.byteLength(input) > 64 * 1024) throw Object.assign(new Error('schedule input is required'), { code: 'SCHEDULE_INPUT_REQUIRED' });
+  if (!Number.isSafeInteger(body.runAt) || body.runAt <= Date.now()) throw Object.assign(new Error('schedule must be in the future'), { code: 'SCHEDULE_INVALID' });
+  const sessionId = body.sessionId || (await stateStore.createSession({ botId, title: `定时任务：${body.scheduleId}` })).sessionId;
+  await requireSession(botId, sessionId);
+  const row = await stateStore.putSchedule({ botId, scheduleId: body.scheduleId, runAt: body.runAt, metadata: { ...body.metadata, input, sessionId, generation: randomUUID() } });
+  await patchSchedule(row, { status: 'pending' });
+  armSchedule(row);
+  return { ...row, status: 'pending' };
 };
 const sessionResource = pathname => {
   const match = pathname.match(/^\/v1\/sessions\/([^/]+)\/(messages|turns)$/u);
@@ -139,6 +152,7 @@ const sessionResource = pathname => {
 };
 const messageWrite = async (body, sessionId) => {
   const botId = stateBotId(body.botId);
+  await requireSession(botId, sessionId);
   return stateStore.appendMessage({ botId, sessionId, role: body.role, content: body.content, metadata: body.metadata });
 };
 const requireSession = async (botId, sessionId) => {
@@ -151,6 +165,28 @@ const updateTurn = (turnId, patch) => stateStore.mutate('turns', rows => {
   return row;
 });
 const pendingTurns = new Set();
+const scheduler = runtime?.scheduleManager ?? createScheduleManager();
+const scheduleKey = row => `task-${createHash('sha256').update(JSON.stringify([row.botId, row.scheduleId])).digest('hex')}`;
+const patchSchedule = (record, patch) => stateStore.mutate('schedules', rows => {
+  const row = rows.find(item => item.botId === record.botId && item.scheduleId === record.scheduleId);
+  if (!row || row.metadata?.generation !== record.metadata?.generation) return null;
+  Object.assign(row, patch);
+  return row;
+});
+function armSchedule(row) {
+  scheduler.scheduleOnce({ scheduleId: scheduleKey(row), runAt: Math.min(Math.max(Date.now() + 1, row.nextRunAt), Date.now() + 2_147_483_647), task: async () => {
+    try {
+      if (row.nextRunAt > Date.now()) { armSchedule(row); return; }
+      const claimed = await patchSchedule(row, { status: 'running', startedAt: new Date().toISOString() });
+      if (!claimed) return;
+      const receipt = await turnWrite({ botId: row.botId, input: row.metadata.input, metadata: { scheduleId: row.scheduleId } }, row.metadata.sessionId);
+      await Promise.allSettled([...pendingTurns]);
+      const turn = (await stateStore.turns(row.botId, row.metadata.sessionId)).find(item => item.turnId === receipt.turnId);
+      await patchSchedule(row, { status: turn?.status === 'completed' ? 'completed' : 'failed', turnId: receipt.turnId, finishedAt: new Date().toISOString(), error: turn?.error || null });
+      console.info(JSON.stringify({ event: 'personal-assistant.schedule.finished', botId: row.botId, scheduleId: row.scheduleId, turnId: receipt.turnId, status: turn?.status || 'failed' }));
+    } catch (error) { await patchSchedule(row, { status: 'failed', error: error.code || 'SCHEDULE_EXECUTION_FAILED' }); }
+  } });
+}
 const turnWrite = async (body, sessionId) => {
   const botId = stateBotId(body.botId);
   await requireSession(botId, sessionId);
@@ -174,6 +210,15 @@ const turnWrite = async (body, sessionId) => {
   }
 };
 
+// 尚未开始的任务可恢复；中断时不自动重放未知结果，避免重复执行操作。
+await stateStore.mutate('turns', rows => {
+  for (const row of rows) if (row.status === 'running' || row.status === 'queued') Object.assign(row, { status: 'interrupted', error: 'RUNTIME_PROCESS_INTERRUPTED', updatedAt: new Date().toISOString() });
+});
+for (const row of await stateStore.read('schedules')) {
+  if (row.status === 'running') await patchSchedule(row, { status: 'interrupted', error: 'SCHEDULE_PROCESS_INTERRUPTED' });
+  else if ((!row.status || row.status === 'pending') && row.metadata?.input && row.metadata?.sessionId) armSchedule(row);
+}
+
 const server = createServer(async (request, response) => {
   try {
     const url = urlOf(request);
@@ -183,16 +228,20 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/v1/sessions') return send(response, 200, { sessions: await stateStore.sessions(stateBotId(url.searchParams.get('botId'))) });
     if (request.method === 'GET' && sessionResource(url.pathname)?.resource === 'messages') {
       const resource = sessionResource(url.pathname);
-      return send(response, 200, { messages: await stateStore.messages({ botId: stateBotId(url.searchParams.get('botId')), sessionId: resource.sessionId }) });
+      const botId = stateBotId(url.searchParams.get('botId')); await requireSession(botId, resource.sessionId);
+      return send(response, 200, { messages: await stateStore.messages({ botId, sessionId: resource.sessionId }) });
     }
     if (request.method === 'GET' && sessionResource(url.pathname)?.resource === 'turns') {
       const resource = sessionResource(url.pathname);
-      return send(response, 200, { turns: await stateStore.turns(stateBotId(url.searchParams.get('botId')), resource.sessionId) });
+      const botId = stateBotId(url.searchParams.get('botId')); await requireSession(botId, resource.sessionId);
+      return send(response, 200, { turns: await stateStore.turns(botId, resource.sessionId) });
     }
     if (request.method === 'GET' && url.pathname === '/v1/memory') return send(response, 200, { memories: await stateStore.memory(stateBotId(url.searchParams.get('botId')), url.searchParams.get('query') || '') });
     if (request.method === 'GET' && url.pathname === '/v1/schedules') return send(response, 200, { schedules: await stateStore.schedules(stateBotId(url.searchParams.get('botId'))) });
     if (request.method === 'DELETE' && url.pathname.startsWith('/v1/schedules/')) {
-      const removed = await stateStore.removeSchedule(stateBotId(url.searchParams.get('botId')), decodeURIComponent(url.pathname.slice('/v1/schedules/'.length)));
+      const botId = stateBotId(url.searchParams.get('botId')), scheduleId = decodeURIComponent(url.pathname.slice('/v1/schedules/'.length));
+      scheduler.cancel(scheduleKey({ botId, scheduleId }));
+      const removed = await stateStore.removeSchedule(botId, scheduleId);
       return send(response, 200, { removed });
     }
     if (request.method !== 'POST') return send(response, 404, { error: 'not_found' });
@@ -217,7 +266,7 @@ const server = createServer(async (request, response) => {
 });
 attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
-return { server, stateStore, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())) };
+return { server, stateStore, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

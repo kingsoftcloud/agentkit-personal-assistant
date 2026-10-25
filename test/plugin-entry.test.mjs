@@ -31,7 +31,7 @@ test('client adapter requires an explicit gateway', async () => {
 test('host bridge admits a turn through the public DSH Session Controller', async () => {
   const calls = [];
   const promptSections = [];
-  const agent = { ctx: { get(name) { return name === 'systemPrompt' ? { section: section => promptSections.push(section) } : undefined; } } };
+  const agent = { ctx: { on() {}, get(name) { return name === 'systemPrompt' ? { section: section => promptSections.push(section) } : name === 'tools' ? { restrict: filter => assert.deepEqual(filter, { allow: [] }), guard() {} } : undefined; } } };
   const controller = {
     async projections() { return undefined; },
     async create(request) { calls.push({ op: 'create', request }); },

@@ -6,6 +6,8 @@ import { workspaceDir } from './workspace.mjs';
 import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { registerPersonalAssistantHostGateway } from './host-gateway.mjs';
+import { loadPersonalAssistantManifest } from './platform-manifest.mjs';
+import { restrictPersonalAssistantToolScope } from './bot-tool-scope.mjs';
 export { IMPLEMENTED_RUNTIME_CAPABILITIES } from './implementation-capabilities.mjs';
 export { DshSessionControllerUnavailableError, createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 
@@ -50,6 +52,7 @@ export function createRuntime(ctx, config = {}) {
   const computerTransport = config.computerTransport ?? (typeof brokerEndpoint === 'string' && brokerEndpoint.trim()
     ? createHttpComputerBrokerTransport({ baseUrl: brokerEndpoint }) : undefined);
   const registry = new BotRegistry({ profileId: config.profileId ?? identity.assistantId ?? 'default', bots: configuredBots(config.bots, env) });
+  const platformPrompt = env.AGENTENGINE_MANIFEST_PATH ? loadPersonalAssistantManifest(env).prompt : (config.platformSystemPrompt ?? '');
   const computerBroker = config.computerBroker ?? createComputerBrokerClient({ transport: computerTransport });
   const scheduleManager = config.scheduleManager ?? createScheduleManager({ now: config.now });
   const workspace = workspaceDir(config.workspace);
@@ -57,7 +60,10 @@ export function createRuntime(ctx, config = {}) {
     ctx,
     sessionController: config.sessionController ?? sessionControllerFromContext(ctx),
     registry,
+    platformPrompt,
     setupAgent: async (agent, botId) => {
+      // 只限制这个 PA Agent；Host 文件、shell、subagent 等全局工具不能绕过电脑租约或读私有状态。
+      restrictPersonalAssistantToolScope(agent, botId);
       if (!identity.assistantId || !identity.computerId || !computerTransport) return;
       const toolset = createComputerToolset({ broker: computerBroker, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId, botId, taskId: `dsh:${agent.id}` });
       const registration = registerComputerTools({ agent, toolset });
