@@ -1,5 +1,5 @@
 /** Minimal authenticated WebSocket bridge for the Studio desktop view. */
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey, timingSafeEqual, verify } from 'node:crypto';
 
 const PROTOCOL = 'agentkit.personal-assistant.desktop.v1';
 const maxFrame = 300 * 1024;
@@ -12,6 +12,50 @@ const frame = (opcode, payload = Buffer.alloc(0)) => {
 };
 const accept = key => createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
 const jsonFrame = value => frame(1, JSON.stringify(value));
+const unauthorized = message => Object.assign(new Error(message), { status: 401, code: 'DESKTOP_UNAUTHORIZED' });
+const permitKeys = new Map();
+
+async function desktopJwks(env) {
+  if (env.AGENTKIT_DESKTOP_JWKS_JSON) return JSON.parse(env.AGENTKIT_DESKTOP_JWKS_JSON);
+  const source = String(env.AGENTKIT_DESKTOP_JWKS_URL || '');
+  if (!source) throw unauthorized('desktop verification keys are not configured');
+  const url = new URL(source);
+  if (url.username || url.password || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && env.AGENTKIT_DESKTOP_ALLOW_HTTP_JWKS === '1'))) throw unauthorized('desktop JWKS URL is not trusted');
+  const cached = permitKeys.get(source);
+  if (cached && cached.expires > Date.now()) return cached.value;
+  const response = await fetch(url, { signal: AbortSignal.timeout(3000), redirect: 'error' });
+  if (!response.ok) throw unauthorized('desktop verification keys unavailable');
+  const raw = await response.text();
+  if (raw.length > 64 * 1024) throw unauthorized('desktop verification keys exceed limit');
+  const value = JSON.parse(raw);
+  permitKeys.set(source, { value, expires: Date.now() + 60_000 });
+  return value;
+}
+
+/** 验证既有 Server workload 密钥签发的 JWS；不信任 caller 自带身份头。 */
+export async function verifyDesktopPermit(token, { assistantId, env = process.env, now = () => Date.now() } = {}) {
+  try {
+    if (typeof token !== 'string' || token.length > 16 * 1024) throw unauthorized('desktop permit is missing');
+    const segments = token.split('.');
+    if (segments.length !== 3 || segments.some(value => !/^[A-Za-z0-9_-]+$/u.test(value))) throw unauthorized('desktop permit is malformed');
+    const header = JSON.parse(Buffer.from(segments[0], 'base64url').toString('utf8'));
+    const claims = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8'));
+    if (header.alg !== 'EdDSA' || header.typ !== 'agentkit-desktop+jwt' || !header.kid) throw unauthorized('desktop permit algorithm is invalid');
+    const jwks = await desktopJwks(env);
+    const key = jwks?.keys?.find(value => value.kid === header.kid && value.kty === 'OKP' && value.crv === 'Ed25519');
+    if (!key || !verify(null, Buffer.from(`${segments[0]}.${segments[1]}`, 'ascii'), createPublicKey({ key, format: 'jwk' }), Buffer.from(segments[2], 'base64url'))) throw unauthorized('desktop permit signature is invalid');
+    const seconds = Math.floor(now() / 1000);
+    if (claims.iss !== 'agentengine-server' || claims.aud !== 'agentkit-personal-assistant-desktop' || claims.scope !== 'desktop' || claims.agentId !== assistantId || !claims.botId || !claims.jti || !['read', 'control'].includes(claims.mode)) throw unauthorized('desktop permit binding is invalid');
+    if (!Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp) || claims.iat > seconds || claims.exp <= seconds || claims.exp - claims.iat > 60) throw unauthorized('desktop permit expired');
+    return Object.freeze(claims);
+  } catch (error) { throw error?.status === 401 ? error : unauthorized('desktop permit could not be verified'); }
+}
+
+const loopback = address => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
+const equalToken = (left, right) => {
+  const first = Buffer.from(left), second = Buffer.from(right);
+  return first.length === second.length && timingSafeEqual(first, second);
+};
 
 function parseFrames(state, chunk, onFrame) {
   state.buffer = Buffer.concat([state.buffer, chunk]);
@@ -28,24 +72,35 @@ function parseFrames(state, chunk, onFrame) {
   }
 }
 
-export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf }) {
-  server.on('upgrade', (request, socket, head) => {
-    const pathname = new URL(request.url || '/', 'http://desktop.local').pathname;
+export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, env = process.env }) {
+  const usedPermits = new Map();
+  server.on('upgrade', async (request, socket, head) => {
+    const url = new URL(request.url || '/', 'http://desktop.local');
+    const pathname = url.pathname;
     if (!['/v1/desktop/ws', '/v1/computer/desktop/ws'].includes(pathname)) { socket.destroy(); return; }
+    if (url.search) { socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
     const authorization = String(request.headers.authorization || '');
-    const trustedSession = String(request.headers['x-agentengine-desktop-session'] || '');
-    const trustedAssistant = String(request.headers['x-agentengine-desktop-assistant-id'] || '');
-    if ((!runtimeToken || authorization !== `Bearer ${runtimeToken}`) && (!trustedSession || trustedAssistant !== assistantId)) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
+    const direct = loopback(request.socket.remoteAddress) && runtimeToken && equalToken(authorization, `Bearer ${runtimeToken}`);
+    let claims = null;
+    try {
+      if (!direct) {
+        claims = await verifyDesktopPermit(String(request.headers['x-agentengine-desktop-permit'] || ''), { assistantId, env });
+        for (const [nonce, expires] of usedPermits) if (expires <= Date.now()) usedPermits.delete(nonce);
+        if (usedPermits.has(claims.jti)) throw unauthorized('desktop permit already used');
+        usedPermits.set(claims.jti, claims.exp * 1000);
+      }
+    } catch { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
     const requested = String(request.headers['sec-websocket-protocol'] || '').split(',').map(value => value.trim()).filter(Boolean);
-    const protocol = requested.find(value => value === PROTOCOL) || PROTOCOL;
+    if (!requested.includes(PROTOCOL)) { socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
+    const protocol = PROTOCOL;
     const key = request.headers['sec-websocket-key'];
     if (!key) { socket.destroy(); return; }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept(key)}\r\nSec-WebSocket-Protocol: ${protocol}\r\n\r\n`);
     if (head?.length) socket.unshift(head);
-    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, lastInputAt: Date.now(), timer: null, frameBusy: false };
+    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, lastInputAt: Date.now(), timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve() };
     const send = value => { if (!state.closed) socket.write(jsonFrame(value)); };
     const close = async () => {
-      if (state.closed) return; state.closed = true; if (state.timer) clearTimeout(state.timer);
+      if (state.closed) return; state.closed = true; if (state.timer) clearTimeout(state.timer); if (state.renewTimer) clearInterval(state.renewTimer);
       if (state.sessionId) await brokerDesktopRequest('/broker/desktop/close', { sessionId: state.sessionId }).catch(() => {});
       if (state.autoLease && state.leaseId) await brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId }).catch(() => {});
       try { socket.end(frame(8)); } catch {}
@@ -54,11 +109,13 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       if (state.closed || !state.sessionId || state.frameBusy) return;
       state.frameBusy = true;
       try {
-        const result = brokerDesktopFrameBinary ? await brokerDesktopFrameBinary({ sessionId: state.sessionId }) : await brokerDesktopRequest('/broker/desktop/frame', { sessionId: state.sessionId });
+        if (typeof brokerDesktopFrameBinary !== 'function') throw Object.assign(new Error('binary desktop broker is unavailable'), { code: 'DESKTOP_BINARY_BROKER_REQUIRED' });
+        const result = await brokerDesktopFrameBinary({ sessionId: state.sessionId });
         if (!result.unchanged && result.data) {
           const metadata = { type: 'frame', seq: result.seq, format: result.format, width: result.width, height: result.height, bytes: result.bytes };
           send(metadata);
-          const bytes = Buffer.isBuffer(result.data) ? result.data : Buffer.from(result.data, 'base64');
+          if (!Buffer.isBuffer(result.data)) throw Object.assign(new Error('desktop broker did not return binary data'), { code: 'DESKTOP_BINARY_FRAME_REQUIRED' });
+          const bytes = result.data;
           if (bytes.length > maxFrame) throw Object.assign(new Error('desktop frame too large'), { code: 'DESKTOP_FRAME_TOO_LARGE' });
           if (!state.closed) socket.write(frame(2, bytes));
         } else send({ type: 'frame', seq: result.seq, unchanged: true, width: result.width, height: result.height });
@@ -69,19 +126,31 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       }
     };
     const onMessage = async (opcode, payload) => {
+      if (state.closed) return;
       if (opcode === 8) return close();
       if (opcode === 9) { socket.write(frame(10, payload)); return; }
       if (opcode !== 1) return;
       let body; try { body = JSON.parse(payload.toString('utf8')); } catch { send({ type: 'error', code: 'INVALID_JSON' }); return; }
       try {
         if (body.type === 'open') {
+          if (state.sessionId) throw Object.assign(new Error('desktop session already open'), { code: 'DESKTOP_SESSION_ALREADY_OPEN', status: 409 });
+          if (claims && body.botId !== claims.botId) throw Object.assign(new Error('desktop Bot does not match permit'), { code: 'DESKTOP_BOT_MISMATCH', status: 403 });
+          if (claims?.mode === 'read' && (body.mode === 'control' || body.leaseId)) throw Object.assign(new Error('desktop permit is read-only'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+          if (claims && body.leaseId && body.leaseId !== claims.leaseId) throw Object.assign(new Error('desktop lease does not match permit'), { code: 'DESKTOP_LEASE_MISMATCH', status: 403 });
           state.botId = botIdOf(body.botId); state.taskId = taskIdOf(body.taskId); state.leaseId = body.leaseId || null;
-          if (body.mode === 'control' && !state.leaseId) {
+          if ((claims ? claims.mode : body.mode) === 'control' && !state.leaseId) {
             const acquired = await brokerDesktopRequest('/broker/lease/acquire', { botId: state.botId, taskId: state.taskId, idempotencyKey: `desktop-ws:${state.botId}:${state.taskId}:${Date.now()}`, ttlMs: 120000 });
             state.leaseId = acquired.lease?.leaseId || null; state.autoLease = true;
           }
           const opened = await brokerDesktopRequest('/broker/desktop/session', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId || undefined });
-          state.sessionId = opened.sessionId; send({ type: 'ready', ...opened, protocol: PROTOCOL }); poll(); return;
+          state.sessionId = opened.sessionId;
+          if (state.autoLease) {
+            state.renewTimer = setInterval(() => {
+              void brokerDesktopRequest('/broker/lease/renew', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, ttlMs: 120000 }).catch(error => { send({ type: 'error', status: 409, code: error?.code || 'COMPUTER_LEASE_REQUIRED' }); void close(); });
+            }, 30_000);
+            state.renewTimer.unref?.();
+          }
+          send({ type: 'ready', ...opened, protocol: PROTOCOL }); poll(); return;
         }
         if (body.type === 'input') {
           if (!state.sessionId) throw Object.assign(new Error('desktop session is not open'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
@@ -91,9 +160,15 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         }
         if (body.type === 'close') return close();
         send({ type: 'error', code: 'DESKTOP_MESSAGE_UNSUPPORTED' });
-      } catch (error) { send({ type: 'error', status: error?.status || 400, code: error?.code || 'DESKTOP_REQUEST_FAILED', message: String(error?.message || 'desktop request failed') }); }
+      } catch (error) {
+        if (!state.sessionId && state.autoLease && state.leaseId) {
+          await brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId }).catch(() => {});
+          state.autoLease = false; state.leaseId = null;
+        }
+        send({ type: 'error', status: error?.status || 400, code: error?.code || 'DESKTOP_REQUEST_FAILED', message: String(error?.message || 'desktop request failed') });
+      }
     };
-    socket.on('data', chunk => { try { parseFrames(state, chunk, onMessage); } catch { close(); } });
+    socket.on('data', chunk => { try { parseFrames(state, chunk, (opcode, payload) => { state.pending = state.pending.then(() => onMessage(opcode, payload)).catch(() => close()); }); } catch { close(); } });
     socket.on('close', close); socket.on('error', close);
   });
 }
