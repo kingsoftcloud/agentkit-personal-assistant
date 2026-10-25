@@ -18,7 +18,7 @@ Lead 的 `cd996a6bb996eb3200a0f3d485d3edf8b52a1b84` 提供 ws 优先解析与客
 
 可继续使用 `verify-release.sh 0.1.4` 与修复后本地插件验收，不要求因 ws 修复升级云端。0.1.7 保留为另一个后续候选：标签 `0.1.7-candidate-20261026-a417e49`，digest `sha256:1a6905e84f16f75434be68b866aa81b1ee2acff692b070cfd062710e9deb83a3`；Computer 复用 `sha256:3327d446d2118b8b49282b6706e50699eec09eb4873df828794c649b5f72f87e`。完整条目与证据见《0.1.7-WS修复候选交付-20261026.md》。Lead 的 0.1.5 及演示实例保持原样。
 
-Lead 的独立 0.1.4 实例 `ar-20261026013234-a54f1401`：HTTP 200/Code 0、Pod 2/2；网关 health 200、ticket 175ms、握手 235ms、ready 280ms，目录 default/researcher。broker 原报告为 13/14，焦点项报 `_NET_ACTIVE_WINDOW` 不支持，继续保留失败。创建和通信链路可用不等于整套 GUI 全通过；不因缺少本期要求的 WM 而静默 SKIP。原 namespace 后续查询 NotFound，不能补推当时进程状态。
+Lead 的独立 0.1.4 实例 `ar-20261026013234-a54f1401`：HTTP 200/Code 0、Pod 2/2；网关 health 200、ticket 175ms、握手 235ms、ready 280ms，目录 default/researcher。broker 原报告为13/14，焦点项报`_NET_ACTIVE_WINDOW`不支持，原始失败保留。后续已定性为会话启动时WM尚未就绪的竞态，不记环境限制或跳过；修复和复验见[WM就绪竞态与焦点复验](./WM就绪竞态与焦点复验-20261026.md)。原namespace后续查询NotFound，没有把其他版本的通过结果改写为该原实例14/14。
 
 下文保留最初创建及 0.1.4 构建的历史证据，不把当时镜像、早期本地包或验收状态冒充本次发布状态。
 

@@ -19,7 +19,7 @@ Lead 报告网关 health 200、ticket 175ms、握手 235ms、ready 280ms，目�
 
 本方随后在指定 b56be622 计算集群只读查询，得到 `Error from server (NotFound): namespaces "ar-20261026013234-a54f1401" not found`，因此不能补推当时 WM 是否存在、启动是否有竞态或是否中途退出。另在完全相同 digest 的 0.1.4 Computer 镜像内查证：`/usr/bin/fluxbox`、`/usr/bin/Xvfb` 均存在，desktop-session.mjs 含 spawnWindowManager 与 spawn('fluxbox')；记录在 `.artifacts/cordis-config-transition-20261026/computer014-wm-source.json`。不能仅凭 _NET_ACTIVE_WINDOW 查询失败断言产品设计为无 WM。
 
-仅 broker 协议测试可以显式声明无 WM，并把焦点检查记为“不适用”；但面向本期整桌面 GUI 产品，WM/焦点属于必验项。相同镜像/部署承诺 GUI 却缺少 WM 时仍记失败，不能静默 SKIP 后称为 14/14。下一次复验应先等 WM/EWMH 就绪，再点击两个窗口并记录活动窗口；不通过时保留 WM 进程和启动错误。
+面向本期整桌面GUI产品，WM/焦点属于必验项，不能因为属性暂不可用而记成环境限制或跳过。Lead后续冷启动复验和本方启动回归已将问题定性为WM就绪竞态；源码已补就绪等待与启动失败处理，详见[WM就绪竞态与焦点复验](./WM就绪竞态与焦点复验-20261026.md)。原0.1.4报告仍保留13/14，不用新版本复验改写历史数字。
 
 ## OI-8 的短期配置路径
 

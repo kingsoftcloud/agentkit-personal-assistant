@@ -3,9 +3,79 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createDesktopController, createMjpegFrameParser } from '../runtime/desktop-session.mjs';
+import { createDesktopController as createDesktopControllerWithWmProbe, createMjpegFrameParser } from '../runtime/desktop-session.mjs';
 
 function fakeProcess() { const p = new EventEmitter(); p.exitCode = null; p.killed = false; p.kill = () => { p.killed = true; p.exitCode = 0; p.emit('exit', 0); }; return p; }
+const readyWindowProperties = '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x400001\n_NET_ACTIVE_WINDOW(WINDOW): window id # 0x800002\n';
+// 采集/输入等用例的假桌面已就绪；启动竞态用例直接使用原始控制器和受控 EWMH 响应。
+function createDesktopController(options) {
+  return createDesktopControllerWithWmProbe({ ...options, exec: (file, ...args) => file === 'xprop'
+    ? Promise.resolve({ stdout: readyWindowProperties }) : options.exec(file, ...args) });
+}
+
+test('X11 可连接但 WM 尚未发布活动窗口时，不得提前返回可操作桌面', async () => {
+  let ready = false, resolved = false, started;
+  const launched = new Promise(resolve => { started = resolve; });
+  const controller = createDesktopControllerWithWmProbe({
+    readWindowBindings: async () => Buffer.from('OnDesktop Mouse1 :HideMenus\n'),
+    spawn(file) { if (file === 'fluxbox') started(); return fakeProcess(); },
+    exec: async file => ({ stdout: file === 'xprop'
+      ? ready ? readyWindowProperties : '_NET_ACTIVE_WINDOW:  no such atom on any window.\n'
+      : '' }),
+  });
+  const opening = controller.openSession({ identity: {} }).then(value => { resolved = true; return value; });
+  try {
+    await launched;
+    await new Promise(resolve => setTimeout(resolve, 40));
+    assert.equal(resolved, false, 'Xvfb/Fluxbox 进程存在不能代替 WM/EWMH 就绪');
+    ready = true;
+    const session = await opening;
+    assert.ok(session.sessionId);
+  } finally { ready = true; await opening.catch(() => {}); await controller.dispose(); }
+});
+
+test('WM 存在但活动窗口为空时超时失败，清理桌面后允许重新启动', async () => {
+  let ready = false; const children = [];
+  const controller = createDesktopControllerWithWmProbe({
+    windowManagerReadyTimeoutMs: 120,
+    readWindowBindings: async () => Buffer.from('OnDesktop Mouse1 :HideMenus\n'),
+    spawn(file) { const child = fakeProcess(); children.push({ file, child }); return child; },
+    exec: async file => ({ stdout: file === 'xprop' ? ready ? readyWindowProperties
+      : '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x400001\n_NET_ACTIVE_WINDOW(WINDOW): window id # 0x0\n' : '' }),
+  });
+  try {
+    await assert.rejects(controller.openSession({ identity: {} }), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503 });
+    assert.equal(controller.stats().sessions, 0);
+    assert.ok(children.every(({ child }) => child.killed), '失败后不能保留半启动的桌面');
+    ready = true;
+    assert.ok((await controller.openSession({ identity: {} })).sessionId);
+    assert.equal(children.filter(({ file }) => file === 'Xvfb').length, 2);
+  } finally { await controller.dispose(); }
+});
+
+for (const mode of ['exit', 'error']) {
+  test(`Fluxbox 启动${mode === 'exit' ? '退出' : '报错'}必须失败，不能继续返回桌面 ready`, async () => {
+    const children = [];
+    const controller = createDesktopControllerWithWmProbe({
+      windowManagerReadyTimeoutMs: 120,
+      readWindowBindings: async () => Buffer.from('OnDesktop Mouse1 :HideMenus\n'),
+      spawn(file) {
+        const child = fakeProcess(); children.push(child);
+        if (file === 'fluxbox') queueMicrotask(() => {
+          if (mode === 'exit') { child.exitCode = 1; child.emit('exit', 1); }
+          else child.emit('error', Object.assign(new Error('spawn fluxbox ENOENT'), { code: 'ENOENT' }));
+        });
+        return child;
+      },
+      exec: async file => ({ stdout: file === 'xprop' ? readyWindowProperties : '' }),
+    });
+    try {
+      await assert.rejects(controller.openSession({ identity: {} }), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503 });
+      assert.equal(controller.stats().sessions, 0);
+      assert.ok(children.every(child => child.exitCode !== null || child.killed));
+    } finally { await controller.dispose(); }
+  });
+}
 
 test('窗口管理器逐字复制系统默认绑定，并使用独立 HOME 而非继承旧配置', async () => {
   const defaults = Buffer.from('# 完整系统默认值\nOnTitlebar Mouse1 :MacroCmd {Raise} {Focus} {ActivateTab}\nMod4 c :Exec xcalc\n');

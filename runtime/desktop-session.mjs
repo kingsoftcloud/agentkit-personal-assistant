@@ -91,10 +91,12 @@ export function createDesktopController({
   onIdle = null,
   idleTimeoutMs = DESKTOP_IDLE_TIMEOUT_MS,
   idleRetentionMs = DESKTOP_IDLE_RETENTION_MS,
+  windowManagerReadyTimeoutMs = 5000,
 } = {}) {
   const sessions = new Map();
   let xvfb;
   let wm;
+  let windowManagerFailure;
   let terminalProcess;
   let collector;
   let collectorStarting;
@@ -157,8 +159,19 @@ export function createDesktopController({
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
     }
-    wm = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit', '-no-toolbar'], { env: { ...environment, HOME: wmConfiguration }, stdio: 'ignore' });
-    wm.once?.('exit', () => { wm = undefined; });
+    windowManagerFailure = undefined;
+    const child = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit', '-no-toolbar'], { env: { ...environment, HOME: wmConfiguration }, stdio: 'ignore' });
+    wm = child;
+    child.once?.('error', error => {
+      if (wm !== child) return;
+      windowManagerFailure = Object.assign(new Error(`Fluxbox failed to start: ${error.message}`), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503, cause: error });
+      displayReady = undefined;
+    });
+    child.once?.('exit', code => {
+      if (wm !== child) return;
+      wm = undefined; displayReady = undefined;
+      windowManagerFailure = Object.assign(new Error(`Fluxbox exited before desktop shutdown (${code})`), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503 });
+    });
   };
   const spawnTerminal = () => {
     if (!terminal || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
@@ -184,9 +197,34 @@ export function createDesktopController({
       if (now() >= deadline) throw Object.assign(new Error(`Xvfb display ${display} did not become ready`), { code: 'DESKTOP_DISPLAY_UNAVAILABLE', cause: lastError });
       await spawnWindowManager();
       spawnTerminal();
+      // Xvfb 可连接、Fluxbox 进程存在均不能证明窗口已被 WM 接管。
+      // xprop 在属性不存在时也可能 exit 0，必须检查 WINDOW 类型的非零 XID。
+      const wmDeadline = performance.now() + windowManagerReadyTimeoutMs;
+      let wmReady = false, probeError;
+      while (performance.now() < wmDeadline) {
+        if (disposed) throw Object.assign(new Error('desktop controller is disposed'), { code: 'DESKTOP_DISPOSED' });
+        if (windowManagerFailure) throw windowManagerFailure;
+        if (!wm || wm.exitCode !== null || wm.killed) break;
+        try {
+          const result = await exec('xprop', ['-display', display, '-root', '_NET_SUPPORTING_WM_CHECK', '_NET_ACTIVE_WINDOW'], {
+            env: environment, maxBuffer: 4096, timeout: Math.max(1, Math.min(500, Math.ceil(wmDeadline - performance.now()))),
+          });
+          const output = String(result.stdout);
+          const hasWindow = name => {
+            const value = output.match(new RegExp(`^${name}\\(WINDOW\\): window id # (0x[0-9a-f]+)\\s*$`, 'im'))?.[1];
+            return value !== undefined && BigInt(value) !== 0n;
+          };
+          wmReady = hasWindow('_NET_SUPPORTING_WM_CHECK') && (!terminal || hasWindow('_NET_ACTIVE_WINDOW'));
+          if (windowManagerFailure) throw windowManagerFailure;
+          if (wmReady) break;
+        } catch (error) { probeError = error; }
+        if (windowManagerFailure) throw windowManagerFailure;
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(50, wmDeadline - performance.now()))));
+      }
+      if (!wmReady) throw Object.assign(new Error(`Fluxbox on ${display} did not publish a ready desktop within ${windowManagerReadyTimeoutMs}ms`), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503, cause: probeError });
       return true;
     })();
-    try { await displayReady; } catch (error) { displayReady = undefined; throw error; }
+    try { await displayReady; } catch (error) { displayReady = undefined; await stopDisplay(); throw error; }
     return displayReady;
   };
   const ensureDisplay = async () => {
