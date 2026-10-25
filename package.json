@@ -41,7 +41,7 @@
     "LICENSE",
     "NOTICE",
     "personal-assistant.plugin.schema.json",
-    "dist",
+    "dist/client.js",
     "docs"
   ],
   "scripts": {
