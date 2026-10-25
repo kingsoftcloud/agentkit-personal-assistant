@@ -230,6 +230,10 @@ test('panel network retries remain bounded and a first-frame timeout remains ret
   await flush(); panel.click('只读旁观'); await flush();
   panel.sockets.at(-1).open();
   t.mock.timers.tick(3000); await flush();
+  assert.equal(panel.tickets().length, 1, 'lazy desktop startup must not trigger a retry at three seconds');
+  t.mock.timers.tick(8999); await flush();
+  assert.equal(panel.tickets().length, 1, 'keep the existing twelve-second client recovery boundary');
+  t.mock.timers.tick(1); await flush();
   t.mock.timers.tick(1000); await flush();
   assert.equal(panel.tickets().length, 2, 'first-frame timeout is an abnormal close and may reconnect');
   for (const delay of [2000, 4000, 8000, 8000]) {
