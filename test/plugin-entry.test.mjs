@@ -130,8 +130,8 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
   assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist']);
   assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
-  assert.equal(entries[0].component(), '请启用 Personal Assistant 插件并配置云网关');
-  assert.equal(entries[1].component(), 'PA');
+  assert.equal(entries[0].component(), '个人助理页面尚未就绪，请重新打开');
+  assert.equal(entries[1].component(), '助');
   assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
 });
 

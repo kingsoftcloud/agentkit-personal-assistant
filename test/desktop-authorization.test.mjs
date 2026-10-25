@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { createServer, request } from 'node:http';
 import { attachDesktopWebSocket, verifyDesktopPermit } from '../runtime/desktop-ws.mjs';
+import { DIRECTORY_BOT_ID } from '../src/client/bot-directory.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'server-test' };
@@ -84,4 +85,29 @@ test('desktop socket rejects forged headers, locks read permit Bot/mode, consume
   assert.equal(calls.some(value => value.path.includes('/acquire')), false);
   assert.equal((await connect(port, { 'X-AgentEngine-Desktop-Permit': token })).status, 401);
   client.socket.destroy();
+});
+
+test('目录授权只返回助理展示字段，不开桌面、不申请租约，且不能改作控制', async t => {
+  const calls = [];
+  const server = createServer();
+  attachDesktopWebSocket({ server, runtimeToken: 'private-token-at-least-24-characters', assistantId: 'ar-test', env,
+    botIdOf: value => value, taskIdOf: value => value,
+    listBots: () => [{ botId: 'writer', displayName: '写作助理', systemPrompt: 'private prompt' }],
+    brokerDesktopRequest: async path => { calls.push(path); return {}; },
+    brokerDesktopFrameBinary: async () => { calls.push('frame'); return {}; },
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const clients = [];
+  t.after(() => clients.forEach(client => client.socket?.destroy()));
+  for (const [botId, mode] of [[DIRECTORY_BOT_ID, 'read'], ['writer', 'read'], [DIRECTORY_BOT_ID, 'control']]) {
+    const client = await connect(server.address().port, { 'X-AgentEngine-Desktop-Permit': permit({ botId, mode }) }); clients.push(client);
+    client.send({ type: 'bots.list' });
+    if (botId === DIRECTORY_BOT_ID && mode === 'read') assert.deepEqual((await client.next(value => value.type === 'bots')).bots, [{ botId: 'writer', displayName: '写作助理' }]);
+    else assert.equal((await client.next(value => value.type === 'error')).status, 403);
+  }
+  const reader = await connect(server.address().port, { 'X-AgentEngine-Desktop-Permit': permit({ botId: DIRECTORY_BOT_ID, mode: 'read' }) }); clients.push(reader);
+  reader.send({ type: 'open', botId: DIRECTORY_BOT_ID, taskId: 't' });
+  assert.equal((await reader.next(value => value.type === 'error')).status, 403);
+  assert.deepEqual(calls, []);
 });

@@ -1,10 +1,11 @@
 /** 通过 DSH 已鉴权 Connection RPC 转接到固定云网关；凭据始终留在 Host。 */
+import { DIRECTORY_BOT_ID, publicBotDirectory } from './client/bot-directory.mjs';
 const ENDPOINT = '/api/personal-assistant';
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket']);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -21,11 +22,40 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
   async function request(operation, payload = {}, signal) {
     if (!plain(payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求参数格式错误');
     if (operation === 'personal-assistant.configuration') return {
-      configured, agentId, gatewayUrl: base?.href || '',
-      botDirectoryAvailable: false,
-      note: configured ? '云端尚未提供 Bot 目录，请填写已创建的 Bot ID' : '请先在插件 Host 配置云网关地址、真实 Agent ID 与 API Key',
+      configured, ...(configured ? { agentId } : {}),
     };
-    if (operation === 'personal-assistant.bots.list') return { bots: [], directoryAvailable: false, note: '云端尚未提供 Bot 目录，请填写已创建的 Bot ID' };
+    if (operation === 'personal-assistant.bots.list') {
+      if (!configured) return { bots: [], directoryAvailable: false };
+      const ticket = await request('personal-assistant.desktop.ticket', { botId: DIRECTORY_BOT_ID, mode: 'read' }, signal);
+      if (typeof WebSocketImpl !== 'function') throw fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 503);
+      const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
+      const bots = await new Promise((resolve, reject) => {
+        let socket, settled = false;
+        const finish = (error, rows) => {
+          if (settled) return; settled = true;
+          querySignal.removeEventListener('abort', abort);
+          try { socket?.close(1000, 'directory complete'); } catch {}
+          if (error) reject(error); else resolve(rows);
+        };
+        const abort = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT', '读取助理列表超时，请重试', 504));
+        if (querySignal.aborted) return abort();
+        querySignal.addEventListener('abort', abort, { once: true });
+        try { socket = new WebSocketImpl(ticket.wsUrl, ['agentkit.personal-assistant.desktop.v1', `agentkit.desktop.ticket.${ticket.ticket}`]); }
+        catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502)); return; }
+        socket.onopen = () => socket.send(JSON.stringify({ type: 'bots.list' }));
+        socket.onerror = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502));
+        socket.onclose = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '助理目录连接已结束，请重试', 502));
+        socket.onmessage = event => {
+          try {
+            if (typeof event.data !== 'string' || event.data.length > 64 * 1024) throw new Error('invalid directory');
+            const value = JSON.parse(event.data);
+            if (value.type === 'bots') finish(null, publicBotDirectory(value.bots));
+            else if (value.type === 'error') finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', value.code === 'DESKTOP_MESSAGE_UNSUPPORTED' ? '当前云端版本尚不支持助理列表，请更新云端助理后重试' : '暂时无法读取助理列表，请重试', 409));
+          } catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_INVALID', '助理目录格式不兼容，请更新云端助理后重试', 502)); }
+        };
+      });
+      return { bots, directoryAvailable: true };
+    }
     if (operation !== 'personal-assistant.desktop.ticket') throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
     if (!configured) throw fail('PERSONAL_ASSISTANT_GATEWAY_UNCONFIGURED', '请先配置云网关连接', 409);
     if (payload.agentId && payload.agentId !== agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', 'Agent ID 与 Host 配置不一致', 403);

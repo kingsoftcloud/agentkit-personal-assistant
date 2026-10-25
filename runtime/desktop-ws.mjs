@@ -1,5 +1,6 @@
 /** Minimal authenticated WebSocket bridge for the Studio desktop view. */
 import { createHash, createPublicKey, timingSafeEqual, verify } from 'node:crypto';
+import { DIRECTORY_BOT_ID, publicBotDirectory } from '../src/client/bot-directory.mjs';
 
 const PROTOCOL = 'agentkit.personal-assistant.desktop.v1';
 const maxFrame = 300 * 1024;
@@ -90,7 +91,7 @@ function parseFrames(state, chunk, onFrame) {
   }
 }
 
-export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, env = process.env }) {
+export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots, env = process.env }) {
   const usedPermits = new Map();
   server.on('upgrade', async (request, socket, head) => {
     const url = new URL(request.url || '/', 'http://desktop.local');
@@ -175,7 +176,14 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       let body; try { body = JSON.parse(payload.toString('utf8')); } catch { send({ type: 'error', code: 'INVALID_JSON' }); return; }
       let brokerStarted = false;
       try {
+        if (body.type === 'bots.list') {
+          if (claims && (claims.mode !== 'read' || claims.botId !== DIRECTORY_BOT_ID)) throw Object.assign(new Error('助理目录需要独立只读授权'), { code: 'DESKTOP_DIRECTORY_SCOPE_REQUIRED', status: 403 });
+          if (state.sessionId || typeof listBots !== 'function') throw Object.assign(new Error('助理目录暂不可用'), { code: 'DESKTOP_DIRECTORY_UNAVAILABLE', status: 503 });
+          send({ type: 'bots', bots: publicBotDirectory(await listBots()) });
+          return close();
+        }
         if (body.type === 'open') {
+          if (claims?.botId === DIRECTORY_BOT_ID) throw Object.assign(new Error('目录授权不能打开桌面'), { code: 'DESKTOP_DIRECTORY_READ_ONLY', status: 403 });
           if (state.sessionId) throw Object.assign(new Error('desktop session already open'), { code: 'DESKTOP_SESSION_ALREADY_OPEN', status: 409 });
           if (claims && body.botId !== claims.botId) throw Object.assign(new Error('desktop Bot does not match permit'), { code: 'DESKTOP_BOT_MISMATCH', status: 403 });
           if (claims?.mode === 'read' && (body.mode === 'control' || body.leaseId)) throw Object.assign(new Error('desktop permit is read-only'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });

@@ -129,7 +129,7 @@ test('temporary renewal failure preserves its status and closes with a retryable
   assert.equal(desktop.messages().find(value => value.type === 'wire-close')?.code, 1011);
 });
 
-function panelHarness(t) {
+function panelHarness(t, options = {}) {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const saved = Object.fromEntries(['document', 'window', 'WebSocket', 'createImageBitmap'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const document = new EventTarget(), window = new EventTarget(); document.hidden = false;
@@ -145,7 +145,9 @@ function panelHarness(t) {
   Object.assign(globalThis, { document, window, WebSocket, createImageBitmap: async () => ({ close() {} }) });
   const request = async (operation, payload) => {
     requests.push({ operation, payload });
-    return operation.endsWith('.configuration') ? { configured: true, agentId: 'ar-test' } : { ticket: 'short-lived-ticket', wsUrl: 'wss://gateway.invalid/desktop' };
+    if (operation.endsWith('.configuration')) return { configured: options.configured !== false, agentId: 'ar-test' };
+    if (operation.endsWith('.bots.list')) { if (options.directoryError) throw options.directoryError; return { bots: options.bots || [{ botId: 'writer', displayName: '写作助理' }], directoryAvailable: true }; }
+    return { ticket: 'short-lived-ticket', wsUrl: 'wss://gateway.invalid/desktop' };
   };
   const fakeReact = {
     createElement(type, props, ...children) {
@@ -163,6 +165,7 @@ function panelHarness(t) {
   const render = () => { cursor = 0; tree = PersonalAssistantPanel({ request, initialBotId: 'writer' }); for (const effect of effects.splice(0)) effect(); return tree; };
   const all = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(all)] : [];
   const text = node => typeof node === 'string' ? node : node?.children?.map(text).join('') || '';
+  const visibleText = node => typeof node === 'string' ? node : node?.type === 'details' && !node.props.open ? visibleText(node.children[0]) : node?.children?.map(visibleText).join('') || '';
   const click = label => { render(); const button = all(tree).find(node => node.type === 'button' && text(node) === label); assert.ok(button, `button ${label} exists`); button.props.onClick(); };
   render();
   t.after(() => {
@@ -170,10 +173,10 @@ function panelHarness(t) {
     setClientReactRuntime(undefined);
     for (const [key, descriptor] of Object.entries(saved)) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
   });
-  return { sockets, requests, document, drawn, click, render, text: () => text(render()), tickets: () => requests.filter(value => value.operation.endsWith('.ticket')) };
+  return { sockets, requests, document, drawn, click, render, nodes: () => all(render()), text: () => text(render()), visibleText: () => visibleText(render()), tickets: () => requests.filter(value => value.operation.endsWith('.ticket')) };
 }
 async function connectPanel(panel, mode = 'read') {
-  await flush(); panel.click(mode === 'read' ? '只读旁观' : '连接 / 重试'); await flush();
+  await flush(); panel.click(mode === 'read' ? '只读旁观' : '连接云电脑'); await flush();
   const socket = panel.sockets.at(-1); socket.open();
   socket.message({ type: 'ready', sessionId: 'desktop-1', readOnly: mode === 'read', display: { width: 1280, height: 800 } });
   socket.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); socket.message(new ArrayBuffer(8)); await flush();
@@ -212,7 +215,7 @@ test('panel network failure retries automatically, while a control conflict fall
   socket.closed(1006); t.mock.timers.tick(1000); await flush();
   assert.equal(panel.tickets().length, 2);
   assert.equal(panel.tickets()[1].payload.mode, 'read');
-  panel.click('连接 / 重试'); await flush();
+  panel.click('重新连接'); await flush();
   const control = panel.sockets.at(-1); control.open();
   control.message({ type: 'error', status: 409, code: 'COMPUTER_LEASE_CONFLICT' }); await flush();
   assert.equal(panel.tickets().at(-1).payload.mode, 'read');
@@ -258,4 +261,34 @@ test('panel releases held inputs on a terminal close and cancels in-flight frame
   assert.equal(socket.sent.some(value => value.event?.key === 'Control_L' && value.event.action === 'up'), true);
   assert.equal(socket.sent.filter(value => value.type === 'close').length, 1);
   assert.match(panel.text(), /控制租约已失效/u);
+});
+
+
+test('未开通/空目录只展示一个检查入口，没有凭据字段或可手填的助理标识', async t => {
+  for (const options of [{ configured: false }, { bots: [] }]) {
+    await t.test(JSON.stringify(options), async child => {
+    const panel = panelHarness(child, options); await flush();
+    const nodes = panel.nodes();
+    assert.equal(nodes.some(node => node.type === 'select'), false);
+    assert.equal(nodes.some(node => node.type === 'input' && node.props['aria-label'] === 'Bot ID'), false);
+    assert.equal(nodes.filter(node => node.type === 'button').length, 1);
+    assert.match(panel.text(), /检查开通状态/u);
+    assert.doesNotMatch(panel.visibleText(), /API Key|Personal Assistant|Bot ID|配置云网关|0 fps/u);
+    assert.equal(panel.sockets.length, 0);
+    });
+  }
+});
+
+test('助理只从真实目录选择，诊断字段折叠，页面默认不连接电脑', async t => {
+  const panel = panelHarness(t, { bots: [{ botId: 'writer', displayName: '写作助理' }, { botId: 'researcher', displayName: '研究助理' }] }); await flush();
+  const nodes = panel.nodes();
+  const selector = nodes.find(node => node.type === 'select');
+  assert.equal(selector.props.value, 'writer');
+  assert.deepEqual(selector.children.map(node => node.children[0]), ['写作助理', '研究助理']);
+  assert.equal(nodes.some(node => node.type === 'details' && node.props.open), false);
+  const diagnostic = nodes.find(node => node.type === 'details');
+  assert.match(JSON.stringify(diagnostic), /ar-test|writer/u);
+  assert.equal(nodes.some(node => node.type === 'small' && node.props['data-personal-assistant-build']), true);
+  assert.equal(panel.sockets.length, 0);
+  assert.equal(panel.requests.filter(row => row.operation.endsWith('.bots.list')).length, 1);
 });

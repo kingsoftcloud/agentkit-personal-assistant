@@ -12,7 +12,7 @@ test('Host locks cloud origin and identity, normalizes tickets without disclosin
   } });
   const status = await gateway.request('personal-assistant.configuration');
   assert.equal(status.configured, true);
-  assert.equal(status.botDirectoryAvailable, false);
+  assert.equal(status.gatewayUrl, undefined);
   assert.equal(JSON.stringify(status).includes(config.apiKey), false);
   const result = await gateway.request('personal-assistant.desktop.ticket', { agentId: 'ar-real', botId: 'researcher', mode: 'read' });
   assert.equal(result.wsUrl, 'wss://gateway.example/personal-assistant/desktop/ws');
