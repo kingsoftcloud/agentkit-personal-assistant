@@ -43,25 +43,29 @@ function contentOf(input) {
  * contract. The controller remains the source of truth for execution and
  * history; this bridge only performs session admission and prompt delivery.
  */
-export function createDshTurnBridge({ ctx, sessionController, registry, requestIdFactory = randomUUID } = {}) {
+export function createDshTurnBridge({ ctx, sessionController, registry, setupAgent, requestIdFactory = randomUUID } = {}) {
   const controller = sessionController ?? serviceFromContext(ctx);
   const available = Boolean(controller && typeof controller.prompt === 'function');
   const installedPrompts = new WeakSet();
+  const pending = new Map();
+  const sessionOwners = new Map();
+  const busySessions = new Set();
   const unavailable = () => { throw new DshSessionControllerUnavailableError(); };
 
   async function installBotPrompt(sessionId, botId, bot) {
-    if (!bot?.systemPrompt || typeof controller.resolveAgent !== 'function') return;
+    if (typeof controller.resolveAgent !== 'function') return;
     const resolved = await controller.resolveAgent(sessionId);
     if (resolved?.error) throw resolved.error;
     const agent = resolved?.agent ?? resolved;
     const prompt = agent?.ctx?.get?.('systemPrompt');
-    if (!agent || !prompt || typeof prompt.section !== 'function' || installedPrompts.has(agent)) return;
-    prompt.section({
+    if (!agent || installedPrompts.has(agent)) return;
+    if (bot?.systemPrompt && prompt && typeof prompt.section === 'function') prompt.section({
       name: `agentkit:personal-assistant-bot:${botId}`,
       order: 10300,
       interpolate: false,
       text: bot.systemPrompt,
     });
+    await setupAgent?.(agent, botId, bot);
     installedPrompts.add(agent);
   }
 
@@ -103,20 +107,54 @@ export function createDshTurnBridge({ ctx, sessionController, registry, requestI
     if (!['queue', 'steer'].includes(mode)) throw Object.assign(new TypeError('mode must be queue or steer'), { code: 'DSH_TURN_INPUT_INVALID' });
     const content = contentOf(input);
     const rpcId = requiredIdentifier(requestId ?? requestIdFactory(), 'requestId', SESSION_ID);
+    const owner = sessionOwners.get(session);
+    if (owner && owner !== id) throw Object.assign(new Error('session belongs to another Bot'), { code: 'DSH_SESSION_BOT_CONFLICT', status: 409 });
+    if (busySessions.has(session)) throw Object.assign(new Error('session has an active turn'), { code: 'DSH_SESSION_BUSY', status: 409 });
+    busySessions.add(session);
+    try {
     await ensureSession({ sessionId: session, botId: id, bot, signal: requestSignal });
+    sessionOwners.set(session, id);
+    const baseline = typeof controller.inspect === 'function' ? (await controller.inspect(session, requestSignal))?.events?.length || 0 : 0;
     const request = { sessionId: session, requestId: rpcId, mode, content };
     if (clientTimeZone !== undefined) request.clientTimeZone = String(clientTimeZone);
     const result = await controller.prompt(request, requestSignal);
     if (result?.accepted !== true) {
       throw Object.assign(new Error('DSH Session Controller did not accept the turn'), { code: 'DSH_TURN_NOT_ACCEPTED', status: 503 });
     }
+    pending.set(rpcId, { sessionId: session, botId: id, baseline });
     return Object.freeze({ accepted: true, execution: 'dsh-session-controller', sessionId: session, botId: id, requestId: rpcId });
+    } catch (error) { busySessions.delete(session); throw error; }
+  }
+
+  async function waitForTurn({ botId, sessionId, requestId, timeoutMs = 300000 } = {}) {
+    const entry = pending.get(requestId);
+    if (!entry || entry.botId !== botId || entry.sessionId !== sessionId || typeof controller.inspect !== 'function') throw new DshSessionControllerUnavailableError('DSH turn observation is unavailable');
+    const deadline = Date.now() + timeoutMs;
+    try {
+      while (Date.now() < deadline) {
+        const inspection = await controller.inspect(sessionId, new AbortController().signal);
+        const events = (inspection?.events || []).slice(entry.baseline);
+        const end = events.find(event => event.type === 'turn/end');
+        if (end) {
+          const completed = events.slice(0, events.indexOf(end));
+          const messages = completed.filter(event => event.type === 'assistant/message').map(event => {
+            const content = event.data?.message?.content;
+            return typeof content === 'string' ? content : (Array.isArray(content) ? content.filter(part => part.type === 'text').map(part => part.text || '').join('') : '');
+          }).filter(Boolean);
+          const reason = end.data?.reason;
+          return { status: reason?.kind === 'completed' ? 'completed' : 'failed', messages, error: reason?.kind === 'completed' ? null : reason };
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      throw Object.assign(new Error('cloud DSH turn observation timed out'), { code: 'DSH_TURN_TIMEOUT' });
+    } finally { pending.delete(requestId); busySessions.delete(sessionId); }
   }
 
   return Object.freeze({
     available,
     controller,
     submitTurn,
+    waitForTurn,
   });
 }
 

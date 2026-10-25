@@ -1,6 +1,6 @@
 import { BotRegistry } from './bot-registry.mjs';
 import { createComputerBrokerClient, createHttpComputerBrokerTransport } from './computer-broker.mjs';
-import { createComputerToolset } from './cloud-computer-tools.mjs';
+import { createComputerToolset, registerComputerTools } from './cloud-computer-tools.mjs';
 import { createScheduleManager } from './schedule-manager.mjs';
 import { workspaceDir } from './workspace.mjs';
 import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
@@ -56,6 +56,12 @@ export function createRuntime(ctx, config = {}) {
     ctx,
     sessionController: config.sessionController ?? sessionControllerFromContext(ctx),
     registry,
+    setupAgent: async (agent, botId) => {
+      if (!identity.assistantId || !identity.computerId || !computerTransport) return;
+      const toolset = createComputerToolset({ broker: computerBroker, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId, botId, taskId: `dsh:${agent.id}` });
+      const registration = registerComputerTools({ agent, toolset });
+      agent.ctx.effect?.(() => () => { for (const dispose of registration.disposers) dispose(); void toolset.dispose(); }, 'personal-assistant.computer-tools');
+    },
   });
   const createBotComputerToolset = ({ botId, ...options } = {}) => createComputerToolset({
     broker: computerBroker, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId,
@@ -76,7 +82,20 @@ export function createRuntime(ctx, config = {}) {
 }
 
 export function apply(ctx, config = {}) {
-  return createRuntime(ctx, config);
+  const runtime = createRuntime(ctx, config);
+  const env = runtimeEnvironment();
+  if (env.AGENTKIT_PERSONAL_ASSISTANT_SERVE === '1') {
+    if (!runtime.turnBridge.available) throw Object.assign(new Error('Cloud Personal Assistant requires the DSH Session Controller'), { code: 'DSH_SESSION_CONTROLLER_UNAVAILABLE' });
+    const serve = async () => {
+      const { startAssistantRuntime } = await import('../runtime/assistant-runtime.mjs');
+      const handle = await startAssistantRuntime({ runtime, env });
+      console.info(JSON.stringify({ event: 'personal-assistant.host.ready', assistantId: env.ASSISTANT_ID, port: Number(env.AGENTKIT_RUNTIME_PORT), dshSessionController: true }));
+      return () => handle.close();
+    };
+    if (typeof ctx.effect !== 'function') throw new Error('DSH effect lifecycle is required');
+    ctx.effect(serve, 'personal-assistant.http');
+  }
+  return runtime;
 }
 
 export { BotRegistry, createBotRegistry, normalizeBotDefinition } from './bot-registry.mjs';

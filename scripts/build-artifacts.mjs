@@ -54,6 +54,9 @@ const results = [
     ['plugin/personal-assistant.plugin.json', join(root, 'personal-assistant.plugin.json')],
     ['plugin/personal-assistant.plugin.schema.json', join(root, 'personal-assistant.plugin.schema.json')],
     ['plugin/src', join(root, 'src')],
+    ['plugin/runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
+    ['plugin/runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
+    ['plugin/runtime/prepare-dsh-profile.mjs', join(root, 'runtime', 'prepare-dsh-profile.mjs')],
   ]),
   await pack('computer', [
     ['bin/computer-agentd', join(root, 'scripts', 'computer-agentd-launcher.sh')],
