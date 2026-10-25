@@ -8,7 +8,7 @@
 import { execFile as execFileCallback, spawn as spawnChild } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -25,7 +25,7 @@ export const DESKTOP_IDLE_TIMEOUT_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Math.round(Number(value))));
 const inputError = (message, code = 'DESKTOP_INPUT_INVALID', status = 400) => Object.assign(new Error(message), { code, status });
 
-// 取目标镜像 /etc/X11/fluxbox/keys 的基础鼠标交互，避免自建 HOME 时丢失。
+// 仅在系统默认文件缺失时使用；正常镜像逐字复制 /etc/X11/fluxbox/keys。
 // 正文点击由 ClickFocus/clickRaises 处理并转交应用，不用 OnWindow Mouse1 抢走应用单击。
 const desktopWindowBindings = [
   'OnDesktop Mouse1 :HideMenus',
@@ -82,6 +82,7 @@ export function createDesktopController({
   height = DESKTOP_HEIGHT,
   spawn = spawnChild,
   exec = execFile,
+  readWindowBindings = readFile,
   now = () => Date.now(),
   capture = null,
   terminal = true,
@@ -133,12 +134,19 @@ export function createDesktopController({
   const spawnWindowManager = async () => {
     if (wm && wm.exitCode === null && !wm.killed) return;
     if (!wmConfiguration) {
+      // 先读取再创建配置目录：权限等错误不降级，也不留下可被下次启动复用的半成品。
+      let bindings;
+      try { bindings = await readWindowBindings('/etc/X11/fluxbox/keys'); }
+      catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+        bindings = desktopWindowBindings;
+      }
       // Only configuration is written. Desktop pixels remain memory-only.
       wmConfiguration = await mkdtemp(join(tmpdir(), 'agentkit-desktop-wm-'));
       // Fluxbox 首次启动会向 HOME/.fluxbox 复制系统默认配置；提前完整创建，
       // 避免覆盖 -rc 指定的设置或弹出默认壁纸错误窗口。
       await mkdir(join(wmConfiguration, '.fluxbox'));
-      await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), desktopWindowBindings);
+      await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), bindings);
       await writeFile(join(wmConfiguration, '.fluxbox', 'apps'), '');
       await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\n');
       await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12}\n[end]\n');

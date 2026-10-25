@@ -1,9 +1,67 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createDesktopController, createMjpegFrameParser } from '../runtime/desktop-session.mjs';
 
 function fakeProcess() { const p = new EventEmitter(); p.exitCode = null; p.killed = false; p.kill = () => { p.killed = true; p.exitCode = 0; p.emit('exit', 0); }; return p; }
+
+test('窗口管理器逐字复制系统默认绑定，并使用独立 HOME 而非继承旧配置', async () => {
+  const defaults = Buffer.from('# 完整系统默认值\nOnTitlebar Mouse1 :MacroCmd {Raise} {Focus} {ActivateTab}\nMod4 c :Exec xcalc\n');
+  let reads = 0, launched;
+  const controller = createDesktopController({
+    readWindowBindings: async path => { assert.equal(path, '/etc/X11/fluxbox/keys'); reads++; return defaults; },
+    spawn(file, args, options) { if (file === 'fluxbox') launched = { args, options }; return fakeProcess(); },
+    exec: async () => ({ stdout: '' }),
+  });
+  try {
+    const first = await controller.openSession({ identity: {} });
+    assert.equal(reads, 1);
+    const home = launched.options.env.HOME;
+    assert.notEqual(home, process.env.HOME);
+    assert.deepEqual(await readFile(join(home, '.fluxbox', 'keys')), defaults, '不能用内嵌最小集替代镜像的完整默认绑定');
+    const config = await readFile(join(home, 'init'), 'utf8');
+    assert.ok(config.includes(`session.keyFile: ${join(home, '.fluxbox', 'keys')}`));
+    assert.ok(config.includes('session.screen0.clickRaises: true'));
+    controller.closeSession(first.sessionId);
+    await controller.openSession({ identity: {} });
+    assert.equal(reads, 1, '同一桌面启动期间不重复准备窗口管理器');
+  } finally { await controller.dispose(); }
+});
+
+test('只有系统绑定文件缺失才回退到最小集，其他读取错误必须失败且可再次初始化', async () => {
+  let code = 'ENOENT', reads = 0, launched;
+  const controller = createDesktopController({
+    readWindowBindings: async () => { reads++; throw Object.assign(new Error('fixture read failed'), { code }); },
+    spawn(file, args, options) { if (file === 'fluxbox') launched = options; return fakeProcess(); },
+    exec: async () => ({ stdout: '' }),
+  });
+  try {
+    await controller.openSession({ identity: {} });
+    assert.equal(reads, 1);
+    const keys = await readFile(join(launched.env.HOME, '.fluxbox', 'keys'), 'utf8');
+    assert.ok(keys.includes('Mod1 Tab :NextWindow'));
+    assert.ok(keys.includes('OnTitlebar Mouse1'));
+  } finally { await controller.dispose(); }
+
+  let readable = false, managers = 0;
+  const denied = createDesktopController({
+    readWindowBindings: async () => {
+      if (!readable) throw Object.assign(new Error('fixture access denied'), { code: 'EACCES' });
+      return Buffer.from('Mod4 c :Exec xcalc\n');
+    },
+    spawn(file) { if (file === 'fluxbox') managers++; return fakeProcess(); },
+    exec: async () => ({ stdout: '' }),
+  });
+  try {
+    await assert.rejects(denied.openSession({ identity: {} }), error => error.code === 'EACCES');
+    assert.equal(managers, 0, '不能掩盖权限错误后启动不完整配置');
+    readable = true;
+    await denied.openSession({ identity: {} });
+    assert.equal(managers, 1);
+  } finally { await denied.dispose(); }
+});
 
 test('桌面初始化超过首次清理周期时不会被误判为空闲', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
