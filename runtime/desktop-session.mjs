@@ -25,6 +25,23 @@ export const DESKTOP_IDLE_TIMEOUT_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Math.round(Number(value))));
 const inputError = (message, code = 'DESKTOP_INPUT_INVALID', status = 400) => Object.assign(new Error(message), { code, status });
 
+// 取目标镜像 /etc/X11/fluxbox/keys 的基础鼠标交互，避免自建 HOME 时丢失。
+// 正文点击由 ClickFocus/clickRaises 处理并转交应用，不用 OnWindow Mouse1 抢走应用单击。
+const desktopWindowBindings = [
+  'OnDesktop Mouse1 :HideMenus',
+  'OnDesktop Mouse3 :RootMenu',
+  'OnTitlebar Mouse1 :MacroCmd {Raise} {Focus} {ActivateTab}',
+  'OnTitlebar Move1 :StartMoving',
+  'OnTitlebar Mouse3 :WindowMenu',
+  'OnWindowBorder Move1 :StartMoving',
+  'OnLeftGrip Move1 :StartResizing bottomleft',
+  'OnRightGrip Move1 :StartResizing bottomright',
+  'OnWindow Mod1 Mouse1 :MacroCmd {Raise} {Focus} {StartMoving}',
+  'Mod1 Tab :NextWindow {groups} (workspace=[current])',
+  'Mod1 Shift Tab :PrevWindow {groups} (workspace=[current])',
+  '',
+].join('\n');
+
 function safeText(value, name, max = 4096) {
   const result = String(value ?? '');
   if (!result || result.length > max || /[\u0000\r\n]/u.test(result)) throw inputError(`${name} is invalid`);
@@ -121,11 +138,11 @@ export function createDesktopController({
       // Fluxbox 首次启动会向 HOME/.fluxbox 复制系统默认配置；提前完整创建，
       // 避免覆盖 -rc 指定的设置或弹出默认壁纸错误窗口。
       await mkdir(join(wmConfiguration, '.fluxbox'));
-      await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), '');
+      await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), desktopWindowBindings);
       await writeFile(join(wmConfiguration, '.fluxbox', 'apps'), '');
       await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\n');
       await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12}\n[end]\n');
-      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.focusNewWindows: true\n`;
+      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
     }
