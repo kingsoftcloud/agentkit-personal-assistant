@@ -1,9 +1,9 @@
 /**
  * Multi-Bot registry for one personal-assistant profile.
  *
- * The registry stores Bot identity and policy metadata only. Prompt execution,
- * session creation, and persistence are owned by the DSH host and are wired in
- * through documented services by a later integration.
+ * The registry owns Bot definitions. The DSH bridge installs each Bot prompt;
+ * its scoped tool guard enforces this registry's current policy on every call.
+ * Native session execution and approval decisions remain owned by DSH.
  */
 
 const BOT_ID_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/u;

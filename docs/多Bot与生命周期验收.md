@@ -27,7 +27,8 @@ PA Agent 调用公开 `tools.restrict({allow:[]})` 隐藏继承的 Host 工具�
 作为访问 runtime 私有状态或绕过电脑租约的捷径。Skill 的执行应由电脑工具承接，后续专用
 wrapper 需要独立定义允许面。
 
-最终真实模型输入中仅有以下工具：
+本轮初始真实模型输入中的固定安全面为以下工具。后续每 Bot 的 `toolPolicy` 已接到执行守卫，
+它会进一步收窄该列表；严格空 allowlist 表示零权限，见 [Bot 工具策略与批准](./Bot工具策略与批准.md)。
 
 ```text
 bot_memory_save, bot_memory_search, bot_plan_update

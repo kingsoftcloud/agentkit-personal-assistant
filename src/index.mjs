@@ -63,7 +63,7 @@ export function createRuntime(ctx, config = {}) {
     platformPrompt,
     setupAgent: async (agent, botId) => {
       // 只限制这个 PA Agent；Host 文件、shell、subagent 等全局工具不能绕过电脑租约或读私有状态。
-      restrictPersonalAssistantToolScope(agent, botId);
+      restrictPersonalAssistantToolScope(agent, botId, { getPolicy: () => registry.require(botId).toolPolicy });
       if (!identity.assistantId || !identity.computerId || !computerTransport) return;
       const toolset = createComputerToolset({ broker: computerBroker, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId, botId, taskId: `dsh:${agent.id}` });
       const registration = registerComputerTools({ agent, toolset });
