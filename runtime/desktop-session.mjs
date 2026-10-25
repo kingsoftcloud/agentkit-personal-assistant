@@ -8,13 +8,18 @@
 import { execFile as execFileCallback, spawn as spawnChild } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const execFile = promisify(execFileCallback);
 export const DESKTOP_WIDTH = 1280;
 export const DESKTOP_HEIGHT = 800;
 export const DESKTOP_MAX_FRAME_BYTES = 300 * 1024;
-export const DESKTOP_ACTIVE_INTERVAL_MS = 100;
+export const DESKTOP_ACTIVE_INTERVAL_MS = 80;
 export const DESKTOP_IDLE_INTERVAL_MS = 1000;
+export const DESKTOP_CAPTURE_FPS = 15;
+export const DESKTOP_ACTIVITY_WINDOW_MS = 10_000;
 export const DESKTOP_IDLE_TIMEOUT_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_TIMEOUT_MS || 60_000);
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Math.round(Number(value))));
@@ -24,6 +29,34 @@ function safeText(value, name, max = 4096) {
   const result = String(value ?? '');
   if (!result || result.length > max || /[\u0000\r\n]/u.test(result)) throw inputError(`${name} is invalid`);
   return result;
+}
+
+/** Parse image2pipe MJPEG without retaining oversized or incomplete frames. */
+export function createMjpegFrameParser({ onFrame, onDrop = () => {}, maxFrameBytes = DESKTOP_MAX_FRAME_BYTES } = {}) {
+  const start = Buffer.from([0xff, 0xd8]), end = Buffer.from([0xff, 0xd9]);
+  let pending = Buffer.alloc(0), skipping = false;
+  return chunk => {
+    pending = Buffer.concat([pending, chunk]);
+    while (pending.length) {
+      if (skipping) {
+        const index = pending.indexOf(end);
+        if (index < 0) { pending = pending.subarray(-1); return; }
+        pending = pending.subarray(index + 2); skipping = false;
+      }
+      const beginning = pending.indexOf(start);
+      if (beginning < 0) { pending = pending.subarray(-1); return; }
+      if (beginning > 0) pending = pending.subarray(beginning);
+      const ending = pending.indexOf(end, 2);
+      if (ending >= 0) {
+        const length = ending + 2;
+        if (length <= maxFrameBytes) onFrame(Buffer.from(pending.subarray(0, length))); else onDrop();
+        pending = pending.subarray(length);
+      } else {
+        if (pending.length > maxFrameBytes) { onDrop(); skipping = true; pending = pending.subarray(-1); }
+        return;
+      }
+    }
+  };
 }
 
 export function createDesktopController({
@@ -36,11 +69,20 @@ export function createDesktopController({
   capture = null,
   terminal = true,
   onStop = null,
+  idleTimeoutMs = DESKTOP_IDLE_TIMEOUT_MS,
 } = {}) {
   const sessions = new Map();
   let xvfb;
   let wm;
   let terminalProcess;
+  let collector;
+  let collectorStarting;
+  let collectorStopping;
+  let displayStopping;
+  let wmConfiguration;
+  let latestFrame;
+  let capturedFrames = 0, droppedFrames = 0;
+  let collectorFailure;
   let displayReady;
   let lastActivityAt = 0;
   let sequence = 0;
@@ -58,21 +100,36 @@ export function createDesktopController({
   };
 
   const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' });
+  const stopProcess = child => new Promise(resolve => {
+    if (!child || child.exitCode !== null) return resolve();
+    let timer;
+    const finish = () => { clearTimeout(timer); resolve(); };
+    child.once('exit', finish); child.once('error', finish);
+    timer = setTimeout(() => { child.kill('SIGKILL'); finish(); }, 500);
+    child.kill('SIGTERM');
+  });
   const spawnDisplay = () => {
     if (xvfb && xvfb.exitCode === null && !xvfb.killed) return;
     xvfb = spawn('Xvfb', [display, '-screen', '0', `${width}x${height}x24`, '-nolisten', 'tcp', '-ac'], { env: environment, stdio: 'ignore' });
     xvfb.once?.('exit', () => { xvfb = undefined; displayReady = undefined; });
   };
-  const spawnWindowManager = () => {
+  const spawnWindowManager = async () => {
     if (wm && wm.exitCode === null && !wm.killed) return;
-    wm = spawn('fluxbox', ['-display', display, '-no-slit', '-no-toolbar'], { env: environment, stdio: 'ignore' });
+    if (!wmConfiguration) {
+      // Only configuration is written. Desktop pixels remain memory-only.
+      wmConfiguration = await mkdtemp(join(tmpdir(), 'agentkit-desktop-wm-'));
+      await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\n');
+      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12}\n[end]\n');
+      await writeFile(join(wmConfiguration, 'init'), `session.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.focusNewWindows: true\n`);
+    }
+    wm = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit', '-no-toolbar'], { env: environment, stdio: 'ignore' });
     wm.once?.('exit', () => { wm = undefined; });
   };
   const spawnTerminal = () => {
     if (!terminal || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
     // Use the image's fontconfig fonts; xterm's legacy bitmap font is absent
     // from the deliberately small desktop image and cannot render Unicode.
-    terminalProcess = spawn('xterm', ['-display', display, '-u8', '-fa', 'DejaVu Sans Mono', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '96x28+20+20', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
+    terminalProcess = spawn('xterm', ['-display', display, '-u8', '-fa', 'DejaVu Sans Mono', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '76x27+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
     terminalProcess.once?.('exit', () => { terminalProcess = undefined; });
   };
   const waitDisplay = async () => {
@@ -88,7 +145,7 @@ export function createDesktopController({
         catch (error) { lastError = error; await new Promise(resolve => setTimeout(resolve, 50)); }
       }
       if (now() >= deadline) throw Object.assign(new Error(`Xvfb display ${display} did not become ready`), { code: 'DESKTOP_DISPLAY_UNAVAILABLE', cause: lastError });
-      spawnWindowManager();
+      await spawnWindowManager();
       spawnTerminal();
       return true;
     })();
@@ -97,24 +154,53 @@ export function createDesktopController({
   };
   const ensureDisplay = async () => {
     if (disposed) throw Object.assign(new Error('desktop controller is disposed'), { code: 'DESKTOP_DISPOSED' });
+    if (displayStopping) await displayStopping;
     await waitDisplay();
-    lastActivityAt = now();
+  };
+  const stopCollector = () => {
+    const child = collector;
+    if (!child) return collectorStopping || Promise.resolve();
+    collector = undefined; latestFrame = undefined;
+    const stopped = stopProcess(child);
+    collectorStopping = stopped;
+    void stopped.finally(() => { if (collectorStopping === stopped) collectorStopping = undefined; });
+    return stopped;
+  };
+  const ensureCollector = async () => {
+    if (capture) return;
+    if (collectorStarting) return collectorStarting;
+    if (collector && collector.exitCode === null && !collector.killed) return;
+    collectorStarting = (async () => {
+      if (collectorStopping) await collectorStopping;
+      await ensureDisplay();
+      collectorFailure = undefined; latestFrame = undefined;
+      let stderr = '';
+      const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'warning', '-nostdin', '-f', 'x11grab', '-draw_mouse', '1', '-video_size', `${width}x${height}`, '-framerate', String(DESKTOP_CAPTURE_FPS), '-i', `${display}.0+0,0`, '-an', '-vf', `setpts=N/(${DESKTOP_CAPTURE_FPS}*TB)`, '-c:v', 'mjpeg', '-pix_fmt', 'yuvj420p', '-filter_threads', '2', '-q:v', '8', '-threads', '2', '-fps_mode', 'passthrough', '-f', 'image2pipe', 'pipe:1'], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+      collector = child;
+      const receive = createMjpegFrameParser({ onFrame: data => {
+        if (collector !== child || disposed) return;
+        latestFrame = { seq: ++sequence, capturedAt: now(), data }; capturedFrames += 1;
+      }, onDrop: () => { droppedFrames += 1; } });
+      child.stdout.on('data', receive);
+      child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-2048); });
+      child.on('error', error => { collectorFailure = Object.assign(new Error(`desktop collector failed: ${error.message}`), { code: 'DESKTOP_FRAME_CAPTURE_FAILED', cause: error }); });
+      child.once('exit', code => {
+        if (collector !== child) return;
+        collector = undefined;
+        collectorFailure = Object.assign(new Error(`desktop collector exited ${code}: ${stderr}`), { code: 'DESKTOP_FRAME_CAPTURE_FAILED' });
+      });
+      const deadline = Date.now() + 2500;
+      while (!latestFrame && collector === child && Date.now() < deadline && !collectorFailure) await new Promise(resolve => setTimeout(resolve, 10));
+      if (!latestFrame) { await stopCollector(); throw collectorFailure || Object.assign(new Error('desktop first frame timed out'), { code: 'DESKTOP_FRAME_CAPTURE_FAILED' }); }
+    })();
+    try { await collectorStarting; } finally { collectorStarting = undefined; }
   };
   const captureFrame = async () => {
     await ensureDisplay();
     if (capture) return capture({ display, width, height });
-    const qualities = [72, 60, 48, 36];
-    let last;
-    for (const quality of qualities) {
-      try {
-        const result = await exec('import', ['-display', display, '-window', 'root', '-quality', String(quality), 'jpeg:-'], { env: environment, encoding: 'buffer', maxBuffer: DESKTOP_MAX_FRAME_BYTES + 64 * 1024 });
-        const bytes = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout || '');
-        if (bytes.length <= DESKTOP_MAX_FRAME_BYTES) return bytes;
-        last = bytes;
-      } catch (error) { last = error; }
-    }
-    if (Buffer.isBuffer(last)) throw Object.assign(new Error(`desktop frame exceeds ${DESKTOP_MAX_FRAME_BYTES} bytes`), { code: 'DESKTOP_FRAME_TOO_LARGE' });
-    throw Object.assign(new Error('desktop frame capture failed'), { code: 'DESKTOP_FRAME_CAPTURE_FAILED', cause: last });
+    await ensureCollector();
+    if (collectorFailure) throw collectorFailure;
+    return latestFrame.data;
   };
   const runXdotool = async (args) => {
     await ensureDisplay();
@@ -224,25 +310,30 @@ export function createDesktopController({
     throw inputError(`unsupported desktop input type: ${type}`);
   };
   const touchActivity = () => { lastActivityAt = now(); for (const session of sessions.values()) session.lastInputAt = now(); };
-  const encodeFrame = (bytes, session) => ({ sessionId: session.sessionId, seq: ++sequence, format: 'jpeg', width, height, bytes: bytes.length, data: bytes });
+  const encodeFrame = (bytes, session, frameSequence) => ({ sessionId: session.sessionId, seq: frameSequence ?? ++sequence, format: 'jpeg', width, height, bytes: bytes.length, data: bytes });
   const openSession = async ({ identity, controllable = false, leaseId = null, taskId = null } = {}) => {
     await ensureDisplay();
+    lastActivityAt = now();
     const sessionId = randomUUID();
     const session = { sessionId, identity: Object.freeze({ ...identity }), controllable: Boolean(controllable), leaseId, taskId, createdAt: now(), lastInputAt: now(), lastFrameAt: 0, lastFrame: null };
     sessions.set(sessionId, session);
-    return { sessionId, readOnly: !session.controllable, controllable: session.controllable, display: { width, height }, idleTimeoutMs: DESKTOP_IDLE_TIMEOUT_MS, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES };
+    return { sessionId, readOnly: !session.controllable, controllable: session.controllable, display: { width, height }, idleTimeoutMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS };
   };
   const getSession = sessionId => sessions.get(String(sessionId || ''));
   const frameBinary = async ({ sessionId, afterSeq } = {}) => {
     const session = getSession(sessionId);
     if (!session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
     await ensureDisplay();
+    if (getSession(sessionId) !== session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
     const nowValue = now();
-    const active = nowValue - session.lastInputAt < 1000;
-    if (!active && session.lastFrame && nowValue - session.lastFrameAt < DESKTOP_IDLE_INTERVAL_MS) return { ...session.lastFrame, sessionId, unchanged: true, afterSeq: Number(afterSeq || 0) };
+    const active = nowValue - session.lastInputAt < DESKTOP_ACTIVITY_WINDOW_MS;
+    const cadence = { nextFrameDelayMs: active ? DESKTOP_ACTIVE_INTERVAL_MS : DESKTOP_IDLE_INTERVAL_MS, captureFps: DESKTOP_CAPTURE_FPS };
+    if (!active && session.lastFrame && nowValue - session.lastFrameAt < DESKTOP_IDLE_INTERVAL_MS) return { ...session.lastFrame, ...cadence, sessionId, unchanged: true, afterSeq: Number(afterSeq || 0) };
     const bytes = await captureFrame();
+    if (getSession(sessionId) !== session) { if (sessions.size === 0) await stopCollector(); throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 }); }
     if (!Buffer.isBuffer(bytes) || bytes.length > DESKTOP_MAX_FRAME_BYTES) throw Object.assign(new Error(`desktop frame exceeds ${DESKTOP_MAX_FRAME_BYTES} bytes`), { code: 'DESKTOP_FRAME_TOO_LARGE' });
-    const output = encodeFrame(bytes, session);
+    const output = { ...encodeFrame(bytes, session, capture ? undefined : latestFrame.seq), ...cadence };
+    if (Number(afterSeq || 0) >= output.seq) return { ...output, unchanged: true };
     session.lastFrame = output;
     session.lastFrameAt = nowValue;
     return output;
@@ -262,22 +353,31 @@ export function createDesktopController({
   const closeSession = sessionId => {
     const id = String(sessionId || ''), removed = sessions.delete(id);
     if (inputOwner === id) void enqueueInput(releasePressedInput);
+    if (removed && sessions.size === 0) { lastActivityAt = now(); void stopCollector(); }
     return removed;
   };
   const closeSessionsForLease = leaseId => { for (const [id, session] of sessions) if (session.leaseId === leaseId) closeSession(id); };
   const reap = () => {
-    if (sessions.size === 0 && lastActivityAt && now() - lastActivityAt >= DESKTOP_IDLE_TIMEOUT_MS) stopDisplay();
+    if (now() - lastActivityAt >= idleTimeoutMs) { sessions.clear(); void stopDisplay(); }
   };
   const stopDisplay = () => {
-    void releasePressedInput();
-    if (wm) { try { wm.kill('SIGTERM'); } catch {} wm = undefined; }
-    if (xvfb) { try { xvfb.kill('SIGTERM'); } catch {} xvfb = undefined; }
-    if (terminalProcess) { try { terminalProcess.kill('SIGTERM'); } catch {} terminalProcess = undefined; }
-    displayReady = undefined;
-    try { void onStop?.(); } catch { /* cleanup callback is best effort */ }
+    if (displayStopping) return displayStopping;
+    const stopping = (async () => {
+      await releasePressedInput();
+      await stopCollector();
+      const processes = [wm, terminalProcess, xvfb];
+      wm = undefined; terminalProcess = undefined; xvfb = undefined; displayReady = undefined;
+      await Promise.all(processes.map(stopProcess));
+      const directory = wmConfiguration; wmConfiguration = undefined;
+      if (directory) await rm(directory, { recursive: true, force: true });
+      await onStop?.();
+    })();
+    displayStopping = stopping;
+    void stopping.finally(() => { if (displayStopping === stopping) displayStopping = undefined; }).catch(() => {});
+    return stopping;
   };
-  const dispose = () => { disposed = true; sessions.clear(); stopDisplay(); };
-  const stats = () => ({ display, width, height, sessions: sessions.size, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), lastActivityAt });
+  const dispose = () => { disposed = true; sessions.clear(); clearInterval(reaper); return stopDisplay(); };
+  const stats = () => ({ display, width, height, sessions: sessions.size, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
   return Object.freeze({ openSession, getSession, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, dispose, stats, injectInput, captureFrame });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { createDesktopController } from '../runtime/desktop-session.mjs';
+import { createDesktopController, createMjpegFrameParser } from '../runtime/desktop-session.mjs';
 
 function fakeProcess() { const p = new EventEmitter(); p.exitCode = null; p.killed = false; p.kill = () => { p.killed = true; p.exitCode = 0; p.emit('exit', 0); }; return p; }
 
@@ -101,4 +101,55 @@ test('disconnect releases held mouse buttons and keys without starting another d
   assert.equal(calls.filter(call => call[0] === 'spawn' && call[1] === 'Xvfb').length, 1);
   assert.ok(calls.every(call => !call.includes('--sync')));
   controller.dispose();
+});
+
+test('MJPEG parser handles marker chunk boundaries and drops oversized frames before the next frame', () => {
+  const frames = []; let dropped = 0;
+  const parse = createMjpegFrameParser({ maxFrameBytes: 16, onFrame: frame => frames.push(frame), onDrop: () => { dropped += 1; } });
+  const jpeg = Buffer.from([0xff, 0xd8, 1, 2, 0xff, 0xd9]);
+  parse(jpeg.subarray(0, 1)); parse(jpeg.subarray(1, 5)); parse(jpeg.subarray(5));
+  parse(Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(32)]));
+  parse(Buffer.from([0xff])); parse(Buffer.concat([Buffer.from([0xd9]), jpeg]));
+  assert.equal(dropped, 1);
+  assert.deepEqual(frames, [jpeg, jpeg]);
+});
+
+test('viewers share one in-memory collector and the last viewer closing stops it', async () => {
+  const calls = [], jpeg = Buffer.from([0xff, 0xd8, 1, 2, 0xff, 0xd9]);
+  const controller = createDesktopController({
+    spawn(file, args) {
+      calls.push(['spawn', file, ...args]);
+      const child = fakeProcess();
+      if (file === 'ffmpeg') { child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); setImmediate(() => child.stdout.emit('data', jpeg)); }
+      return child;
+    },
+    exec: async (file, args) => { calls.push([file, ...args]); return { stdout: '' }; },
+  });
+  const first = await controller.openSession({ identity: {} });
+  assert.deepEqual((await controller.frameBinary({ sessionId: first.sessionId })).data, jpeg);
+  for (let i = 0; i < 10; i++) { const viewer = await controller.openSession({ identity: {} }); await controller.frameBinary({ sessionId: viewer.sessionId }); controller.closeSession(viewer.sessionId); }
+  for (const file of ['Xvfb', 'fluxbox', 'ffmpeg']) assert.equal(calls.filter(call => call[0] === 'spawn' && call[1] === file).length, 1);
+  assert.equal(calls.some(call => call[0] === 'import'), false);
+  assert.ok(calls.find(call => call[1] === 'ffmpeg').includes('pipe:1'));
+  assert.equal(controller.stats().capturedFrames, 1);
+  controller.closeSession(first.sessionId);
+  assert.equal(controller.stats().collectorRunning, false);
+  await controller.dispose();
+});
+
+test('ten seconds without input reduces delivery to at most one new frame per second', async () => {
+  let clock = 1000, captures = 0;
+  const controller = createDesktopController({ now: () => clock, spawn: () => fakeProcess(), exec: async () => ({ stdout: '' }), capture: async () => { captures += 1; return Buffer.from('jpeg'); } });
+  const s = await controller.openSession({ identity: {} });
+  const active = await controller.frameBinary({ sessionId: s.sessionId });
+  assert.equal(active.nextFrameDelayMs, 80);
+  clock += 10001;
+  const idle = await controller.frameBinary({ sessionId: s.sessionId });
+  assert.equal(idle.nextFrameDelayMs, 1000);
+  clock += 100;
+  const cached = await controller.frameBinary({ sessionId: s.sessionId, afterSeq: idle.seq });
+  assert.equal(cached.unchanged, true);
+  assert.equal(cached.nextFrameDelayMs, 1000);
+  assert.equal(captures, 2);
+  await controller.dispose();
 });
