@@ -37,7 +37,7 @@ const send = (response, status, body) => {
   response.end(JSON.stringify(body));
 };
 const sendFrame = (response, status, frame) => {
-  response.writeHead(status, { 'content-type': 'image/jpeg', 'cache-control': 'no-store', 'x-desktop-seq': String(frame.seq || 0), 'x-desktop-width': String(frame.width || 1280), 'x-desktop-height': String(frame.height || 800), 'x-desktop-bytes': String(frame.bytes || 0), ...(frame.unchanged ? { 'x-desktop-unchanged': '1' } : {}) });
+  response.writeHead(status, { 'content-type': 'image/jpeg', 'cache-control': 'no-store', 'x-desktop-seq': String(frame.seq || 0), 'x-desktop-width': String(frame.width || 1280), 'x-desktop-height': String(frame.height || 800), 'x-desktop-bytes': String(frame.bytes || 0), 'x-desktop-next-frame-delay-ms': String(frame.nextFrameDelayMs || 80), ...(frame.unchanged ? { 'x-desktop-unchanged': '1' } : {}) });
   if (frame.data && !frame.unchanged) response.end(frame.data); else response.end();
 };
 const readBody = request => new Promise((resolve, reject) => {
@@ -179,5 +179,5 @@ const server = createServer(async (request, response) => {
 server.listen(port, host);
 const leaseReaper = setInterval(expireLeases, 1000);
 leaseReaper.unref();
-const close = async () => { await browser?.dispose?.(); executor?.dispose?.(); desktop.dispose(); server.close(() => process.exit(0)); };
+const close = async () => { await browser?.dispose?.(); executor?.dispose?.(); await desktop.dispose(); server.close(() => process.exit(0)); };
 process.on('SIGTERM', close);

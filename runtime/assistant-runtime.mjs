@@ -71,7 +71,7 @@ const brokerDesktopRequest = async (path, body) => {
 const brokerDesktopFrameBinary = async body => {
   const result = await fetch(`${brokerEndpoint}/broker/desktop/frame-binary`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...body, userId, assistantId, computerId }) });
   if (!result.ok) { const payload = await result.json().catch(() => ({})); throw Object.assign(new Error(payload.error || 'computer frame failed'), { code: payload.error || 'COMPUTER_FRAME_FAILED', status: result.status }); }
-  return { unchanged: result.headers.get('x-desktop-unchanged') === '1', seq: Number(result.headers.get('x-desktop-seq') || 0), width: Number(result.headers.get('x-desktop-width') || 1280), height: Number(result.headers.get('x-desktop-height') || 800), bytes: Number(result.headers.get('x-desktop-bytes') || 0), data: Buffer.from(await result.arrayBuffer()) };
+  return { unchanged: result.headers.get('x-desktop-unchanged') === '1', seq: Number(result.headers.get('x-desktop-seq') || 0), width: Number(result.headers.get('x-desktop-width') || 1280), height: Number(result.headers.get('x-desktop-height') || 800), bytes: Number(result.headers.get('x-desktop-bytes') || 0), nextFrameDelayMs: Number(result.headers.get('x-desktop-next-frame-delay-ms') || 80), data: Buffer.from(await result.arrayBuffer()) };
 };
 const botIdOf = value => {
   const botId = String(value ?? '').trim();

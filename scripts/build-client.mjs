@@ -1,0 +1,11 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const result = await build({ absWorkingDir: root, entryPoints: ['src/client/entry.mjs'], bundle: true, format: 'iife', platform: 'browser', target: 'es2022', minify: true, legalComments: 'none', write: false, metafile: true });
+const output = result.outputFiles[0].text;
+if (!output.includes('window.__ModuleLoader__.load({') || !output.includes('@kingsoftcloud/agentkit-personal-assistant')) throw new Error('DSH 客户端注册入口丢失');
+if (Object.keys(result.metafile.inputs).some(path => !path.startsWith('src/client/'))) throw new Error('浏览器产物含 Host 代码');
+await mkdir(resolve(root, 'dist'), { recursive: true });
+await writeFile(resolve(root, 'dist/client.js'), output);

@@ -18,7 +18,7 @@
   },
   "exports": {
     ".": "./src/index.mjs",
-    "./client": "./src/client/index.mjs",
+    "./client": "./dist/client.js",
     "./manifest": "./personal-assistant.plugin.json",
     "./bot-registry": "./src/bot-registry.mjs",
     "./computer-broker": "./src/computer-broker.mjs",
@@ -40,13 +40,17 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "personal-assistant.plugin.schema.json"
+    "personal-assistant.plugin.schema.json",
+    "dist",
+    "docs"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "check": "node --check src/index.mjs && node --check src/bot-registry.mjs && node --check src/computer-broker-protocol.mjs && node --check src/computer-broker.mjs && node --check src/client/index.mjs && npm test && node --check src/cloud-computer-tools.mjs && node --check src/dsh-session-bridge.mjs && node --check src/implementation-capabilities.mjs && node --check src/persistent-state.mjs && node --check src/schedule-manager.mjs && node --check src/workspace.mjs && node --check runtime/assistant-runtime.mjs && node --check runtime/computer-agentd.mjs",
     "pack:check": "npm pack --dry-run",
-    "build:artifacts": "node scripts/build-artifacts.mjs"
+    "build:artifacts": "node scripts/build-artifacts.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "prepack": "npm run build:client"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5"
@@ -55,19 +59,19 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-ui-renderer"
       ],
       "external": [
-        "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-api-session-controller",
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-renderer"
+        "@deepseek-ai/dsh-client-connection"
       ]
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
   },
-  "main": "./src/index.mjs"
+  "main": "./src/index.mjs",
+  "devDependencies": {
+    "esbuild": "0.27.7"
+  }
 }

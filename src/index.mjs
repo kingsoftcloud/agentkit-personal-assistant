@@ -5,6 +5,7 @@ import { createScheduleManager } from './schedule-manager.mjs';
 import { workspaceDir } from './workspace.mjs';
 import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 import { readFileSync } from 'node:fs';
+import { registerPersonalAssistantHostGateway } from './host-gateway.mjs';
 export { IMPLEMENTED_RUNTIME_CAPABILITIES } from './implementation-capabilities.mjs';
 export { DshSessionControllerUnavailableError, createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 
@@ -83,6 +84,9 @@ export function createRuntime(ctx, config = {}) {
 
 export function apply(ctx, config = {}) {
   const runtime = createRuntime(ctx, config);
+  if (typeof ctx.effect === 'function' && typeof ctx.connection?.fetch?.register === 'function') {
+    ctx.effect(() => registerPersonalAssistantHostGateway(ctx, config), 'personal-assistant:gateway');
+  }
   const env = runtimeEnvironment();
   if (env.AGENTKIT_PERSONAL_ASSISTANT_SERVE === '1') {
     if (!runtime.turnBridge.available) throw Object.assign(new Error('Cloud Personal Assistant requires the DSH Session Controller'), { code: 'DSH_SESSION_CONTROLLER_UNAVAILABLE' });

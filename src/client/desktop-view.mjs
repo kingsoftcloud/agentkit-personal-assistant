@@ -22,8 +22,11 @@ export function mapDisplayPoint({ clientX, clientY, rect, display = DEFAULT_DESK
   const height = Number(rect?.height) || target.height;
   const offsetX = Number(rect?.left) || 0;
   const offsetY = Number(rect?.top) || 0;
-  const x = Math.max(0, Math.min(target.width - 1, Math.round((Number(clientX) - offsetX) * target.width / width)));
-  const y = Math.max(0, Math.min(target.height - 1, Math.round((Number(clientY) - offsetY) * target.height / height)));
+  const scale = Math.min(width / target.width, height / target.height);
+  const left = offsetX + (width - target.width * scale) / 2;
+  const top = offsetY + (height - target.height * scale) / 2;
+  const x = Math.max(0, Math.min(target.width - 1, Math.round((Number(clientX) - left) / scale)));
+  const y = Math.max(0, Math.min(target.height - 1, Math.round((Number(clientY) - top) / scale)));
   return { x, y };
 }
 

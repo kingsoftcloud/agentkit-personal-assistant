@@ -126,13 +126,25 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
     },
   };
   applyClient(ctx);
-  assert.deepEqual(clientInject, ['slots', 'remote']);
+  assert.deepEqual(clientInject, ['slots', 'connection']);
   assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist']);
   assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
-  assert.equal(entries[0].component(), 'Personal Assistant is disabled by default. Enable the plugin to connect.');
+  assert.equal(entries[0].component(), '请启用 Personal Assistant 插件并配置云网关');
   assert.equal(entries[1].component(), 'PA');
   assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
+});
+
+test('letterboxed desktop keeps ten grid coordinates within two pixels', () => {
+  const rect = { left: 15, top: 20, width: 1000, height: 800 };
+  const scale = 1000 / 1280;
+  const top = rect.top + (rect.height - 800 * scale) / 2;
+  for (let index = 1; index <= 10; index += 1) {
+    const expected = { x: index * 100, y: (index % 7 + 1) * 100 };
+    const actual = mapDisplayPoint({ clientX: rect.left + expected.x * scale, clientY: top + expected.y * scale, rect });
+    assert.ok(Math.abs(actual.x - expected.x) <= 2);
+    assert.ok(Math.abs(actual.y - expected.y) <= 2);
+  }
 });
 
 test('desktop client maps display coordinates and drops oversized/stale frames', () => {

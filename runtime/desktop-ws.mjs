@@ -97,7 +97,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     if (!key) { socket.destroy(); return; }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept(key)}\r\nSec-WebSocket-Protocol: ${protocol}\r\n\r\n`);
     if (head?.length) socket.unshift(head);
-    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, lastInputAt: Date.now(), timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve() };
+    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, paused: false, lastInputAt: Date.now(), lastFrameSeq: -1, timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve() };
     const send = value => { if (!state.closed) socket.write(jsonFrame(value)); };
     const close = async () => {
       if (state.closed) return; state.closed = true; if (state.timer) clearTimeout(state.timer); if (state.renewTimer) clearInterval(state.renewTimer);
@@ -106,23 +106,26 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       try { socket.end(frame(8)); } catch {}
     };
     const poll = async () => {
-      if (state.closed || !state.sessionId || state.frameBusy) return;
+      if (state.closed || state.paused || !state.sessionId || state.frameBusy) return;
       state.frameBusy = true;
+      const startedAt = Date.now();
+      let nextFrameDelayMs = Date.now() - state.lastInputAt < 10_000 ? 80 : 1000;
       try {
         if (typeof brokerDesktopFrameBinary !== 'function') throw Object.assign(new Error('binary desktop broker is unavailable'), { code: 'DESKTOP_BINARY_BROKER_REQUIRED' });
-        const result = await brokerDesktopFrameBinary({ sessionId: state.sessionId });
+        const result = await brokerDesktopFrameBinary({ sessionId: state.sessionId, afterSeq: state.lastFrameSeq });
+        if (Number.isFinite(result.nextFrameDelayMs)) nextFrameDelayMs = Math.max(50, Math.min(1000, result.nextFrameDelayMs));
         if (!result.unchanged && result.data) {
           const metadata = { type: 'frame', seq: result.seq, format: result.format, width: result.width, height: result.height, bytes: result.bytes };
           send(metadata);
           if (!Buffer.isBuffer(result.data)) throw Object.assign(new Error('desktop broker did not return binary data'), { code: 'DESKTOP_BINARY_FRAME_REQUIRED' });
           const bytes = result.data;
           if (bytes.length > maxFrame) throw Object.assign(new Error('desktop frame too large'), { code: 'DESKTOP_FRAME_TOO_LARGE' });
-          if (!state.closed) socket.write(frame(2, bytes));
+          if (!state.closed) { socket.write(frame(2, bytes)); state.lastFrameSeq = result.seq; }
         } else send({ type: 'frame', seq: result.seq, unchanged: true, width: result.width, height: result.height });
       } catch (error) { send({ type: 'error', code: error?.code || 'DESKTOP_FRAME_FAILED', message: String(error?.message || 'desktop frame failed') }); }
       finally {
         state.frameBusy = false;
-        if (!state.closed) { const active = Date.now() - state.lastInputAt < 1000; state.timer = setTimeout(poll, active ? 100 : 1000); }
+        if (!state.closed && !state.paused) state.timer = setTimeout(poll, Math.max(0, nextFrameDelayMs - (Date.now() - startedAt)));
       }
     };
     const onMessage = async (opcode, payload) => {
@@ -156,9 +159,13 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
           if (!state.sessionId) throw Object.assign(new Error('desktop session is not open'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
           state.lastInputAt = Date.now();
           const accepted = await brokerDesktopRequest('/broker/desktop/input', { sessionId: state.sessionId, botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, event: body.event });
+          if (state.timer) clearTimeout(state.timer);
+          if (!state.frameBusy) state.timer = setTimeout(poll, 0);
           send({ type: 'input-accepted', ...accepted }); return;
         }
         if (body.type === 'close') return close();
+        if (body.type === 'pause') { state.paused = true; if (state.timer) clearTimeout(state.timer); return; }
+        if (body.type === 'resume') { state.paused = false; void poll(); return; }
         send({ type: 'error', code: 'DESKTOP_MESSAGE_UNSUPPORTED' });
       } catch (error) {
         if (!state.sessionId && state.autoLease && state.leaseId) {
