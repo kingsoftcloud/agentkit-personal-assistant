@@ -1,11 +1,30 @@
 /** 通过 DSH 已鉴权 Connection RPC 转接到固定云网关；凭据始终留在 Host。 */
+import { createRequire } from 'node:module';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from './client/bot-directory.mjs';
+/**
+ * 云网关会拒掉 Node 内置（undici）WebSocket：握手成功后立即 1006 断开且不带关闭帧，
+ * 面板只能看到「连接暂时不可用」。实测同一张 ticket 下浏览器、Python websockets 与 `ws`
+ * 包均正常，因此这里优先解析 Node 原生 `ws`（DSH Host 自带），再回退全局 WebSocket。
+ * 解析顺序：DSH Host 入口所在包 → 本插件上级目录 → 云端固定安装路径。
+ */
+const resolveDefaultWebSocket = () => {
+  for (const base of [process.argv[1], new URL('../../', import.meta.url).href, '/opt/agentkit/dsh-runtime/node_modules/']) {
+    if (!base) continue;
+    try {
+      const loaded = createRequire(base)('ws');
+      const Impl = loaded?.WebSocket ?? loaded?.default ?? loaded;
+      if (typeof Impl === 'function') return Impl;
+    } catch {}
+  }
+  return globalThis.WebSocket;
+};
+const DEFAULT_WEBSOCKET = resolveDefaultWebSocket();
 const ENDPOINT = '/api/personal-assistant';
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket']);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch, WebSocketImpl = globalThis.WebSocket } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch, WebSocketImpl = DEFAULT_WEBSOCKET } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -44,7 +63,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502)); return; }
         socket.onopen = () => socket.send(JSON.stringify({ type: 'bots.list' }));
         socket.onerror = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502));
-        socket.onclose = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '助理目录连接已结束，请重试', 502));
+        socket.onclose = event => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', `助理目录连接已结束（close ${Number(event?.code) || 'unknown'}），请重试`, 502));
         socket.onmessage = event => {
           try {
             if (typeof event.data !== 'string' || event.data.length > 64 * 1024) throw new Error('invalid directory');

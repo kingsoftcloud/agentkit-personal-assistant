@@ -50,6 +50,7 @@
     "pack:check": "npm pack --dry-run",
     "build:artifacts": "node scripts/build-artifacts.mjs",
     "build:client": "node scripts/build-client.mjs",
+    "dev:client": "node scripts/build-client.mjs --watch",
     "prepack": "npm run build:client"
   },
   "peerDependencies": {
