@@ -1,19 +1,10 @@
-import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import { writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { loadPersonalAssistantManifest } from '../src/platform-manifest.mjs';
 
 // 只借用固定 DSH 安装里的 YAML 解析器；配置中只写凭据变量名，不写密钥。
 const env = process.env;
-const require = createRequire('/opt/agentkit/dsh-runtime/package.json');
-const { parseDocument } = require('yaml');
-const raw = await readFile(env.AGENTENGINE_MANIFEST_PATH);
-if (raw.length > 900 * 1024 || createHash('sha256').update(raw).digest('hex') !== env.AGENTENGINE_MANIFEST_SHA256) throw new Error('MANAGED_MANIFEST_DIGEST_MISMATCH');
-const document = parseDocument(raw.toString('utf8'), { uniqueKeys: true, version: '1.2' });
-if (document.errors.length || document.warnings.length) throw new Error('MANAGED_MANIFEST_INVALID');
-const manifest = document.toJS({ maxAliasCount: 0 });
-if (!manifest || manifest.runtime?.name !== 'personal-assistant' || manifest.runtime?.version !== env.AGENTENGINE_MANAGED_RUNTIME_VERSION || manifest.framework !== 'personal-assistant' || manifest.artifact_type !== 'ManagedRuntime') throw new Error('MANAGED_RUNTIME_IDENTITY_MISMATCH');
-if (typeof manifest.model !== 'string' || !manifest.model.trim() || manifest.model.length > 512) throw new Error('MANAGED_MODEL_REQUIRED');
+const manifest = loadPersonalAssistantManifest(env);
 const baseURL = new URL(env.OPENAI_BASE_URL);
 if (!['http:', 'https:'].includes(baseURL.protocol) || baseURL.username || baseURL.password || baseURL.search || baseURL.hash || !env.AGENTKIT_MODEL_API_KEY) throw new Error('MANAGED_MODEL_CONFIGURATION_INVALID');
 const overlay = [

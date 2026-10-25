@@ -222,7 +222,7 @@ for (const row of await stateStore.read('schedules')) {
 const server = createServer(async (request, response) => {
   try {
     const url = urlOf(request);
-    if (request.method === 'GET' && (url.pathname === '/health' || url.pathname === '/readyz')) return send(response, turnBridge?.available ? 200 : 503, { status: turnBridge?.available ? 'ready' : 'dsh-unavailable', assistantId, computerId, bots: registry.list().length, dshSessionController: turnBridge?.available === true, capabilities });
+    if (request.method === 'GET' && ['/health', '/ready', '/readyz'].includes(url.pathname)) return send(response, turnBridge?.available === true ? 200 : 503, { status: turnBridge?.available === true ? 'ready' : 'dsh-unavailable', assistantId, computerId, bots: registry.list().length, dshSessionController: turnBridge?.available === true, capabilities });
     requireRuntimeToken(request);
     if (request.method === 'GET' && url.pathname === '/v1/bots') return send(response, 200, { bots: registry.list() });
     if (request.method === 'GET' && url.pathname === '/v1/sessions') return send(response, 200, { sessions: await stateStore.sessions(stateBotId(url.searchParams.get('botId'))) });
@@ -264,7 +264,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list() });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
 return { server, stateStore, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }

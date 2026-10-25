@@ -57,6 +57,7 @@ const results = [
     ['plugin/runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['plugin/runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
     ['plugin/runtime/prepare-dsh-profile.mjs', join(root, 'runtime', 'prepare-dsh-profile.mjs')],
+    ['plugin/runtime/check-manifest.mjs', join(root, 'runtime', 'check-manifest.mjs')],
   ]),
   await pack('computer', [
     ['bin/computer-agentd', join(root, 'scripts', 'computer-agentd-launcher.sh')],

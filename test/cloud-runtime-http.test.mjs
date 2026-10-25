@@ -22,11 +22,24 @@ async function fixture(t, turnBridge) {
 test('cloud API fails readiness without DSH and protects state routes with the runtime token', async t => {
   const f = await fixture(t);
   assert.equal((await f.request('/health', undefined, false)).status, 503);
+  assert.equal((await f.request('/ready', undefined, false)).status, 503);
   assert.equal((await f.request('/v1/bots', undefined, false)).status, 401);
   const session = (await f.request('/v1/sessions', { botId: 'writer' })).body;
   const receipt = await f.request(`/v1/sessions/${session.sessionId}/turns`, { botId: 'writer', input: 'hello' });
   assert.equal(receipt.status, 503);
   assert.equal(receipt.body.error, 'DSH_SESSION_CONTROLLER_UNAVAILABLE');
+});
+
+test('HTTP /ready 真实依赖注入的DSH就绪状态，不依赖可写文件或总是200', async t => {
+  const bridge = { available: false };
+  const f = await fixture(t, bridge);
+  assert.equal((await f.request('/ready', undefined, false)).status, 503);
+  bridge.available = true;
+  const ready = await f.request('/ready', undefined, false);
+  assert.equal(ready.status, 200);
+  assert.equal(ready.body.dshSessionController, true);
+  bridge.available = false;
+  assert.equal((await f.request('/ready', undefined, false)).status, 503);
 });
 
 test('cloud API records the DSH result and refuses another Bot on the owned Session', async t => {
