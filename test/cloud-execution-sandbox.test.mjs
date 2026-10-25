@@ -5,12 +5,16 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { probeSandbox, planCloudExecution, resolveCloudSandbox } from '../runtime/cloud-execution.mjs';
 
-test('Landlock readiness cannot pass when the actual namespace launcher is denied', () => {
+test('Landlock readiness cannot pass when the actual namespace launcher is denied', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pa-readiness-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const calls = [];
-  const sandbox = { kind: 'landlock', path: '/usr/bin/landlock-run', unshare: '/usr/bin/unshare', guard: '/usr/bin/terminal-guard' };
-  const available = probeSandbox({ sandbox, run(file, args) { calls.push({ file, args }); return { status: file === sandbox.path ? 0 : 1 }; } });
+  const sandbox = { kind: 'landlock', path: join(root, 'landlock-run'), unshare: join(root, 'unshare'), guard: join(root, 'terminal-guard') };
+  await Promise.all([sandbox.path, sandbox.unshare, sandbox.guard].map(path => writeFile(path, 'fixture')));
+  const available = probeSandbox({ sandbox, run(file, args) { calls.push({ file, args }); return { status: 1 }; } });
   assert.equal(available, false);
-  assert.equal(calls[0].file, sandbox.unshare);
+  assert.equal(calls[0].file, sandbox.guard);
+  assert.ok(calls[0].args.includes(sandbox.unshare));
   assert.ok(calls[0].args.includes('--net'));
   assert.ok(calls[0].args.includes('--pid'));
   assert.ok(calls[0].args.includes(sandbox.guard));
@@ -38,10 +42,24 @@ test('a Landlock fallback requires all three confined execution layers before be
   assert.equal(sandbox.isolation, 'landlock+seccomp+namespaces');
   assert.equal(probes, 1);
   const plan = planCloudExecution({ workspaceRoot: root, sandbox, argv: ['/usr/bin/python3', '-c', 'print(1)'], timeoutMs: 1000 });
-  assert.equal(plan.file, unshare);
+  assert.equal(plan.file, guard);
+  assert.deepEqual(plan.args.slice(0, 4), ['--workspace', root, '--', unshare]);
+  assert.ok(plan.args.includes('--child'));
   assert.ok(plan.args.indexOf(guard) < plan.args.indexOf(launcher));
   assert.ok(plan.args.includes('--net'));
   assert.equal(plan.env.HOME, root);
   assert.equal(plan.env.AGENTKIT_RUNTIME_TOKEN, undefined);
   assert.equal(plan.args.includes('/proc'), false);
+});
+
+test('通知代理的就绪探测必须真正执行 chmod 与 FD truncate', async t => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'pa-notify-readiness-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sandbox = { kind: 'landlock', path: join(root, 'landlock-run'), unshare: join(root, 'unshare'), guard: join(root, 'terminal-guard') };
+  await Promise.all([sandbox.path, sandbox.unshare, sandbox.guard].map(path => writeFile(path, 'fixture')));
+  const calls = [];
+  assert.equal(probeSandbox({ sandbox, run(file, args, options) { calls.push({ file, args, options }); return { status: 0 }; } }), true);
+  assert.equal(calls[0].file, sandbox.guard);
+  assert.ok(calls[0].args.some(value => value.includes('os.chmod') && value.includes('os.ftruncate')));
+  assert.equal(calls[0].options.env.AGENTKIT_RUNTIME_TOKEN, undefined);
 });

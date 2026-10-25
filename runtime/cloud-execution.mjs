@@ -1,7 +1,8 @@
 /** Confined command and program execution for a managed cloud assistant. */
 import { spawn as spawnChild, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 
 export const CLOUD_BASH_TOOL = 'cloud_bash';
 export const CLOUD_RUN_CODE_TOOL = 'cloud_run_code';
@@ -88,10 +89,17 @@ export function probeSandbox({ sandbox, run = spawnSync, timeoutMs = 5000 } = {}
   }
   if (sandbox.kind === 'landlock') {
     if (!sandbox.guard || !sandbox.unshare) return false;
-    // 必须验证真正的 namespace + seccomp + Landlock 组合，不能只测
-    // landlock --probe 后在实际执行时才发现 unshare 被集群拒绝。
-    const result = run(sandbox.unshare, [...NAMESPACE_ARGS, sandbox.guard, '--', sandbox.path, '--probe'], { timeout: timeoutMs, stdio: 'ignore', env: {} });
-    return result?.status === 0;
+    // 真正执行工作区 chmod/ftruncate，同时验证 namespace、Landlock、通知
+    // listener、读取子进程参数及 pidfd_getfd；不把静态能力探测当成可运行。
+    let workspace;
+    try {
+      workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pa-guard-probe-')));
+      const planned = planCloudExecution({ sandbox: { ...sandbox, available: true }, workspaceRoot: workspace,
+        argv: ['/usr/bin/python3', '-c', 'import os,sys; p=sys.argv[1]+"/probe"; f=os.open(p,os.O_CREAT|os.O_RDWR,0o600); os.chmod(p,0o600); os.ftruncate(f,0); os.close(f)', workspace], timeoutMs });
+      const result = run(planned.file, planned.args, { timeout: timeoutMs, stdio: 'ignore', env: planned.env, cwd: workspace });
+      return result?.status === 0;
+    } catch { return false; }
+    finally { if (workspace) rmSync(workspace, { recursive: true, force: true }); }
   }
   return false;
 }
@@ -164,11 +172,13 @@ export function planCloudExecution({ sandbox, workspaceRoot, argv, timeoutMs }) 
   if (sandbox.kind === 'landlock') {
     if (!isAbsolute(sandbox.unshare || '') || !existsSync(sandbox.unshare)) throw fail('云端执行沙箱不可用：缺少 unshare');
     if (!isAbsolute(sandbox.guard || '') || !existsSync(sandbox.guard)) throw fail('云端执行沙箱不可用：缺少 seccomp 补偿层');
-    const args = [...NAMESPACE_ARGS, sandbox.guard, '--', sandbox.path];
+    // supervisor 必须留在外层 PID/user namespace，才能安全读取通知所属
+    // tracee 的参数并原子复制 FD；只有实际工具位于全新的 namespaces 内。
+    const args = ['--workspace', root, '--', sandbox.unshare, ...NAMESPACE_ARGS, sandbox.guard, '--child', '--', sandbox.path];
     for (const path of LANDLOCK_READ_ONLY) args.push('--ro', path);
     for (const path of LANDLOCK_READ_WRITE) args.push('--rw', path);
     args.push('--rw', root, '--', ...argv);
-    return { file: sandbox.unshare, args, env: cloudEnvironment(root), cwd: root, timeoutMs };
+    return { file: sandbox.guard, args, env: cloudEnvironment(root), cwd: root, timeoutMs };
   }
   throw fail('云端执行沙箱不可用：未知的隔离后端');
 }
