@@ -2,6 +2,8 @@
 
 ## 两个 Lead 修复与当前候选的归属
 
+**云镜像 0.1.4 可用；本地 PA 插件须包含 cd996a6，客户端建议同时包含 ad9f8aa 的 12 秒首帧修复。** Lead 已对真实 0.1.4 实例完成创建、双容器、网关、目录和连接验证。ws 问题在本机 Host，不需要为此重做 0.1.4 云镜像。OI-8 可通过 Cordis 行配置过渡，Studio 代理不再是本期前置要求；详见《Cordis配置过渡与0.1.4验收结论-20261026.md》。
+
 Lead 的 `cd996a6bb996eb3200a0f3d485d3edf8b52a1b84` 提供 ws 优先解析与客户端 watch 构建；`ad9f8aa766d8d75508a81538aa2ba309bc2dce19` 将首帧截止从 3 秒改为 12 秒。已分别执行 `git merge-base --is-ancestor <commit> a417e49`，两项均返回 0，确认已包含在新候选源码中，无需重复 cherry-pick。
 
 | catalog 版本 | Runtime 插件构建源码 | 是否含 cd996a6 / ad9f8aa |
@@ -10,11 +12,13 @@ Lead 的 `cd996a6bb996eb3200a0f3d485d3edf8b52a1b84` 提供 ws 优先解析与客
 | 0.1.6 | 复用 0.1.4 Runtime，仅更新 Computer | 均不含 |
 | 0.1.7 | a417e49，已构建并登记 dev | 均包含 |
 
-**0.1.4 不含 ws 修复；配合仍使用 undici 的旧本机 Host 时，面板目录查询会失败。** 但这不是“0.1.4 服务端不支持目录”：该 Runtime 已实现 bots.list，安装包含 cd996a6 的本地 Host 可使用目录协议。两个端点须分别核验，不能把镜像中旧 Host 客户端源码等同于目录服务端实现。
+上表仅记录镜像内包的来源，不作为强制升级云版本的门槛。配合仍使用 undici 的旧本机 Host 时目录查询会失败；安装含 cd996a6 的本地插件后，0.1.4 服务端已有的 bots.list 可正常使用。此前把“镜像内未含本地修复”与云版本可用性绑定过紧，现按 Lead 的真实矩阵更正。
 
 首帧截止同样由本机加载的 dist/client.js 决定。新 Runtime 或 Git 源码中有 ad9f8aa，不代表用户旧 dist 已更新。当前完整本地包已实际解包核验：优先 ws、客户端 12 秒截止均存在；真实 DSH --dump-config 通过。包为 `/Users/xiayu/Downloads/AgentKit个人助理预览包-20261026-WS修复/kingsoftcloud-agentkit-personal-assistant-0.1.0.tgz`，SHA256 `e6714a90fd0c7f30b4c924db636b95a615deed11f6f9b00e761a10765c6b8ccd`，构建戳 `2026-10-25T20:11:26.348Z`。含 Host 改动，安装后需重开应用；本方未修改用户 profile/App。
 
-当前应以 `verify-release.sh 0.1.7` 验证这两个修复的交付组合；0.1.4 可作为冻结对照。新 Runtime 标签 `0.1.7-candidate-20261026-a417e49`，digest `sha256:1a6905e84f16f75434be68b866aa81b1ee2acff692b070cfd062710e9deb83a3`；Computer 复用 `sha256:3327d446d2118b8b49282b6706e50699eec09eb4873df828794c649b5f72f87e`。完整条目与证据见《0.1.7-WS修复候选交付-20261026.md》。Lead 的 0.1.5 及演示实例保持原样。
+可继续使用 `verify-release.sh 0.1.4` 与修复后本地插件验收，不要求因 ws 修复升级云端。0.1.7 保留为另一个后续候选：标签 `0.1.7-candidate-20261026-a417e49`，digest `sha256:1a6905e84f16f75434be68b866aa81b1ee2acff692b070cfd062710e9deb83a3`；Computer 复用 `sha256:3327d446d2118b8b49282b6706e50699eec09eb4873df828794c649b5f72f87e`。完整条目与证据见《0.1.7-WS修复候选交付-20261026.md》。Lead 的 0.1.5 及演示实例保持原样。
+
+Lead 的独立 0.1.4 实例 `ar-20261026013234-a54f1401`：HTTP 200/Code 0、Pod 2/2；网关 health 200、ticket 175ms、握手 235ms、ready 280ms，目录 default/researcher。broker 原报告为 13/14，焦点项报 `_NET_ACTIVE_WINDOW` 不支持，继续保留失败。创建和通信链路可用不等于整套 GUI 全通过；不因缺少本期要求的 WM 而静默 SKIP。原 namespace 后续查询 NotFound，不能补推当时进程状态。
 
 下文保留最初创建及 0.1.4 构建的历史证据，不把当时镜像、早期本地包或验收状态冒充本次发布状态。
 
@@ -106,7 +110,7 @@ dev catalog 已追加 **0.1.4**，Server 滚动成功，真实 resolver 返回�
 
 本地 Docker GUI 冒烟**首次帧接口失败：HTTP 400、响应 40 字节**。当时测试没有保留响应正文，这个证据缺口不能推测补齐；原始失败结果保存在 `smoke-pair-result.json`。为补取正文再次运行同镜像、同配置时，返回 HTTP 200，得到 1280×800、20912 字节整桌面 JPEG，随后正常关闭会话并释放租约。生产代码、2.5 秒采集等待、帧上限、租约与沙箱校验均未修改。第一次失败仍作为待定位的不稳定项保留，不能以第二次通过宣布完成验收。
 
-需要 Lead 现在使用**新建 0.1.4 独立实例**运行对照 E2E。创建模板同时修改 `RuntimeVersion` 和 YAML 的 `runtime.version` 为 0.1.4，其余保持一致。重点记录冷启动首帧，以及空闲后客户端退出控制态、停止抓帧与续租。
+最初请求 Lead 新建 0.1.4 对照实例的工作现已有上述独立报告，不再重复要求创建。继续复验时，创建模板仍须同时修改 RuntimeVersion 和 YAML runtime.version；冷启动、空闲生命周期与焦点项分开记录。
 
 当时面板预览包为 `/Users/xiayu/Downloads/AgentKit个人助理预览包-20261026-面板评审/kingsoftcloud-agentkit-personal-assistant-0.1.0.tgz`，SHA256 `5b9fb50dd5b50b54010fe228d7946994138fdfe757fe5d7cfaf921d258193cf1`、构建戳 `2026-10-25T16:26:44.055Z`。此处只保留历史来源；验证 ws/12秒修复应使用本页开头的新完整包，不能沿用这个早期预览包。
 

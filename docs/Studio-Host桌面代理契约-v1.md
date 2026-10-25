@@ -1,5 +1,7 @@
 # Studio Host 桌面代理契约 v1
 
+> 当前定位：这是后续可选的凭据托管与自动绑定方案，不再是本期安装预览包的阻塞项。短期允许由安装器写入 profile 的 Cordis config，DSH 会将 gatewayUrl/agentId/apiKey 传给 apply()；机制已通过真实 CLI 组合验证。脚本权限与凭据输入修正见《Cordis配置过渡与0.1.4验收结论-20261026.md》。下文“不在配置存 key”的约束仅指未来代理模式。
+
 ## 分工与调用路径
 
 Studio 侧由 Lead 实现：使用现有云登录与凭据，解析当前账号拥有的 PA 实例及其网关，通过网关签发短时票据；向同一个 DSH Host 的其他插件提供下述服务。插件侧由本方实现：动态取得服务、检查公开绑定、查询助理目录、向页面提供短时桌面授权。双方不同时修改 Studio 文件。
@@ -48,4 +50,4 @@ ctx.provide('studioPersonalAssistantDesktop', {
 
 Studio 侧必须同时解决 Host 可读取的选中实例：旧页面仅写 localStorage 的选择不会自动变成 Host 绑定。实例选择应通过已鉴权动作在 Host 保存并验证；没有选择时返回 false，不能假称已开通。此文不表示 Studio 服务已经实现，也不把夹具测试当作安装版用户闭环验收。
 
-联合验收时，PA cordis 配置及进程环境中应没有 gatewayUrl/agentId/apiKey：启用 Studio 与 PA 后 configuration 可返回合法绑定，目录可读取，浏览器通过票据连桌面；换实例及注销后新授权必须使用新绑定或被拒绝。全程不得输出实际票据或凭据。
+未来代理模式联合验收时，PA cordis 配置及进程环境中应没有 gatewayUrl/agentId/apiKey：启用 Studio 与 PA 后 configuration 可返回合法绑定，目录可读取，浏览器通过票据连桌面；换实例及注销后新授权必须使用新绑定或被拒绝。短期 Cordis 配置模式不按该零配置目标判失败。两种模式全程均不得输出实际票据或凭据。
