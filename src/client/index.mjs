@@ -88,6 +88,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
   const [config, setConfig] = useState(null);
   const [bots, setBots] = useState([]);
   const [directoryError, setDirectoryError] = useState('');
+  const [directoryCloseCode, setDirectoryCloseCode] = useState(null);
   const [manualBotAvailable, setManualBotAvailable] = useState(false);
   const [manualBotId, setManualBotId] = useState('');
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -230,7 +231,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
     } catch (error) { if (current.mounted && generation === current.generation) { setPhase('error'); setNotice(failure(error)); } }
   };
   const refreshConnection = async signal => {
-    close(false); setPhase('loading'); setNotice(''); setDirectoryError(''); setManualBotAvailable(false); setManualBotId('');
+    close(false); setPhase('loading'); setNotice(''); setDirectoryError(''); setDirectoryCloseCode(null); setManualBotAvailable(false); setManualBotId('');
     let directoryStarted = false;
     try {
       const value = await rpc('personal-assistant.configuration');
@@ -247,6 +248,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       state.current.botId = selected; setBotId(selected); setPhase(available.length ? 'idle' : 'empty');
     } catch (error) {
       if (signal?.aborted || !state.current.mounted) return;
+      if (Number.isInteger(error?.closeCode) && error.closeCode >= 1000 && error.closeCode <= 4999) setDirectoryCloseCode(error.closeCode);
       if (directoryStarted && directoryUnsupported(error)) {
         state.current.bots = []; setBots([]); setBotId(''); setPhase('directory-error');
         setManualBotAvailable(true); setManualBotId('default');
@@ -333,6 +335,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || readOnly, tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } })),
     h('footer', { style: { display: 'flex', alignItems: 'start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', borderTop: ui.border } },
       h('details', { open: diagnosticsOpen, onToggle: event => setDiagnosticsOpen(event.currentTarget.open) }, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
+        directoryCloseCode ? h('div', { style: { paddingTop: 8 } }, `目录连接关闭码：${directoryCloseCode}`) : null,
         manualBotAvailable ? h('div', { style: { paddingTop: 8, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
           h('label', null, '已有助理标识 ', h('input', { 'aria-label': '已有助理标识', value: manualBotId, maxLength: 64, autoComplete: 'off', spellCheck: false, onChange: event => setManualBotId(event.target.value), style: { ...ui, borderRadius: 6, padding: '6px 8px', maxWidth: 180 } })),
           h('button', { style: buttonStyle, disabled: active || phase === 'connecting', onClick: selectManualBot }, '使用此助理')) : null,
@@ -346,7 +349,7 @@ export function apply(ctx) {
   const request = async (operation, payload = {}) => {
     if (!ctx.connection?.rpc?.call) throw new PersonalAssistantGatewayUnavailableError();
     const result = await ctx.connection.rpc.call('/api', 'personal-assistant', { operation, payload });
-    if (!result?.ok) throw Object.assign(new Error(result?.error?.message || 'Studio Host 请求失败'), { code: result?.error?.code, status: result?.error?.details?.status });
+    if (!result?.ok) throw Object.assign(new Error(result?.error?.message || 'Studio Host 请求失败'), { code: result?.error?.code, status: result?.error?.details?.status, closeCode: result?.error?.details?.closeCode });
     return result.value;
   };
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request }) }, PersonalAssistantPanel));

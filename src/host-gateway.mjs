@@ -5,10 +5,10 @@ import { DIRECTORY_BOT_ID, publicBotDirectory } from './client/bot-directory.mjs
  * 云网关会拒掉 Node 内置（undici）WebSocket：握手成功后立即 1006 断开且不带关闭帧，
  * 面板只能看到「连接暂时不可用」。实测同一张 ticket 下浏览器、Python websockets 与 `ws`
  * 包均正常，因此这里优先解析 Node 原生 `ws`（DSH Host 自带），再回退全局 WebSocket。
- * 解析顺序：DSH Host 入口所在包 → 本插件上级目录 → 云端固定安装路径。
+ * 解析顺序：DSH Host 入口所在包 → 插件所在包及其上级 → 云端固定安装路径。
  */
 const resolveDefaultWebSocket = () => {
-  for (const base of [process.argv[1], new URL('../../', import.meta.url).href, '/opt/agentkit/dsh-runtime/node_modules/']) {
+  for (const base of [process.argv[1], import.meta.url, new URL('../../', import.meta.url).href, '/opt/agentkit/dsh-runtime/node_modules/']) {
     if (!base) continue;
     try {
       const loaded = createRequire(base)('ws');
@@ -23,6 +23,7 @@ const ENDPOINT = '/api/personal-assistant';
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket']);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
+const safeCloseCode = value => Number.isInteger(value) && value >= 1000 && value <= 4999 ? value : undefined;
 export const STUDIO_DESKTOP_SERVICE = 'studioPersonalAssistantDesktop';
 
 export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined } = {}) {
@@ -113,7 +114,13 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         socket.onopen = () => { connected = true; socket.send(JSON.stringify({ type: 'bots.list' })); };
         // 未完成握手时的不透明错误可能是鉴权拒绝，不能当作普通目录故障回退。
         socket.onerror = () => finish(fail(connected ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '暂时无法读取助理列表，请检查连接授权后重试', 502));
-        socket.onclose = event => finish(fail(!connected || Number(event?.code) === 1008 ? 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED' : 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '助理目录连接已结束，请重试', Number(event?.code) === 1008 ? 403 : 502));
+        socket.onclose = event => {
+          const closeCode = safeCloseCode(event?.code);
+          const error = fail(!connected || closeCode === 1008 ? 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED' : 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', `助理目录连接已结束${closeCode ? `（关闭码 ${closeCode}）` : ''}，请重试`, closeCode === 1008 ? 403 : 502);
+          // reason 由远端提供，可能含票据或内部信息；仅保留数值关闭码。
+          if (closeCode) error.closeCode = closeCode;
+          finish(error);
+        };
         socket.onmessage = event => {
           try {
             if (typeof event.data !== 'string' || event.data.length > 64 * 1024) throw new Error('invalid directory');
@@ -177,7 +184,7 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}) {
       if (!OPERATIONS.has(body.payload.operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
       return respond({ ok: true, value: await gateway.request(body.payload.operation, body.payload.payload ?? {}, request.signal) });
     } catch (error) {
-      return respond({ ok: false, error: { code: error.code || 'PERSONAL_ASSISTANT_GATEWAY_FAILED', message: error.message || '云电脑连接失败', details: { status: error.status || 500 } } });
+      return respond({ ok: false, error: { code: error.code || 'PERSONAL_ASSISTANT_GATEWAY_FAILED', message: error.message || '云电脑连接失败', details: { status: error.status || 500, ...(safeCloseCode(error.closeCode) ? { closeCode: error.closeCode } : {}) } } });
     }
   } });
 }

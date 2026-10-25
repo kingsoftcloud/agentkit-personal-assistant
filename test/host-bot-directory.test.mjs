@@ -84,3 +84,22 @@ test('未完成 WS 握手的不透明错误不会被当成可回退目录', asyn
   });
   await assert.rejects(gateway.request('personal-assistant.bots.list'), { code: 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', status: 502 });
 });
+
+for (const code of [1006, 1008]) test(`目录关闭只保留安全诊断码 ${code}，不暴露原始 reason`, async () => {
+  class Socket {
+    constructor() { queueMicrotask(() => this.onopen?.()); }
+    send() { queueMicrotask(() => this.onclose?.({ code, reason: 'agentkit.desktop.ticket.must-never-leak' })); }
+    close() {}
+  }
+  const gateway = createPersonalAssistantHostGateway({ gatewayUrl: 'https://gateway.example/', agentId: 'ar-test', apiKey: 'host-secret' }, {
+    env: {}, WebSocketImpl: Socket,
+    fetchImpl: async () => Response.json({ Code: 0, Data: { AgentId: 'ar-test', BotId: DIRECTORY_BOT_ID, Ticket: 't'.repeat(43), WsPath: 'personal-assistant/desktop/ws' } }),
+  });
+  await assert.rejects(gateway.request('personal-assistant.bots.list'), error => {
+    assert.equal(error.closeCode, code);
+    assert.equal(error.status, code === 1008 ? 403 : 502);
+    assert.match(error.message, new RegExp(String(code)));
+    assert.equal(error.message.includes('must-never-leak'), false);
+    return true;
+  });
+});

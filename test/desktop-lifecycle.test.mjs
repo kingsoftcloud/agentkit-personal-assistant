@@ -427,3 +427,13 @@ test('目录鉴权失败、格式错误和空目录不伪造默认助理', async
     assert.equal(panel.tickets().length, 0);
   });
 });
+
+test('目录 WS 关闭码只出现在折叠诊断，刷新成功后移除', async t => {
+  const options = { directoryError: Object.assign(failure(403, 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED'), { closeCode: 1008 }) };
+  const panel = panelHarness(t, options); await flush();
+  assert.match(panel.text(), /目录连接关闭码：1008/u);
+  assert.doesNotMatch(panel.visibleText(), /1008/u);
+  options.directoryError = null;
+  panel.click('检查开通状态'); await flush();
+  assert.doesNotMatch(panel.text(), /目录连接关闭码/u);
+});
