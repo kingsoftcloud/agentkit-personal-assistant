@@ -77,6 +77,83 @@ test('session reaped during capture closes transport, stops timers and releases 
   assert.equal(desktop.calls.filter(value => value.path === '/broker/desktop/close').length, 1);
 });
 
+test('明确 idle 信号保留 WS，停止抓帧续租；恢复只读时不再申请控制', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  let parked = false;
+  const desktop = bridge(t, { request: (path, body) => {
+    if (path.endsWith('/session')) return { sessionId: 'desktop-1', readOnly: false, idleMode: 'suspend', idleTimeoutMs: 60000 };
+    if (path.endsWith('/idle')) { parked = true; return { sessionId: 'desktop-1', idle: true }; }
+    if (path.endsWith('/resume')) { parked = false; return { sessionId: 'desktop-1', readOnly: true, controllable: false, idleMode: 'suspend', idleTimeoutMs: 60000 }; }
+  }, capture: () => { if (parked) throw failure(409, 'DESKTOP_SESSION_IDLE'); return { unchanged: true, seq: 1 }; } });
+  desktop.send({ type: 'open', botId: 'writer', taskId: 't', mode: 'control' }); await flush();
+  t.mock.timers.tick(60001); await flush();
+  assert.equal(desktop.socket.ended, undefined);
+  assert.ok(desktop.messages().some(v => v.type === 'idle'));
+  assert.equal(desktop.calls.filter(v => v.path === '/broker/desktop/close').length, 0);
+  const count = desktop.calls.length;
+  t.mock.timers.tick(90000); await flush();
+  assert.equal(desktop.calls.length, count, 'idle sends no frames or lease renewals');
+  const acquired = desktop.calls.filter(v => v.path.endsWith('/acquire')).length;
+  desktop.send({ type: 'resume', mode: 'read', activity: true }); await flush();
+  assert.equal(desktop.calls.filter(v => v.path.endsWith('/acquire')).length, acquired);
+  assert.equal(desktop.messages().filter(v => v.type === 'ready').at(-1).readOnly, true);
+});
+
+test('空闲后的控制冲突保留会话并恢复只读，重放 input 仍被 409 拒绝', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  let acquisitions = 0;
+  const desktop = bridge(t, { request: (path, body) => {
+    if (path.endsWith('/acquire')) { if (++acquisitions > 1) throw failure(409, 'COMPUTER_LEASE_CONFLICT'); }
+    if (path.endsWith('/session')) return { sessionId: 'desktop-1', readOnly: false, idleMode: 'suspend', idleTimeoutMs: 60000 };
+    if (path.endsWith('/resume')) { assert.equal(body.leaseId, undefined); return { sessionId: 'desktop-1', readOnly: true, idleMode: 'suspend', idleTimeoutMs: 60000 }; }
+  } });
+  desktop.send({ type: 'open', botId: 'writer', taskId: 't', mode: 'control' }); await flush();
+  t.mock.timers.tick(60001); await flush();
+  desktop.send({ type: 'input', event: { type: 'text', text: 'must-not-run' } }); await flush();
+  assert.equal(desktop.messages().find(v => v.code === 'DESKTOP_SESSION_IDLE').status, 409);
+  assert.equal(desktop.calls.some(v => v.path.endsWith('/input')), false);
+  desktop.send({ type: 'resume', mode: 'control', activity: true }); await flush();
+  assert.equal(desktop.socket.ended, undefined);
+  assert.equal(desktop.messages().find(v => v.code === 'COMPUTER_LEASE_CONFLICT').status, 409);
+  assert.equal(desktop.messages().filter(v => v.type === 'ready').at(-1).readOnly, true);
+});
+
+test('空闲后恢复控制取得新租约并保留会话，外部任务租约不随桌面空闲撤销', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  let acquisitions = 0;
+  const desktop = bridge(t, { request: (path, body) => {
+    if (path.endsWith('/acquire')) return { lease: { leaseId: `lease-${++acquisitions}` } };
+    if (path.endsWith('/session') || path.endsWith('/resume')) return { sessionId: 'desktop-1', readOnly: false, idleMode: 'suspend', idleTimeoutMs: 60000 };
+  } });
+  desktop.send({ type: 'open', botId: 'writer', taskId: 't', mode: 'control' }); await flush();
+  t.mock.timers.tick(60001); await flush();
+  desktop.send({ type: 'resume', mode: 'control', activity: true }); await flush();
+  assert.equal(desktop.calls.find(v => v.path.endsWith('/resume')).body.leaseId, 'lease-2');
+  assert.equal(desktop.messages().filter(v => v.type === 'ready').at(-1).sessionId, 'desktop-1');
+  desktop.send({ type: 'input', event: { type: 'text', text: 'ok' } }); await flush();
+  assert.equal(desktop.calls.find(v => v.path.endsWith('/input')).body.leaseId, 'lease-2');
+  const external = bridge(t, { request: path => path.endsWith('/session') ? { sessionId: 'external-view', readOnly: false, idleMode: 'suspend', idleTimeoutMs: 60000 } : undefined });
+  external.send({ type: 'open', botId: 'writer', taskId: 'job', mode: 'control', leaseId: 'job-owned' }); await flush();
+  t.mock.timers.tick(60001); await flush();
+  assert.equal(external.calls.some(v => v.path.endsWith('/release')), false);
+  assert.equal(external.messages().find(v => v.type === 'idle').leaseReleased, false);
+});
+
+test('恢复取租约期间断开会释放晚到租约，不重新启动桌面', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  let acquisitions = 0, acquired;
+  const desktop = bridge(t, { request: path => {
+    if (path.endsWith('/acquire') && ++acquisitions > 1) return new Promise(resolve => { acquired = resolve; });
+    if (path.endsWith('/session')) return { sessionId: 'desktop-1', readOnly: false, idleMode: 'suspend', idleTimeoutMs: 60000 };
+  } });
+  desktop.send({ type: 'open', botId: 'writer', taskId: 't', mode: 'control' }); await flush();
+  t.mock.timers.tick(60001); await flush();
+  desktop.send({ type: 'resume', mode: 'control', activity: true }); await flush();
+  desktop.socket.destroy(); acquired({ lease: { leaseId: 'late-lease' } }); await flush();
+  assert.equal(desktop.calls.some(v => v.path.endsWith('/resume')), false);
+  assert.ok(desktop.calls.some(v => v.path.endsWith('/release') && v.body.leaseId === 'late-lease'));
+});
+
 test('input lease loss and renewal conflict end the stream instead of continuing as an observer', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   for (const stage of ['input', 'renew']) {
@@ -196,6 +273,58 @@ test('panel stops reconnecting after idle session closure, including visibility 
   assert.equal(socket.readyState, 3);
   panel.click('只读旁观'); await flush();
   assert.equal(panel.tickets().length, 2, 'manual open must still work after a terminal close');
+});
+
+test('面板空闲保留通道且不自动取票，首个输入等待重新获租约后再发送', async t => {
+  const panel = panelHarness(t), socket = await connectPanel(panel, 'control');
+  socket.message({ type: 'idle', sessionId: 'desktop-1', leaseReleased: true }); await flush();
+  assert.match(panel.text(), /已空闲/u); assert.equal(socket.readyState, 1);
+  t.mock.timers.tick(75000); await flush();
+  assert.equal(panel.tickets().length, 1);
+  const canvas = panel.nodes().find(node => node.type === 'canvas');
+  canvas.props.onKeyDown({ type: 'keydown', key: 'Tab', preventDefault() {} }); await flush();
+  assert.equal(socket.sent.at(-1).type, 'resume');
+  assert.equal(socket.sent.filter(v => v.type === 'input').length, 0, 'first input stays buffered before control is confirmed');
+  socket.message({ type: 'ready', sessionId: 'desktop-1', readOnly: false, display: { width: 1280, height: 800 } }); await flush();
+  assert.deepEqual(socket.sent.at(-1), { type: 'input', event: { type: 'key', action: 'down', key: 'Tab' } });
+  assert.equal(panel.tickets().length, 1);
+});
+
+test('恢复租约冲突时丢弃缓冲输入并留在只读，不后台重复抢占', async t => {
+  const panel = panelHarness(t), socket = await connectPanel(panel, 'control');
+  socket.message({ type: 'idle', sessionId: 'desktop-1', leaseReleased: true }); await flush();
+  panel.click('恢复画面'); await flush();
+  socket.message({ type: 'error', status: 409, code: 'COMPUTER_LEASE_CONFLICT', recoverable: true, message: '其他助理正在使用云电脑，已恢复为只读旁观' });
+  socket.message({ type: 'ready', sessionId: 'desktop-1', readOnly: true, display: { width: 1280, height: 800 } });
+  socket.message({ type: 'frame', seq: 2, width: 1280, height: 800 }); socket.message(new ArrayBuffer(8)); await flush();
+  assert.equal(socket.readyState, 1); assert.match(panel.text(), /当前为只读旁观/u);
+  assert.equal(socket.sent.filter(v => v.type === 'input').length, 0);
+  t.mock.timers.tick(1000); await flush(); assert.equal(panel.tickets().length, 1);
+});
+
+test('空闲后的首段中文与 emoji 输入缓冲到 ready 后只发送一次', async t => {
+  const panel = panelHarness(t), socket = await connectPanel(panel, 'control');
+  socket.message({ type: 'idle', sessionId: 'desktop-1', leaseReleased: true }); await flush();
+  const text = '你好，云电脑 English 😀';
+  const field = panel.nodes().find(node => node.type === 'input' && node.props['aria-label'] === '云电脑文本输入');
+  assert.equal(field.props.disabled, false);
+  const target = { value: text };
+  field.props.onCompositionStart(); field.props.onCompositionEnd({ currentTarget: target });
+  field.props.onInput({ currentTarget: target }); await flush();
+  assert.equal(socket.sent.filter(v => v.type === 'input').length, 0);
+  socket.message({ type: 'ready', sessionId: 'desktop-1', readOnly: false, display: { width: 1280, height: 800 } }); await flush();
+  assert.deepEqual(socket.sent.filter(v => v.type === 'input'), [{ type: 'input', event: { type: 'text', text } }]);
+});
+
+test('空闲前仍在解码的旧帧不能把面板改回控制态', async t => {
+  const panel = panelHarness(t), socket = await connectPanel(panel, 'control');
+  let decoded;
+  globalThis.createImageBitmap = () => new Promise(resolve => { decoded = resolve; });
+  socket.message({ type: 'frame', seq: 2, width: 1280, height: 800 }); socket.message(new ArrayBuffer(8)); await flush();
+  socket.message({ type: 'idle', sessionId: 'desktop-1', leaseReleased: true });
+  decoded({ close() {} }); await flush();
+  assert.match(panel.text(), /已空闲/u);
+  assert.equal(panel.drawn.length, 1);
 });
 
 test('panel normal wire close and legacy session or lease errors stop automatic reconnect', async t => {

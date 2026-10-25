@@ -32,7 +32,11 @@ const ensureDesktopBrowser = async () => {
   desktopBrowserOpening = browser.openDesktopWindow().catch(error => { desktopBrowserOpening = undefined; throw error; });
   return desktopBrowserOpening;
 };
-desktop = createDesktopController({ onStop: closeDesktopBrowser });
+desktop = createDesktopController({ onStop: closeDesktopBrowser, onIdle: async owner => {
+  if (!owner.releaseLeaseOnIdle || !owner.leaseId) return;
+  const lease = leases.get(identity.computerId);
+  if (leaseIdentityMatches(lease, { ...identity, botId: owner.botId, taskId: owner.taskId, leaseId: owner.leaseId })) leases.delete(identity.computerId);
+} });
 const send = (response, status, body) => {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
   response.end(JSON.stringify(body));
@@ -144,10 +148,22 @@ const server = createServer(async (request, response) => {
       const desktopIdentityValue = desktopIdentity(body);
       expireLeases();
       const lease = body.leaseId ? desktopLease({ ...body, ...desktopIdentityValue }) : null;
-      const opened = await desktop.openSession({ identity: desktopIdentityValue, controllable: Boolean(lease), leaseId: lease?.leaseId || null, taskId: lease?.taskId || null });
+      const opened = await desktop.openSession({ identity: desktopIdentityValue, botId: body.botId || null, controllable: Boolean(lease), leaseId: lease?.leaseId || null, taskId: body.taskId || null, releaseLeaseOnIdle: body.releaseLeaseOnIdle === true });
       try { await ensureDesktopBrowser(); }
       catch (error) { desktop.closeSession(opened.sessionId); throw error; }
       return send(response, 200, opened);
+    }
+    if (['/broker/desktop/idle', '/broker/desktop/resume'].includes(request.url)) {
+      desktopIdentity(body);
+      const session = desktop.getSession(body.sessionId);
+      if (!session) throw Object.assign(new Error('DESKTOP_SESSION_NOT_FOUND'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+      if (!session.botId || !session.taskId || session.botId !== body.botId || session.taskId !== body.taskId) throw Object.assign(new Error('DESKTOP_SESSION_OWNER_MISMATCH'), { code: 'DESKTOP_SESSION_OWNER_MISMATCH', status: 403 });
+      if (request.url.endsWith('/idle')) {
+        if (!session.idle && session.leaseId && (body.leaseId !== session.leaseId || !leaseIdentityMatches(leases.get(identity.computerId), body))) throw Object.assign(new Error('COMPUTER_LEASE_REQUIRED'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+        return send(response, 200, await desktop.suspendSession(body.sessionId));
+      }
+      const lease = body.leaseId ? desktopLease(body) : null;
+      return send(response, 200, await desktop.resumeSession({ sessionId: body.sessionId, controllable: Boolean(lease), leaseId: lease?.leaseId || null, releaseLeaseOnIdle: body.releaseLeaseOnIdle === true }));
     }
     if (request.url === '/broker/desktop/frame') {
       desktopIdentity(body);
@@ -161,6 +177,7 @@ const server = createServer(async (request, response) => {
       desktopIdentity(body);
       const session = desktop.getSession(body.sessionId);
       if (!session || session.identity.computerId !== identity.computerId) throw Object.assign(new Error('DESKTOP_SESSION_NOT_FOUND'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+      if (session.idle) throw Object.assign(new Error('DESKTOP_SESSION_IDLE'), { code: 'DESKTOP_SESSION_IDLE', status: 409 });
       if (session.leaseId !== body.leaseId || session.taskId !== body.taskId) throw Object.assign(new Error('COMPUTER_LEASE_REQUIRED'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
       desktopLease({ ...body, computerId: identity.computerId });
       return send(response, 202, await desktop.input({ sessionId: body.sessionId, event: body.event }));

@@ -111,3 +111,21 @@ test('目录授权只返回助理展示字段，不开桌面、不申请租约�
   assert.equal((await reader.next(value => value.type === 'error')).status, 403);
   assert.deepEqual(calls, []);
 });
+
+test('只读签名授权在空闲恢复时仍不能升级控制或申请租约', async t => {
+  const calls = [], server = createServer();
+  attachDesktopWebSocket({ server, runtimeToken: 'local-private-token-at-least-24', assistantId: 'ar-test', env,
+    botIdOf: value => value, taskIdOf: value => value,
+    brokerDesktopRequest: async (path, body) => { calls.push({ path, body }); return path.endsWith('/session') || path.endsWith('/resume') ? { sessionId: 'observer-idle', readOnly: true, idleMode: 'suspend', idleTimeoutMs: 1000 } : {}; },
+    brokerDesktopFrameBinary: async () => ({ unchanged: true, seq: 1, nextFrameDelayMs: 1000 }),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const client = await connect(server.address().port, { 'X-AgentEngine-Desktop-Permit': permit() });
+  t.after(() => { client.socket.destroy(); server.closeAllConnections(); server.close(); });
+  client.send({ type: 'open', botId: 'observer', taskId: 't', mode: 'read' });
+  await client.next(v => v.type === 'idle');
+  client.send({ type: 'resume', mode: 'control', activity: true });
+  assert.equal((await client.next(v => v.code === 'DESKTOP_READ_ONLY')).status, 403);
+  assert.equal(calls.some(v => v.path.endsWith('/acquire')), false);
+  assert.equal(calls.some(v => v.path.endsWith('/input')), false);
+});

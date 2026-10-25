@@ -114,6 +114,46 @@ test('desktop frame idle response is bounded and has no disk path', async () => 
   controller.dispose();
 });
 
+test('空闲保留窗口和会话、停止采集并释放桌面自动租约，恢复须绑定新租约', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let clock = 1000; const processes = [], released = [];
+  const controller = createDesktopController({ now: () => clock, idleTimeoutMs: 1000,
+    spawn(file) { const p = fakeProcess(); processes.push({ file, p }); return p; },
+    exec: async () => ({ stdout: '' }), capture: async () => Buffer.from('jpeg'),
+    onIdle: async owner => released.push(owner),
+  });
+  try {
+    const opened = await controller.openSession({ identity: { userId: 'u' }, botId: 'writer', taskId: 't', controllable: true, leaseId: 'old', releaseLeaseOnIdle: true });
+    await controller.frameBinary({ sessionId: opened.sessionId });
+    clock += 1001; t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+    const idle = controller.getSession(opened.sessionId);
+    assert.ok(idle, 'idle is not session deletion'); assert.equal(idle.idle, true); assert.equal(idle.controllable, false); assert.equal(idle.leaseId, null);
+    assert.equal(controller.stats().xserverRunning, true); assert.equal(processes.find(x => x.file === 'fluxbox').p.killed, false);
+    assert.deepEqual(released, [{ sessionId: opened.sessionId, botId: 'writer', taskId: 't', leaseId: 'old', releaseLeaseOnIdle: true }]);
+    await assert.rejects(controller.frameBinary({ sessionId: opened.sessionId }), { code: 'DESKTOP_SESSION_IDLE', status: 409 });
+    await assert.rejects(controller.input({ sessionId: opened.sessionId, event: { type: 'text', text: 'forbidden' } }), { status: 409 });
+    await controller.resumeSession({ sessionId: opened.sessionId, controllable: true, leaseId: 'new', releaseLeaseOnIdle: true });
+    assert.equal(controller.getSession(opened.sessionId).leaseId, 'new');
+    assert.equal(controller.getSession(opened.sessionId).idle, false);
+    assert.equal(processes.filter(x => x.file === 'Xvfb').length, 1, 'resume keeps original windows');
+    assert.equal((await controller.frameBinary({ sessionId: opened.sessionId })).bytes, 4);
+  } finally { await controller.dispose(); }
+});
+
+test('空闲记录保留期到期后删除，已过期会话不能恢复', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let clock = 1000;
+  const controller = createDesktopController({ now: () => clock, idleTimeoutMs: 1000, idleRetentionMs: 2000, spawn: fakeProcess, exec: async () => ({ stdout: '' }) });
+  try {
+    const opened = await controller.openSession({ identity: {}, botId: 'writer', taskId: 't' });
+    clock += 1001; t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(controller.getSession(opened.sessionId).idle, true);
+    clock += 2001; t.mock.timers.tick(2000); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(controller.getSession(opened.sessionId), undefined);
+    await assert.rejects(controller.resumeSession({ sessionId: opened.sessionId }), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+  } finally { await controller.dispose(); }
+});
+
 test('binary frames keep JPEG bytes as Buffer and enforce the frame limit', async () => {
   let bytes = Buffer.from('jpeg');
   const controller = createDesktopController({ spawn: () => fakeProcess(), exec: async () => ({ stdout: '' }), capture: async () => bytes });

@@ -21,6 +21,7 @@ export const DESKTOP_IDLE_INTERVAL_MS = 1000;
 export const DESKTOP_CAPTURE_FPS = 15;
 export const DESKTOP_ACTIVITY_WINDOW_MS = 10_000;
 export const DESKTOP_IDLE_TIMEOUT_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_TIMEOUT_MS || 60_000);
+export const DESKTOP_IDLE_RETENTION_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_RETENTION_MS || 15 * 60_000);
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Math.round(Number(value))));
 const inputError = (message, code = 'DESKTOP_INPUT_INVALID', status = 400) => Object.assign(new Error(message), { code, status });
@@ -87,7 +88,9 @@ export function createDesktopController({
   capture = null,
   terminal = true,
   onStop = null,
+  onIdle = null,
   idleTimeoutMs = DESKTOP_IDLE_TIMEOUT_MS,
+  idleRetentionMs = DESKTOP_IDLE_RETENTION_MS,
 } = {}) {
   const sessions = new Map();
   let xvfb;
@@ -345,26 +348,58 @@ export function createDesktopController({
   };
   const touchActivity = () => { lastActivityAt = now(); for (const session of sessions.values()) session.lastInputAt = now(); };
   const encodeFrame = (bytes, session, frameSequence) => ({ sessionId: session.sessionId, seq: frameSequence ?? ++sequence, format: 'jpeg', width, height, bytes: bytes.length, data: bytes });
-  const openSession = async ({ identity, controllable = false, leaseId = null, taskId = null } = {}) => {
+  const describe = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controllable: session.controllable, display: { width, height }, idleMode: 'suspend', idle: Boolean(session.idle), idleTimeoutMs, idleRetentionMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS });
+  const openSession = async ({ identity, botId = null, controllable = false, leaseId = null, taskId = null, releaseLeaseOnIdle = false } = {}) => {
     await ensureDisplay();
     lastActivityAt = now();
     const sessionId = randomUUID();
-    const session = { sessionId, identity: Object.freeze({ ...identity }), controllable: Boolean(controllable), leaseId, taskId, createdAt: now(), lastInputAt: now(), lastFrameAt: 0, lastFrame: null };
+    const session = { sessionId, identity: Object.freeze({ ...identity }), botId, taskId, controllable: Boolean(controllable), leaseId, releaseLeaseOnIdle: Boolean(releaseLeaseOnIdle), idle: false, createdAt: now(), lastInputAt: now(), lastFrameAt: 0, lastFrame: null };
     sessions.set(sessionId, session);
-    return { sessionId, readOnly: !session.controllable, controllable: session.controllable, display: { width, height }, idleTimeoutMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS };
+    return describe(session);
   };
   const getSession = sessionId => sessions.get(String(sessionId || ''));
+  const idleError = () => Object.assign(new Error('desktop session is idle'), { code: 'DESKTOP_SESSION_IDLE', status: 409 });
+  const suspendSession = async sessionId => {
+    const session = getSession(sessionId);
+    if (!session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+    if (session.idleTransition) await session.idleTransition;
+    if (session.idle) return describe(session);
+    const owner = { sessionId: session.sessionId, botId: session.botId, taskId: session.taskId, leaseId: session.leaseId, releaseLeaseOnIdle: session.releaseLeaseOnIdle };
+    session.idle = true; session.idleAt = now(); session.controllable = false; session.leaseId = null; session.lastFrame = null;
+    session.idleTransition = (async () => {
+      if (inputOwner === session.sessionId) await enqueueInput(releasePressedInput);
+      // 输入已释放后才能让其他 Bot 获得租约；不能先删租约再释放修饰键。
+      await onIdle?.(owner);
+      if (![...sessions.values()].some(value => !value.idle)) await stopCollector();
+    })();
+    try { await session.idleTransition; } finally { session.idleTransition = null; }
+    return describe(session);
+  };
+  const resumeSession = async ({ sessionId, controllable = false, leaseId = null, releaseLeaseOnIdle = false } = {}) => {
+    const session = getSession(sessionId);
+    if (!session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+    await session.idleTransition;
+    if (!session.idle) throw Object.assign(new Error('desktop session is already active'), { code: 'DESKTOP_SESSION_ALREADY_ACTIVE', status: 409 });
+    await ensureDisplay();
+    if (getSession(sessionId) !== session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+    session.idle = false; session.idleAt = null; session.controllable = Boolean(controllable); session.leaseId = leaseId;
+    session.releaseLeaseOnIdle = Boolean(releaseLeaseOnIdle); session.lastInputAt = now(); session.lastFrameAt = 0; lastActivityAt = now();
+    return describe(session);
+  };
   const frameBinary = async ({ sessionId, afterSeq } = {}) => {
     const session = getSession(sessionId);
     if (!session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+    if (session.idle) { if (![...sessions.values()].some(value => !value.idle)) await stopCollector(); throw idleError(); }
     await ensureDisplay();
     if (getSession(sessionId) !== session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+    if (session.idle) throw idleError();
     const nowValue = now();
     const active = nowValue - session.lastInputAt < DESKTOP_ACTIVITY_WINDOW_MS;
     const cadence = { nextFrameDelayMs: active ? DESKTOP_ACTIVE_INTERVAL_MS : DESKTOP_IDLE_INTERVAL_MS, captureFps: DESKTOP_CAPTURE_FPS };
     if (!active && session.lastFrame && nowValue - session.lastFrameAt < DESKTOP_IDLE_INTERVAL_MS) return { ...session.lastFrame, ...cadence, sessionId, unchanged: true, afterSeq: Number(afterSeq || 0) };
     const bytes = await captureFrame();
     if (getSession(sessionId) !== session) { if (sessions.size === 0) await stopCollector(); throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 }); }
+    if (session.idle) { if (![...sessions.values()].some(value => !value.idle)) await stopCollector(); throw idleError(); }
     if (!Buffer.isBuffer(bytes) || bytes.length > DESKTOP_MAX_FRAME_BYTES) throw Object.assign(new Error(`desktop frame exceeds ${DESKTOP_MAX_FRAME_BYTES} bytes`), { code: 'DESKTOP_FRAME_TOO_LARGE' });
     const output = { ...encodeFrame(bytes, session, capture ? undefined : latestFrame.seq), ...cadence };
     if (Number(afterSeq || 0) >= output.seq) return { ...output, unchanged: true };
@@ -376,9 +411,12 @@ export function createDesktopController({
   const input = async ({ sessionId, event } = {}) => {
     const session = getSession(sessionId);
     if (!session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+    if (session.idle) throw idleError();
     if (!session.controllable || !session.leaseId) throw Object.assign(new Error('desktop session is read-only'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+    const inputLease = session.leaseId;
     return enqueueInput(async () => {
       if (!getSession(sessionId)) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+      if (session.idle || !session.controllable || session.leaseId !== inputLease) throw Object.assign(new Error('desktop control lease changed'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
       touchActivity(); inputOwner = sessionId;
       await injectInput(event);
       return { accepted: true, sessionId, at: now() };
@@ -387,12 +425,17 @@ export function createDesktopController({
   const closeSession = sessionId => {
     const id = String(sessionId || ''), removed = sessions.delete(id);
     if (inputOwner === id) void enqueueInput(releasePressedInput);
-    if (removed && sessions.size === 0) { lastActivityAt = now(); void stopCollector(); }
+    if (removed && ![...sessions.values()].some(value => !value.idle)) void stopCollector();
+    if (removed && sessions.size === 0) lastActivityAt = now();
     return removed;
   };
   const closeSessionsForLease = leaseId => { for (const [id, session] of sessions) if (session.leaseId === leaseId) closeSession(id); };
   const reap = () => {
-    if (now() - lastActivityAt >= idleTimeoutMs) { sessions.clear(); void stopDisplay(); }
+    for (const [id, session] of sessions) {
+      if (session.idle && now() - session.idleAt >= idleRetentionMs) closeSession(id);
+      else if (!session.idle && now() - session.lastInputAt >= idleTimeoutMs) void suspendSession(id).catch(() => closeSession(id));
+    }
+    if (sessions.size === 0 && now() - lastActivityAt >= idleTimeoutMs) void stopDisplay();
   };
   const stopDisplay = () => {
     if (displayStopping) return displayStopping;
@@ -411,8 +454,8 @@ export function createDesktopController({
     return stopping;
   };
   const dispose = () => { disposed = true; sessions.clear(); clearInterval(reaper); return stopDisplay(); };
-  const stats = () => ({ display, width, height, sessions: sessions.size, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt });
+  const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
-  return Object.freeze({ openSession, getSession, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, dispose, stats, injectInput, captureFrame });
+  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, dispose, stats, injectInput, captureFrame });
 }
