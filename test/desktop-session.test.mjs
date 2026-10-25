@@ -5,6 +5,34 @@ import { createDesktopController, createMjpegFrameParser } from '../runtime/desk
 
 function fakeProcess() { const p = new EventEmitter(); p.exitCode = null; p.killed = false; p.kill = () => { p.killed = true; p.exitCode = 0; p.emit('exit', 0); }; return p; }
 
+test('桌面初始化超过首次清理周期时不会被误判为空闲', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let clock = 1_700_000_000_000;
+  let ready;
+  const readiness = new Promise(resolve => { ready = resolve; });
+  const display = fakeProcess();
+  const controller = createDesktopController({
+    now: () => clock,
+    spawn: file => file === 'Xvfb' ? display : fakeProcess(),
+    exec: async file => { if (file === 'xdpyinfo') await readiness; return { stdout: '' }; },
+  });
+  const opening = controller.openSession({ identity: {} });
+  try {
+    clock += 1500;
+    t.mock.timers.tick(1500);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(display.killed, false, '启动未满空闲期限，清理器不得终止 Xvfb');
+    ready();
+    const session = await opening;
+    assert.equal(controller.getSession(session.sessionId)?.sessionId, session.sessionId);
+    assert.equal(controller.stats().xserverRunning, true);
+  } finally {
+    ready();
+    await opening.catch(() => {});
+    await controller.dispose();
+  }
+});
+
 test('desktop session captures in memory and rejects read-only input', async () => {
   let now = 1_000; const calls = []; const controller = createDesktopController({ now: () => now, spawn: (...args) => { calls.push(['spawn', ...args]); return fakeProcess(); }, exec: async (file, args) => { calls.push([file, ...args]); return { stdout: file === 'import' ? Buffer.from('jpeg') : Buffer.alloc(0) }; }, capture: async () => Buffer.from('jpeg') });
   const readonly = await controller.openSession({ identity: { userId: 'u', assistantId: 'a', computerId: 'c' } });

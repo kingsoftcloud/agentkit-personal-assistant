@@ -135,6 +135,8 @@ export function createDesktopController({
   const waitDisplay = async () => {
     if (displayReady) return displayReady;
     displayReady = (async () => {
+      // 启动本身计入活动，避免首个清理周期把尚未就绪的桌面当成长期空闲。
+      lastActivityAt = now();
       spawnDisplay();
       const deadline = now() + 5000;
       let lastError;
