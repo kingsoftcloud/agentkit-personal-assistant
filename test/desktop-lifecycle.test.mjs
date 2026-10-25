@@ -352,9 +352,8 @@ test('助理只从真实目录选择，诊断字段折叠，页面默认不连�
 });
 
 
-test('旧目录协议或临时故障可选择默认助理，恢复目录后覆盖回退项', async t => {
+test('目录临时故障可选择默认助理，恢复目录后覆盖回退项', async t => {
   for (const error of [
-    failure(409, 'PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED'),
     failure(502, 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE'),
     failure(504, 'PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT'),
   ]) await t.test(error.code, async child => {
@@ -381,6 +380,37 @@ test('旧目录协议或临时故障可选择默认助理，恢复目录后覆�
   });
 });
 
+test('旧目录协议只在折叠诊断提供手动标识，云端目录恢复后自动隐藏', async t => {
+  const options = { directoryError: failure(409, 'PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED') };
+  const panel = panelHarness(t, options); await flush();
+  assert.equal(panel.nodes().some(node => node.type === 'select'), false);
+  assert.equal(panel.nodes().find(node => node.type === 'details').props.open, false);
+  assert.equal(panel.tickets().length, 0);
+  assert.match(panel.visibleText(), /当前云端版本暂不支持助理列表/u);
+  panel.click('选择已有助理');
+  assert.equal(panel.nodes().find(node => node.type === 'details').props.open, true);
+  const field = () => panel.nodes().find(node => node.type === 'input' && node.props['aria-label'] === '已有助理标识');
+  assert.ok(field());
+  field().props.onChange({ target: { value: '__directory__' } });
+  panel.click('使用此助理'); await flush();
+  assert.equal(panel.nodes().some(node => node.type === 'select'), false);
+  assert.equal(panel.tickets().length, 0);
+  assert.match(panel.visibleText(), /请输入有效的已有助理标识/u);
+  field().props.onChange({ target: { value: 'researcher' } });
+  panel.click('使用此助理'); await flush();
+  assert.equal(panel.nodes().find(node => node.type === 'select').props.value, 'researcher');
+  assert.equal(panel.tickets().length, 0, '选择标识不会创建助理、签票或自动连接');
+  panel.click('只读旁观'); await flush();
+  assert.equal(panel.tickets()[0].payload.botId, 'researcher');
+  assert.equal(panel.tickets()[0].payload.mode, 'read');
+  panel.click('断开连接'); await flush();
+  options.directoryError = null; options.bots = [{ botId: 'writer', displayName: '写作助理' }];
+  panel.click('刷新助理列表'); await flush();
+  assert.equal(field(), undefined);
+  assert.equal(panel.nodes().find(node => node.type === 'select').props.value, 'writer');
+  assert.equal(panel.tickets().length, 1);
+});
+
 test('目录鉴权失败、格式错误和空目录不伪造默认助理', async t => {
   for (const error of [
     failure(401, 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED'),
@@ -392,6 +422,7 @@ test('目录鉴权失败、格式错误和空目录不伪造默认助理', async
   ]) await t.test(`${error.code}-${error.status}`, async child => {
     const panel = panelHarness(child, { directoryError: error }); await flush();
     assert.equal(panel.nodes().some(node => node.type === 'select'), false);
+    assert.equal(panel.nodes().some(node => node.type === 'input' && node.props['aria-label'] === '已有助理标识'), false);
     assert.doesNotMatch(panel.visibleText(), /已使用默认助理/u);
     assert.equal(panel.tickets().length, 0);
   });

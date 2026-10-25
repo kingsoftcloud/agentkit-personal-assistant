@@ -75,9 +75,9 @@ const ui = {
   border: '1px solid var(--dsw-alias-border-default, #d8dee8)',
 };
 const failure = error => error?.code === 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' && Number(error?.status) === 409 ? '当前云端版本尚不支持助理列表，请更新云端助理后重试' : '连接暂时不可用，请稍后重试';
+const directoryUnsupported = error => Number(error?.status) === 409 && ['PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED', 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE'].includes(error?.code);
 const canUseDefaultBot = error => ![401, 403].includes(Number(error?.status)) && (
-  error?.code === 'PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED'
-  || (['PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', 'PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT'].includes(error?.code) && Number(error?.status) >= 500 && Number(error?.status) <= 599)
+  ['PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', 'PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT'].includes(error?.code) && Number(error?.status) >= 500 && Number(error?.status) <= 599
 );
 const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
 
@@ -88,6 +88,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
   const [config, setConfig] = useState(null);
   const [bots, setBots] = useState([]);
   const [directoryError, setDirectoryError] = useState('');
+  const [manualBotAvailable, setManualBotAvailable] = useState(false);
+  const [manualBotId, setManualBotId] = useState('');
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [botId, setBotId] = useState(initialBotId);
   const [phase, setPhase] = useState('loading');
   const [notice, setNotice] = useState('');
@@ -227,7 +230,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
     } catch (error) { if (current.mounted && generation === current.generation) { setPhase('error'); setNotice(failure(error)); } }
   };
   const refreshConnection = async signal => {
-    close(false); setPhase('loading'); setNotice(''); setDirectoryError('');
+    close(false); setPhase('loading'); setNotice(''); setDirectoryError(''); setManualBotAvailable(false); setManualBotId('');
     let directoryStarted = false;
     try {
       const value = await rpc('personal-assistant.configuration');
@@ -244,6 +247,12 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       state.current.botId = selected; setBotId(selected); setPhase(available.length ? 'idle' : 'empty');
     } catch (error) {
       if (signal?.aborted || !state.current.mounted) return;
+      if (directoryStarted && directoryUnsupported(error)) {
+        state.current.bots = []; setBots([]); setBotId(''); setPhase('directory-error');
+        setManualBotAvailable(true); setManualBotId('default');
+        setDirectoryError('可在诊断中指定已有助理后连接；建议使用云端助理 0.1.4 或更新版本。');
+        return;
+      }
       if (directoryStarted && canUseDefaultBot(error)) {
         const available = publicBotDirectory([{ botId: 'default', displayName: '默认助理' }]);
         state.current.bots = available; state.current.botId = 'default';
@@ -254,6 +263,14 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       state.current.bots = []; setBots([]); setBotId(''); setPhase('directory-error');
       setDirectoryError(failure(error));
     }
+  };
+  const selectManualBot = () => {
+    const selected = manualBotId.trim();
+    if (!/^[a-z][a-z0-9._-]{0,63}$/u.test(selected)) { setDirectoryError('请输入有效的已有助理标识；只能使用小写字母开头的字母、数字、点、横线或下划线。'); return; }
+    const available = publicBotDirectory([{ botId: selected, displayName: '指定助理' }]);
+    state.current.bots = available; state.current.botId = selected;
+    setBots(available); setBotId(selected); setPhase('idle'); setDiagnosticsOpen(false);
+    setNotice('已选择已有助理；连接时将由云端验证该助理及访问权限。');
   };
   useEffect(() => {
     const current = state.current; current.mounted = true;
@@ -292,7 +309,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
   const buttonStyle = { ...ui, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', font: 'inherit' };
   const active = ['ready', 'readonly', 'hidden', 'reconnecting'].includes(phase);
   const selectable = bots.length > 0;
-  const emptyTitle = phase === 'unconfigured' ? '开通后，在这里连接你的个人助理' : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法读取助理列表' : '正在检查助理状态';
+  const emptyTitle = phase === 'unconfigured' ? '开通后，在这里连接你的个人助理' : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? manualBotAvailable ? '当前云端版本暂不支持助理列表' : '暂时无法读取助理列表' : '正在检查助理状态';
   const emptyDetail = phase === 'unconfigured' ? '开通完成后，即可在这里连接专属云电脑。' : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },
     h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 12, borderBottom: ui.border } },
@@ -311,10 +328,14 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', ...(phase === 'connecting' ? { color: '#e8edf5' } : {}) } },
         h('h2', { style: { margin: 0, fontSize: 20, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
         h('p', { style: { margin: 0, maxWidth: 380, lineHeight: 1.7, color: phase === 'connecting' ? '#b8c1d1' : 'var(--dsw-alias-label-secondary, #536174)' } }, selectable ? notice || '连接后即可使用云端桌面，关闭面板会释放本次控制。' : emptyDetail),
-        !selectable && phase !== 'loading' ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '检查开通状态') : null) : null,
+        !selectable && manualBotAvailable ? h('button', { style: buttonStyle, onClick: () => setDiagnosticsOpen(true) }, '选择已有助理') : null,
+        !selectable && phase !== 'loading' ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, manualBotAvailable ? '刷新助理列表' : '检查开通状态') : null) : null,
       h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || readOnly, tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } })),
     h('footer', { style: { display: 'flex', alignItems: 'start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', borderTop: ui.border } },
-      h('details', null, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
+      h('details', { open: diagnosticsOpen, onToggle: event => setDiagnosticsOpen(event.currentTarget.open) }, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
+        manualBotAvailable ? h('div', { style: { paddingTop: 8, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
+          h('label', null, '已有助理标识 ', h('input', { 'aria-label': '已有助理标识', value: manualBotId, maxLength: 64, autoComplete: 'off', spellCheck: false, onChange: event => setManualBotId(event.target.value), style: { ...ui, borderRadius: 6, padding: '6px 8px', maxWidth: 180 } })),
+          h('button', { style: buttonStyle, disabled: active || phase === 'connecting', onClick: selectManualBot }, '使用此助理')) : null,
         h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('div', null, `云端实例：${config?.agentId || '未开通'}`), h('div', null, `助理标识：${botId || '未选择'}`), h('div', null, `画面帧率：${fps} fps`), h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
       h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD, style: { opacity: 0.75 } }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
 
