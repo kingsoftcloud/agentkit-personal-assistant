@@ -8,11 +8,12 @@ import { createRuntime } from '../src/index.mjs';
 import { createDshTurnBridge } from '../src/dsh-session-bridge.mjs';
 import { BotRegistry } from '../src/bot-registry.mjs';
 import { startAssistantRuntime } from '../runtime/assistant-runtime.mjs';
+import { createScheduleManager } from '../src/schedule-manager.mjs';
 
 const bots = [{ botId: 'writer', systemPromptRevision: 'w1', systemPrompt: '写作专属 {{writer_literal}}' }, { botId: 'researcher', systemPromptRevision: 'r1', systemPrompt: '研究专属 {{research_literal}}' }];
 const token = 'fixture-bots-runtime-token-at-least-24';
 async function freePort() { const s = createServer(); await new Promise(r => s.listen(0, '127.0.0.1', r)); const p = s.address().port; await new Promise(r => s.close(r)); return p; }
-async function eventually(read) { const until = Date.now() + 3000; while (Date.now() < until) { const v = await read(); if (v) return v; await new Promise(r => setTimeout(r, 10)); } assert.fail('condition did not settle'); }
+async function eventually(read) { const until = performance.now() + 3000; while (performance.now() < until) { const v = await read(); if (v) return v; await new Promise(r => setTimeout(r, 10)); } assert.fail('condition did not settle'); }
 function nativeController() {
   const records = new Map(), calls = [];
   return { records, calls, async projections({ sessionId }) { return records.has(sessionId) ? {} : null; },
@@ -59,11 +60,15 @@ test('默认 Bot 也获得独立身份提示词，缺少真正 Agent prompt 服�
 });
 
 test('HTTP 会话隔离、定时任务真实触发 bridge，关闭停止计时，重启恢复待执行任务与数据', async t => {
+  // HTTP/磁盘 I/O 在 amd64 模拟环境下可能超过任务的短延时；只推进测试时钟，
+  // 不以机器速度决定关闭前是否已到期，仍执行真实 scheduler 与 runtime 回调。
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const root = await mkdtemp(join(tmpdir(), 'pa-bots-lifecycle-')); t.after(() => rm(root, { recursive: true, force: true }));
-  const calls = []; let handle, port;
+  const calls = [], timers = new Map(); let handle, port;
   const start = async () => {
     port = await freePort();
-    handle = await startAssistantRuntime({ env: { USER_ID: 'u1', ASSISTANT_ID: 'assistant-1', COMPUTER_ID: 'computer-1', COMPUTER_BROKER_URL: 'http://127.0.0.1:8787', AGENTKIT_RUNTIME_HOST: '127.0.0.1', AGENTKIT_RUNTIME_PORT: String(port), AGENTKIT_RUNTIME_TOKEN: token, WORKSPACE_PATH: root, ASSISTANT_STATE_PATH: join(root, 'state') }, runtime: { registry: new BotRegistry({ bots }), turnBridge: { available: true,
+    const scheduleManager = createScheduleManager({ setTimeoutFn(fn, delay) { const id = {}; timers.set(id, { fn, at: Date.now() + delay }); return id; }, clearTimeoutFn(id) { timers.delete(id); } });
+    handle = await startAssistantRuntime({ env: { USER_ID: 'u1', ASSISTANT_ID: 'assistant-1', COMPUTER_ID: 'computer-1', COMPUTER_BROKER_URL: 'http://127.0.0.1:8787', AGENTKIT_RUNTIME_HOST: '127.0.0.1', AGENTKIT_RUNTIME_PORT: String(port), AGENTKIT_RUNTIME_TOKEN: token, WORKSPACE_PATH: root, ASSISTANT_STATE_PATH: join(root, 'state') }, runtime: { scheduleManager, registry: new BotRegistry({ bots }), turnBridge: { available: true,
       async submitTurn(value) { calls.push(value); return { accepted: true, execution: 'dsh-session-controller', requestId: value.requestId }; }, async waitForTurn() { return { status: 'completed', messages: ['scheduled-result'] }; } } } });
   };
   const request = async (path, body, method = body ? 'POST' : 'GET') => { const r = await fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body ? { body: JSON.stringify(body) } : {}) }); return { status: r.status, body: await r.json() }; };
@@ -75,9 +80,14 @@ test('HTTP 会话隔离、定时任务真实触发 bridge，关闭停止计时�
   await request('/v1/memory', { botId: 'researcher', key: 'same-key', content: 'research-only' });
   assert.equal((await request('/v1/memory?botId=writer')).body.memories[0].content, 'writer-only');
   assert.equal((await request('/v1/schedules', { botId: 'writer', scheduleId: 'empty', runAt: Date.now() + 1000 })).status, 400);
-  for (const botId of ['writer', 'researcher']) assert.equal((await request('/v1/schedules', { botId, scheduleId: 'same-id', runAt: Date.now() + 120, input: `${botId}-scheduled` })).status, 201);
-  await handle.close(); await new Promise(r => setTimeout(r, 180)); assert.equal(calls.length, 0);
+  for (const botId of ['writer', 'researcher']) assert.equal((await request('/v1/schedules', { botId, scheduleId: 'same-id', runAt: Date.now() + 60_000, input: `${botId}-scheduled` })).status, 201);
+  assert.equal(timers.size, 2);
+  await handle.close(); assert.equal(timers.size, 0, 'close must cancel both timers');
+  t.mock.timers.tick(60_001); assert.equal(calls.length, 0);
   await start();
+  assert.equal(timers.size, 2, 'restart must re-arm both persisted tasks');
+  t.mock.timers.tick(1);
+  for (const [id, timer] of [...timers]) if (timer.at <= Date.now()) { timers.delete(id); await timer.fn(); }
   await eventually(async () => (await request('/v1/schedules?botId=writer')).body.schedules[0]?.status === 'completed');
   await eventually(async () => (await request('/v1/schedules?botId=researcher')).body.schedules[0]?.status === 'completed');
   assert.deepEqual(calls.map(row => row.botId).sort(), ['researcher', 'writer']);
