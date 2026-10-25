@@ -63,3 +63,17 @@ test('通知代理的就绪探测必须真正执行 chmod 与 FD truncate', asyn
   assert.ok(calls[0].args.some(value => value.includes('os.chmod') && value.includes('os.ftruncate')));
   assert.equal(calls[0].options.env.AGENTKIT_RUNTIME_TOKEN, undefined);
 });
+
+
+test('bubblewrap 探测必须覆盖正式的 proc/dev 挂载和全部 namespace', () => {
+ const calls = [];
+ const available = probeSandbox({ sandbox: { kind: 'bwrap', path: '/usr/bin/bwrap' }, run(file,args,options) {
+  calls.push({file,args,options});
+  return {status: args.includes('--proc') ? 1 : 0};
+ }});
+ assert.equal(available, false, '完整 /proc 挂载失败时不能报告就绪');
+ assert.ok(calls[0].args.includes('--proc'));
+ assert.ok(calls[0].args.includes('--dev'));
+ assert.ok(calls[0].args.includes('--unshare-net'));
+ assert.equal(calls[0].options.env.AGENTKIT_RUNTIME_TOKEN, undefined);
+});

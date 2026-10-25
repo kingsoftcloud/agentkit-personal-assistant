@@ -83,9 +83,17 @@ function cachedProbe(key, probe) {
 export function probeSandbox({ sandbox, run = spawnSync, timeoutMs = 5000 } = {}) {
   if (!sandbox?.path) return false;
   if (sandbox.kind === 'bwrap') {
-    const result = run(sandbox.path, ['--unshare-user', '--unshare-pid', '--die-with-parent', '--ro-bind', '/', '/',
-      '--tmpfs', '/tmp', '--', '/bin/true'], { timeout: timeoutMs, stdio: 'ignore', env: { PATH: '/usr/local/bin:/usr/bin:/bin' } });
-    return result?.status === 0;
+    // 必须走与正式执行相同的挂载和 namespace；仅 ro-bind / + true
+    // 会漏掉 AppArmor 拒绝 /proc 挂载，造成“探测绿、执行失败”。
+    let workspace;
+    try {
+      workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pa-bwrap-probe-')));
+      const planned = planCloudExecution({ sandbox: { ...sandbox, available: true }, workspaceRoot: workspace,
+        argv: ['/bin/true'], timeoutMs });
+      const result = run(planned.file, planned.args, { timeout: timeoutMs, stdio: 'ignore', env: planned.env, cwd: workspace });
+      return result?.status === 0;
+    } catch { return false; }
+    finally { if (workspace) rmSync(workspace, { recursive: true, force: true }); }
   }
   if (sandbox.kind === 'landlock') {
     if (!sandbox.guard || !sandbox.unshare) return false;
