@@ -12,6 +12,24 @@ const frame = (opcode, payload = Buffer.alloc(0)) => {
 };
 const accept = key => createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
 const jsonFrame = value => frame(1, JSON.stringify(value));
+export const DESKTOP_MAX_PENDING_BYTES = 2 * (maxFrame + 1024);
+
+/** 慢客户端最多保留两帧大小；等待 drain 时跳帧，不建立帧队列。 */
+export function createDesktopSocketWriter(socket) {
+  let blocked = false;
+  const drain = () => { blocked = false; };
+  socket.on('drain', drain);
+  return {
+    get ready() { return !socket.destroyed && !blocked && socket.writableLength < DESKTOP_MAX_PENDING_BYTES; },
+    write(packet) {
+      if (socket.destroyed) return false;
+      if (socket.writableLength + packet.length > DESKTOP_MAX_PENDING_BYTES) { socket.destroy(); return false; }
+      if (!socket.write(packet)) blocked = true;
+      return true;
+    },
+    dispose() { socket.off('drain', drain); },
+  };
+}
 const unauthorized = message => Object.assign(new Error(message), { status: 401, code: 'DESKTOP_UNAUTHORIZED' });
 const permitKeys = new Map();
 
@@ -97,16 +115,19 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     if (!key) { socket.destroy(); return; }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept(key)}\r\nSec-WebSocket-Protocol: ${protocol}\r\n\r\n`);
     if (head?.length) socket.unshift(head);
-    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, paused: false, lastInputAt: Date.now(), lastFrameSeq: -1, timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve() };
-    const send = value => { if (!state.closed) socket.write(jsonFrame(value)); };
+    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, paused: false, lastInputAt: Date.now(), lastFrameSeq: -1, timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve(), pendingMessages: 0 };
+    const writer = createDesktopSocketWriter(socket);
+    const send = value => { if (!state.closed) writer.write(jsonFrame(value)); };
     const close = async () => {
       if (state.closed) return; state.closed = true; if (state.timer) clearTimeout(state.timer); if (state.renewTimer) clearInterval(state.renewTimer);
+      writer.dispose();
       if (state.sessionId) await brokerDesktopRequest('/broker/desktop/close', { sessionId: state.sessionId }).catch(() => {});
       if (state.autoLease && state.leaseId) await brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId }).catch(() => {});
       try { socket.end(frame(8)); } catch {}
     };
     const poll = async () => {
       if (state.closed || state.paused || !state.sessionId || state.frameBusy) return;
+      if (!writer.ready) { state.timer = setTimeout(poll, 80); return; }
       state.frameBusy = true;
       const startedAt = Date.now();
       let nextFrameDelayMs = Date.now() - state.lastInputAt < 10_000 ? 80 : 1000;
@@ -116,11 +137,11 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         if (Number.isFinite(result.nextFrameDelayMs)) nextFrameDelayMs = Math.max(50, Math.min(1000, result.nextFrameDelayMs));
         if (!result.unchanged && result.data) {
           const metadata = { type: 'frame', seq: result.seq, format: result.format, width: result.width, height: result.height, bytes: result.bytes };
-          send(metadata);
           if (!Buffer.isBuffer(result.data)) throw Object.assign(new Error('desktop broker did not return binary data'), { code: 'DESKTOP_BINARY_FRAME_REQUIRED' });
           const bytes = result.data;
           if (bytes.length > maxFrame) throw Object.assign(new Error('desktop frame too large'), { code: 'DESKTOP_FRAME_TOO_LARGE' });
-          if (!state.closed) { socket.write(frame(2, bytes)); state.lastFrameSeq = result.seq; }
+          // 元数据和 JPEG 一起写，回压期间不会只发送半对消息。
+          if (!state.closed && writer.ready && writer.write(Buffer.concat([jsonFrame(metadata), frame(2, bytes)]))) state.lastFrameSeq = result.seq;
         } else send({ type: 'frame', seq: result.seq, unchanged: true, width: result.width, height: result.height });
       } catch (error) { send({ type: 'error', code: error?.code || 'DESKTOP_FRAME_FAILED', message: String(error?.message || 'desktop frame failed') }); }
       finally {
@@ -131,7 +152,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     const onMessage = async (opcode, payload) => {
       if (state.closed) return;
       if (opcode === 8) return close();
-      if (opcode === 9) { socket.write(frame(10, payload)); return; }
+      if (opcode === 9) { writer.write(frame(10, payload)); return; }
       if (opcode !== 1) return;
       let body; try { body = JSON.parse(payload.toString('utf8')); } catch { send({ type: 'error', code: 'INVALID_JSON' }); return; }
       try {
@@ -175,7 +196,10 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         send({ type: 'error', status: error?.status || 400, code: error?.code || 'DESKTOP_REQUEST_FAILED', message: String(error?.message || 'desktop request failed') });
       }
     };
-    socket.on('data', chunk => { try { parseFrames(state, chunk, (opcode, payload) => { state.pending = state.pending.then(() => onMessage(opcode, payload)).catch(() => close()); }); } catch { close(); } });
+    socket.on('data', chunk => { try { parseFrames(state, chunk, (opcode, payload) => {
+      if (++state.pendingMessages > 64) { socket.destroy(); void close(); return; }
+      state.pending = state.pending.then(() => onMessage(opcode, payload)).catch(() => close()).finally(() => { state.pendingMessages -= 1; });
+    }); } catch { close(); } });
     socket.on('close', close); socket.on('error', close);
   });
 }

@@ -66,9 +66,9 @@ function collectStderr(child, state) {
 
 export async function launchChromium({
   chromium, proxy, userDataDir = createProfileDir(), spawn = spawnChild,
-  launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, now = Date.now, pollMs = 25,
+  launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, now = Date.now, pollMs = 25, env = process.env,
 } = {}) {
-  const desktop = process.env.AGENTKIT_DESKTOP_MODE === '1';
+  const desktop = env.AGENTKIT_DESKTOP_MODE === '1';
   const args = chromiumArgs({ userDataDir, proxy, desktop });
   const stderr = { text: '', bytes: 0 };
   let child;
@@ -76,7 +76,7 @@ export async function launchChromium({
     child = spawn(chromium, args, {
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp', ...(desktop ? { DISPLAY: process.env.DISPLAY || ':99' } : {}) },
+      env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp', ...(desktop ? { DISPLAY: env.DISPLAY || ':99' } : {}) },
     });
   } catch (error) {
     rmSync(userDataDir, { recursive: true, force: true });
@@ -205,10 +205,11 @@ export async function startCdpTransport({
   chromium, proxy, spawn = spawnChild, WebSocketImpl = globalThis.WebSocket,
   kill = killProcessTree, launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS,
   commandTimeoutMs = CDP_COMMAND_TIMEOUT_MS, now = Date.now, userDataDir, endpoint: fixedEndpoint,
+  env = process.env,
 } = {}) {
   const launched = fixedEndpoint
     ? { child: undefined, userDataDir, endpoint: { endpoint: fixedEndpoint }, stderr: { text: '' } }
-    : await launchChromium({ chromium, proxy, spawn, launchTimeoutMs, now, userDataDir });
+    : await launchChromium({ chromium, proxy, spawn, launchTimeoutMs, now, userDataDir, env });
   let connection;
   try { connection = await connectCdp({ endpoint: launched.endpoint.endpoint, WebSocketImpl, commandTimeoutMs }); }
   catch (error) {

@@ -292,6 +292,7 @@ export function createCloudBrowser({
 } = {}) {
   const root = checkedWorkspace(workspace);
   const resolution = resolveCloudBrowser({ env });
+  const desktopMode = env.AGENTKIT_DESKTOP_MODE === '1';
   const shotsDir = join(root, 'files', '.cloud-browser');
   const downloadsDir = join(root, 'files', 'downloads');
   const listDownloads = typeof listDownloadsHook === 'function' ? listDownloadsHook
@@ -345,6 +346,7 @@ export function createCloudBrowser({
       started = await startCdpTransport({
         chromium: resolution.chromium, proxy: resolution.proxy, spawn, WebSocketImpl,
         kill, launchTimeoutMs, commandTimeoutMs: commandMs,
+        env,
       });
       const created = await started.connection.send('Target.createTarget', { url: 'about:blank' }, { timeoutMs: commandMs });
       if (!created?.targetId) throw fail('Chromium 没有创建页面目标', 'ASSISTANT_BROWSER_LAUNCH_FAILED');
@@ -352,7 +354,7 @@ export function createCloudBrowser({
       const attached = await started.connection.send('Target.attachToTarget', { targetId, flatten: true }, { timeoutMs: commandMs });
       if (!attached?.sessionId) throw fail('Chromium 没有返回页面会话', 'ASSISTANT_BROWSER_LAUNCH_FAILED');
       pageSession = attached.sessionId;
-      await started.connection.send('Emulation.setDeviceMetricsOverride',
+      if (!desktopMode) await started.connection.send('Emulation.setDeviceMetricsOverride',
         { width: VIEWPORT.width, height: VIEWPORT.height, deviceScaleFactor: 1, mobile: false }, { sessionId: pageSession, timeoutMs: commandMs });
       await started.connection.send('Browser.setDownloadBehavior', { behavior: 'deny' }, { timeoutMs: commandMs });
       transport = started;
@@ -495,7 +497,7 @@ export function createCloudBrowser({
 
   async function screenshot() {
     requirePage();
-    await pageCommand('Emulation.setDeviceMetricsOverride',
+    if (!desktopMode) await pageCommand('Emulation.setDeviceMetricsOverride',
       { width: VIEWPORT.width, height: VIEWPORT.height, deviceScaleFactor: 1, mobile: false });
     const captured = await pageCommand('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
     const data = captured?.data;
@@ -504,6 +506,8 @@ export function createCloudBrowser({
     const buffer = Buffer.from(data, 'base64');
     if (!buffer.length) throw fail('Chromium 返回了空截图', 'ASSISTANT_BROWSER_SCREENSHOT_FAILED');
     if (buffer.length > MAX_SCREENSHOT_BYTES) throw fail('截图超过云端浏览器上限', 'ASSISTANT_BROWSER_SCREENSHOT_TOO_LARGE');
+    if (buffer.length < 24 || !buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw fail('Chromium 返回了无效 PNG', 'ASSISTANT_BROWSER_SCREENSHOT_FAILED');
+    const dimensions = { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
     await mkdir(shotsDir, { recursive: true });
     const candidate = Number(now());
     const stamp = Number.isInteger(candidate) && candidate >= 0 ? candidate : Date.now();
@@ -515,7 +519,7 @@ export function createCloudBrowser({
     }
     await writeFile(absolute, buffer);
     touch();
-    return { path: relativeInside(root, absolute, '截图'), bytes: buffer.length, width: VIEWPORT.width, height: VIEWPORT.height, url: lastUrl };
+    return { path: relativeInside(root, absolute, '截图'), bytes: buffer.length, ...dimensions, url: lastUrl };
   }
 
   async function waitForDownload(baseline, timeoutMs) {
@@ -663,6 +667,12 @@ function browserOutput(properties, required, render) {
       return await definition.execute(args, exec);
     },
     open(input, options) { return navigate(typeof input === 'string' ? input : input?.url, options); },
+    async openDesktopWindow() {
+      if (!desktopMode) throw fail('当前浏览器未启用桌面模式', 'ASSISTANT_BROWSER_DESKTOP_REQUIRED');
+      await ensureBrowser();
+      lastUrl ||= 'about:blank';
+      return { url: lastUrl };
+    },
     navigate,
     snapshot,
     click,
@@ -674,6 +684,8 @@ function browserOutput(properties, required, render) {
     async dispose() {
       if (disposed) return;
       disposed = true;
+      // 关闭与冷启动并发时，等待启动结束再回收，避免迟到的 Chromium 泄漏。
+      if (launching) await launching.catch(() => {});
       await closeBrowser();
     },
   };

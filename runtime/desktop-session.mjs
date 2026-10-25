@@ -8,7 +8,7 @@
 import { execFile as execFileCallback, spawn as spawnChild } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -118,11 +118,18 @@ export function createDesktopController({
     if (!wmConfiguration) {
       // Only configuration is written. Desktop pixels remain memory-only.
       wmConfiguration = await mkdtemp(join(tmpdir(), 'agentkit-desktop-wm-'));
+      // Fluxbox 首次启动会向 HOME/.fluxbox 复制系统默认配置；提前完整创建，
+      // 避免覆盖 -rc 指定的设置或弹出默认壁纸错误窗口。
+      await mkdir(join(wmConfiguration, '.fluxbox'));
+      await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), '');
+      await writeFile(join(wmConfiguration, '.fluxbox', 'apps'), '');
       await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\n');
       await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12}\n[end]\n');
-      await writeFile(join(wmConfiguration, 'init'), `session.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.focusNewWindows: true\n`);
+      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.focusNewWindows: true\n`;
+      await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
+      await writeFile(join(wmConfiguration, 'init'), config);
     }
-    wm = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit', '-no-toolbar'], { env: environment, stdio: 'ignore' });
+    wm = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit', '-no-toolbar'], { env: { ...environment, HOME: wmConfiguration }, stdio: 'ignore' });
     wm.once?.('exit', () => { wm = undefined; });
   };
   const spawnTerminal = () => {

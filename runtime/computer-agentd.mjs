@@ -21,14 +21,15 @@ const closeDesktopBrowser = async () => {
   await current.close?.().catch?.(() => {});
   await current.dispose?.().catch?.(() => {});
 };
-const ensureDesktopBrowser = async (initialUrl = 'https://example.com') => {
+const ensureDesktopBrowser = async () => {
   if (desktopBrowserOpening) return desktopBrowserOpening;
   browser ||= createCloudBrowser({ workspace });
   if (!browser.available) throw Object.assign(new Error(browser.resolution?.reason || 'desktop browser unavailable'), { code: 'ASSISTANT_BROWSER_UNAVAILABLE', status: 503 });
   // A visible browser window is part of the desktop session.  The desktop
   // mode launcher uses DISPLAY=:99 and kiosk/X11 flags; this is intentionally
   // separate from the headless cloud_browser tool path.
-  desktopBrowserOpening = browser.open(initialUrl).catch(error => { desktopBrowserOpening = undefined; throw error; });
+  // 首帧只等待本地窗口，外网页面加载由明确的浏览器操作触发。
+  desktopBrowserOpening = browser.openDesktopWindow().catch(error => { desktopBrowserOpening = undefined; throw error; });
   return desktopBrowserOpening;
 };
 desktop = createDesktopController({ onStop: closeDesktopBrowser });
@@ -73,8 +74,7 @@ async function action(body) {
   if (body.action === 'open') {
     if (process.env.AGENTKIT_DESKTOP_MODE === '1') {
       await desktop.ensureDisplay();
-      if (!desktopBrowserOpening) return ensureDesktopBrowser(args.url);
-      await desktopBrowserOpening;
+      await ensureDesktopBrowser();
     }
     return (browser ||= createCloudBrowser({ workspace })).open(args.url);
   }
