@@ -31,6 +31,7 @@ const CLOUD_ENVIRONMENT = Object.freeze([
   ['TERM', 'dumb'], ['PYTHONDONTWRITEBYTECODE', '1'], ['NODE_OPTIONS', '--max-old-space-size=512'],
   ['AGENTKIT_CLOUD_EXECUTION', '1'],
 ]);
+const NAMESPACE_ARGS = Object.freeze(['--user', '--map-root-user', '--net', '--pid', '--fork', '--ipc', '--uts', '--kill-child']);
 const LANDLOCK_INFORMATIONAL = 'landlock-run: partial enforcement (older Landlock ABI)';
 const fail = (message, code = 'ASSISTANT_CLOUD_EXEC_REFUSED') => Object.assign(new Error(message), { code });
 
@@ -86,7 +87,10 @@ export function probeSandbox({ sandbox, run = spawnSync, timeoutMs = 5000 } = {}
     return result?.status === 0;
   }
   if (sandbox.kind === 'landlock') {
-    const result = run(sandbox.path, ['--probe'], { timeout: timeoutMs, stdio: 'ignore', env: {} });
+    if (!sandbox.guard || !sandbox.unshare) return false;
+    // 必须验证真正的 namespace + seccomp + Landlock 组合，不能只测
+    // landlock --probe 后在实际执行时才发现 unshare 被集群拒绝。
+    const result = run(sandbox.unshare, [...NAMESPACE_ARGS, sandbox.guard, '--', sandbox.path, '--probe'], { timeout: timeoutMs, stdio: 'ignore', env: {} });
     return result?.status === 0;
   }
   return false;
@@ -99,7 +103,7 @@ export function probeSandbox({ sandbox, run = spawnSync, timeoutMs = 5000 } = {}
  * create its mount namespace. A backend is only reported usable after it
  * proved enforcement once; execution never degrades to an unconfined child.
  */
-export function resolveCloudSandbox({ platform = process.platform, env = process.env, bwrapPath, landlockPath, unsharePath, probe = probeSandbox } = {}) {
+export function resolveCloudSandbox({ platform = process.platform, env = process.env, bwrapPath, landlockPath, unsharePath, guardPath, probe = probeSandbox } = {}) {
   if (platform !== 'linux') return { available: false, reason: '该运行环境没有可用的 Linux 执行沙箱' };
   const bwrap = bwrapPath || env.AGENTKIT_BWRAP || '/usr/bin/bwrap';
   if (isAbsolute(bwrap) && existsSync(bwrap)) {
@@ -108,9 +112,10 @@ export function resolveCloudSandbox({ platform = process.platform, env = process
   }
   const launcher = landlockPath || resolveLandlockLauncher({ env });
   const unshare = unsharePath || env.AGENTKIT_UNSHARE || '/usr/bin/unshare';
-  if (launcher && isAbsolute(unshare) && existsSync(unshare)) {
-    const sandbox = { available: true, kind: 'landlock', path: launcher, unshare, isolation: 'landlock' };
-    if (cachedProbe(`landlock:${launcher}`, () => probe({ sandbox }))) return sandbox;
+  const guard = guardPath || env.AGENTKIT_TERMINAL_GUARD || '/usr/local/lib/agentkit/terminal-guard';
+  if (launcher && isAbsolute(unshare) && existsSync(unshare) && isAbsolute(guard) && existsSync(guard)) {
+    const sandbox = { available: true, kind: 'landlock', path: launcher, unshare, guard, isolation: 'landlock+seccomp+namespaces' };
+    if (cachedProbe(`landlock:${launcher}:${guard}:${unshare}`, () => probe({ sandbox }))) return sandbox;
   }
   return { available: false, reason: '运行环境没有可用的隔离后端：bubblewrap 与 Landlock 沙盒启动器均不可用' };
 }
@@ -158,7 +163,8 @@ export function planCloudExecution({ sandbox, workspaceRoot, argv, timeoutMs }) 
   }
   if (sandbox.kind === 'landlock') {
     if (!isAbsolute(sandbox.unshare || '') || !existsSync(sandbox.unshare)) throw fail('云端执行沙箱不可用：缺少 unshare');
-    const args = ['--user', '--map-root-user', '--net', '--pid', '--fork', '--ipc', '--uts', '--kill-child', sandbox.path];
+    if (!isAbsolute(sandbox.guard || '') || !existsSync(sandbox.guard)) throw fail('云端执行沙箱不可用：缺少 seccomp 补偿层');
+    const args = [...NAMESPACE_ARGS, sandbox.guard, '--', sandbox.path];
     for (const path of LANDLOCK_READ_ONLY) args.push('--ro', path);
     for (const path of LANDLOCK_READ_WRITE) args.push('--rw', path);
     args.push('--rw', root, '--', ...argv);
@@ -177,8 +183,7 @@ function appendBounded(chunks, chunk, state, label, cap = OUTPUT_BYTES) {
 
 /** Drop the launcher's informational verdict line so tool output stays the command's own. */
 function cleanStderr(text) {
-  if (!text.includes('landlock-run: ')) return text;
-  return text.split('\n').filter(line => !line.startsWith('landlock-run: ')).join('\n');
+  return text.split('\n').filter(line => line !== LANDLOCK_INFORMATIONAL).join('\n');
 }
 
 /**
