@@ -49,7 +49,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       if (typeof WebSocketImpl !== 'function') throw fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 503);
       const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
       const bots = await new Promise((resolve, reject) => {
-        let socket, settled = false;
+        let socket, settled = false, connected = false;
         const finish = (error, rows) => {
           if (settled) return; settled = true;
           querySignal.removeEventListener('abort', abort);
@@ -61,15 +61,27 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         querySignal.addEventListener('abort', abort, { once: true });
         try { socket = new WebSocketImpl(ticket.wsUrl, ['agentkit.personal-assistant.desktop.v1', `agentkit.desktop.ticket.${ticket.ticket}`]); }
         catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502)); return; }
-        socket.onopen = () => socket.send(JSON.stringify({ type: 'bots.list' }));
-        socket.onerror = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502));
-        socket.onclose = event => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', `助理目录连接已结束（close ${Number(event?.code) || 'unknown'}），请重试`, 502));
+        socket.once?.('unexpected-response', (_request, response) => {
+          const status = Number(response.statusCode) || 502;
+          response.resume?.();
+          finish(fail(status >= 500 ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '云端拒绝读取助理列表，请检查连接授权', status >= 400 ? status : 502));
+        });
+        socket.onopen = () => { connected = true; socket.send(JSON.stringify({ type: 'bots.list' })); };
+        // 未完成握手时的不透明错误可能是鉴权拒绝，不能当作普通目录故障回退。
+        socket.onerror = () => finish(fail(connected ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '暂时无法读取助理列表，请检查连接授权后重试', 502));
+        socket.onclose = event => finish(fail(!connected || Number(event?.code) === 1008 ? 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED' : 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '助理目录连接已结束，请重试', Number(event?.code) === 1008 ? 403 : 502));
         socket.onmessage = event => {
           try {
             if (typeof event.data !== 'string' || event.data.length > 64 * 1024) throw new Error('invalid directory');
             const value = JSON.parse(event.data);
             if (value.type === 'bots') finish(null, publicBotDirectory(value.bots));
-            else if (value.type === 'error') finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', value.code === 'DESKTOP_MESSAGE_UNSUPPORTED' ? '当前云端版本尚不支持助理列表，请更新云端助理后重试' : '暂时无法读取助理列表，请重试', 409));
+            else if (value.type === 'error') {
+              if (value.code === 'DESKTOP_MESSAGE_UNSUPPORTED') finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED', '当前云端版本尚不支持助理列表', 409));
+              else {
+                const status = Number(value.status) || 400;
+                finish(fail(status >= 500 ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '云端拒绝读取助理列表，请检查连接授权', status));
+              }
+            }
           } catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_INVALID', '助理目录格式不兼容，请更新云端助理后重试', 502)); }
         };
       });

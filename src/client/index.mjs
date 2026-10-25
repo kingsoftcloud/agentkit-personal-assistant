@@ -75,6 +75,10 @@ const ui = {
   border: '1px solid var(--dsw-alias-border-default, #d8dee8)',
 };
 const failure = error => error?.code === 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' && Number(error?.status) === 409 ? '当前云端版本尚不支持助理列表，请更新云端助理后重试' : '连接暂时不可用，请稍后重试';
+const canUseDefaultBot = error => ![401, 403].includes(Number(error?.status)) && (
+  error?.code === 'PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED'
+  || (['PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', 'PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT'].includes(error?.code) && Number(error?.status) >= 500 && Number(error?.status) <= 599)
+);
 const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
 
 export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
@@ -224,11 +228,13 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
   };
   const refreshConnection = async signal => {
     close(false); setPhase('loading'); setNotice(''); setDirectoryError('');
+    let directoryStarted = false;
     try {
       const value = await rpc('personal-assistant.configuration');
       if (signal?.aborted || !state.current.mounted) return;
       state.current.config = value; setConfig(value);
       if (!value.configured) { state.current.bots = []; setBots([]); setBotId(''); setPhase('unconfigured'); return; }
+      directoryStarted = true;
       const result = await rpc('personal-assistant.bots.list');
       if (signal?.aborted || !state.current.mounted) return;
       if (result.directoryAvailable !== true) throw Object.assign(new Error('directory unavailable'), { code: 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', status: 409 });
@@ -238,6 +244,13 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       state.current.botId = selected; setBotId(selected); setPhase(available.length ? 'idle' : 'empty');
     } catch (error) {
       if (signal?.aborted || !state.current.mounted) return;
+      if (directoryStarted && canUseDefaultBot(error)) {
+        const available = publicBotDirectory([{ botId: 'default', displayName: '默认助理' }]);
+        state.current.bots = available; state.current.botId = 'default';
+        setBots(available); setBotId('default'); setPhase('idle');
+        setNotice('暂时无法读取助理列表，已使用默认助理');
+        return;
+      }
       state.current.bots = []; setBots([]); setBotId(''); setPhase('directory-error');
       setDirectoryError(failure(error));
     }
@@ -285,6 +298,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
     h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 12, borderBottom: ui.border } },
       h('strong', { style: { fontWeight: 500, marginRight: 8 } }, '个人助理'),
       selectable ? h('label', null, '当前助理 ', h('select', { 'aria-label': '当前助理', value: botId, onChange: event => { close(); setBotId(event.target.value); }, style: { ...ui, borderRadius: 6, padding: '6px 8px', maxWidth: 220 } }, bots.map(bot => h('option', { key: bot.botId, value: bot.botId }, bot.displayName)))) : null,
+      selectable && ['idle', 'closed', 'error'].includes(phase) ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '刷新助理列表') : null,
       selectable ? h('button', { style: buttonStyle, disabled: phase === 'connecting', onClick: () => void open('control') }, readOnly && phase === 'readonly' ? '申请控制' : active ? '重新连接' : '连接云电脑') : null,
       selectable ? h('button', { style: buttonStyle, disabled: phase === 'connecting', onClick: () => void open('read') }, '只读旁观') : null,
       active || phase === 'connecting' ? h('button', { style: buttonStyle, onClick: () => { close(); setNotice(''); } }, '断开连接') : null,

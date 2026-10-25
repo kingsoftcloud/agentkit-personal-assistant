@@ -350,3 +350,49 @@ test('助理只从真实目录选择，诊断字段折叠，页面默认不连�
   assert.equal(panel.sockets.length, 0);
   assert.equal(panel.requests.filter(row => row.operation.endsWith('.bots.list')).length, 1);
 });
+
+
+test('旧目录协议或临时故障可选择默认助理，恢复目录后覆盖回退项', async t => {
+  for (const error of [
+    failure(409, 'PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED'),
+    failure(502, 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE'),
+    failure(504, 'PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT'),
+  ]) await t.test(error.code, async child => {
+    const options = { directoryError: error };
+    const panel = panelHarness(child, options); await flush();
+    const select = panel.nodes().find(node => node.type === 'select');
+    assert.ok(select, 'fallback supplies a fixed choice rather than a text field');
+    assert.equal(select.props.value, 'default');
+    assert.deepEqual(select.children.map(node => node.children[0]), ['默认助理']);
+    assert.match(panel.visibleText(), /暂时无法读取助理列表，已使用默认助理/u);
+    assert.equal(panel.tickets().length, 0, 'fallback does not auto-connect');
+    panel.click('连接云电脑'); await flush();
+    assert.equal(panel.tickets().length, 1);
+    assert.equal(panel.tickets()[0].payload.botId, 'default');
+    assert.equal(panel.tickets()[0].payload.mode, 'control');
+    panel.click('断开连接'); await flush();
+    options.directoryError = null; options.bots = [{ botId: 'writer', displayName: '写作助理' }];
+    panel.click('刷新助理列表'); await flush();
+    const refreshed = panel.nodes().find(node => node.type === 'select');
+    assert.equal(refreshed.props.value, 'writer');
+    assert.deepEqual(refreshed.children.map(node => node.children[0]), ['写作助理']);
+    assert.doesNotMatch(panel.visibleText(), /已使用默认助理/u);
+    assert.equal(panel.tickets().length, 1, 'directory refresh does not open a computer');
+  });
+});
+
+test('目录鉴权失败、格式错误和空目录不伪造默认助理', async t => {
+  for (const error of [
+    failure(401, 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED'),
+    failure(403, 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED'),
+    failure(403, 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE'),
+    failure(401, 'PERSONAL_ASSISTANT_TICKET_REFUSED'),
+    failure(502, 'PERSONAL_ASSISTANT_TICKET_INVALID'),
+    failure(502, 'PERSONAL_ASSISTANT_DIRECTORY_INVALID'),
+  ]) await t.test(`${error.code}-${error.status}`, async child => {
+    const panel = panelHarness(child, { directoryError: error }); await flush();
+    assert.equal(panel.nodes().some(node => node.type === 'select'), false);
+    assert.doesNotMatch(panel.visibleText(), /已使用默认助理/u);
+    assert.equal(panel.tickets().length, 0);
+  });
+});
