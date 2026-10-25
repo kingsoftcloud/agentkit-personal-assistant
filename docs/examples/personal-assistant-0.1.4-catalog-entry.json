@@ -1,0 +1,19 @@
+{
+  "image": "hub-vpc-cn-beijing-6.kce.ksyun.com/agentengine-public/agent-runtime-personal-assistant@sha256:054a7d9be9f82022db6e6df92225b95c7396e673d56caf13da218185b19f4510",
+  "protocol": "runtime-manifest/v1",
+  "capabilityDigest": "e53a4981603238df7b9474c1af9446f0c53cc85a720b2209edb7b01d236d0c1c",
+  "capabilities": [
+    "personal-assistant/v1",
+    "personal-assistant-bots/v1",
+    "personal-assistant-workspace-managed/v1",
+    "personal-assistant-browser/v1",
+    "personal-assistant-code-execution/v1",
+    "cloud-computer/v1",
+    "personal-assistant-schedule-manager/v1"
+  ],
+  "computer": {
+    "image": "hub-vpc-cn-beijing-6.kce.ksyun.com/agentengine-public/agent-runtime-personal-assistant-computer@sha256:18239bacccff47eafc70736ba5e1c381aad8369cb46524649b14c4ffc8f998f8",
+    "port": 8787,
+    "workspaceMountPath": "/workspace"
+  }
+}
