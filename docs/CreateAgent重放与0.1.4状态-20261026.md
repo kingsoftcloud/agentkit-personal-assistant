@@ -1,6 +1,24 @@
 # CreateAgent 重放与 0.1.4 状态（2026-10-26）
 
-## 当前真实创建结果
+## 两个 Lead 修复与当前候选的归属
+
+Lead 的 `cd996a6bb996eb3200a0f3d485d3edf8b52a1b84` 提供 ws 优先解析与客户端 watch 构建；`ad9f8aa766d8d75508a81538aa2ba309bc2dce19` 将首帧截止从 3 秒改为 12 秒。已分别执行 `git merge-base --is-ancestor <commit> a417e49`，两项均返回 0，确认已包含在新候选源码中，无需重复 cherry-pick。
+
+| catalog 版本 | Runtime 插件构建源码 | 是否含 cd996a6 / ad9f8aa |
+| --- | --- | --- |
+| 0.1.4 | 5f0a4a9，保持冻结 | 均不含 |
+| 0.1.6 | 复用 0.1.4 Runtime，仅更新 Computer | 均不含 |
+| 0.1.7 | a417e49，已构建并登记 dev | 均包含 |
+
+**0.1.4 不含 ws 修复；配合仍使用 undici 的旧本机 Host 时，面板目录查询会失败。** 但这不是“0.1.4 服务端不支持目录”：该 Runtime 已实现 bots.list，安装包含 cd996a6 的本地 Host 可使用目录协议。两个端点须分别核验，不能把镜像中旧 Host 客户端源码等同于目录服务端实现。
+
+首帧截止同样由本机加载的 dist/client.js 决定。新 Runtime 或 Git 源码中有 ad9f8aa，不代表用户旧 dist 已更新。当前完整本地包已实际解包核验：优先 ws、客户端 12 秒截止均存在；真实 DSH --dump-config 通过。包为 `/Users/xiayu/Downloads/AgentKit个人助理预览包-20261026-WS修复/kingsoftcloud-agentkit-personal-assistant-0.1.0.tgz`，SHA256 `e6714a90fd0c7f30b4c924db636b95a615deed11f6f9b00e761a10765c6b8ccd`，构建戳 `2026-10-25T20:11:26.348Z`。含 Host 改动，安装后需重开应用；本方未修改用户 profile/App。
+
+当前应以 `verify-release.sh 0.1.7` 验证这两个修复的交付组合；0.1.4 可作为冻结对照。新 Runtime 标签 `0.1.7-candidate-20261026-a417e49`，digest `sha256:1a6905e84f16f75434be68b866aa81b1ee2acff692b070cfd062710e9deb83a3`；Computer 复用 `sha256:3327d446d2118b8b49282b6706e50699eec09eb4873df828794c649b5f72f87e`。完整条目与证据见《0.1.7-WS修复候选交付-20261026.md》。Lead 的 0.1.5 及演示实例保持原样。
+
+下文保留最初创建及 0.1.4 构建的历史证据，不把当时镜像、早期本地包或验收状态冒充本次发布状态。
+
+## 01:02 真实创建结果（历史验收）
 
 2026-10-26 北京时间 01:02，通过 dev Server 的 `/agentengine/api/v1/CreateAgent` 仅发送一次创建，沿用此前成功实例的账号与子账号上下文。规格 1 CPU / 4 GiB、20 GiB PVC、personal-assistant 0.1.2。
 
@@ -10,7 +28,7 @@
 - 随后 GetAgent 为 `RUNNING / Running`，RequestId：`req-20261026010613-sbtniw`，Message 为空。
 - 同名 AgentRuntime Running；Pod 两个容器均 Ready、零重启；运行时 `/health` 为 200 且 `dshSessionController:true`。
 
-当前能够正常创建；不能据此推断 Lead 在 22:02–22:22 的每一条 503 都是同一原因。已单独定位的 `ar-20261025221906-pa-e2e-0` 缺模型 endpoint，详见《创建通道核查-20261025.md》。这次真实请求与脱敏响应保存在 `.artifacts/create-replay-20261026/`。
+该次创建正常；不能据此推断 Lead 在 22:02–22:22 的每一条 503 都是同一原因。已单独定位的 `ar-20261025221906-pa-e2e-0` 缺模型 endpoint，详见《创建通道核查-20261025.md》。这次真实请求与脱敏响应保存在 `.artifacts/create-replay-20261026/`。
 
 ## 成功请求的可重放版本
 
@@ -80,7 +98,7 @@ images 构建输入提交为 `e6c01a6`，已补 checker/profile 脚本的构建�
 
 dev catalog 已追加 **0.1.4**，Server 滚动成功，真实 resolver 返回非空 computer（port 8787、workspace `/workspace`）与相同镜像摘要。已逐项核对保留 0.1.0、0.1.1、0.1.2、Lead 的 0.1.3 和另一路的 0.1.5；没有改变默认版本。完整条目为 `docs/examples/personal-assistant-0.1.4-catalog-entry.json`，source values 的单行变更提交为 Server `2b88919d`。
 
-当前有效配置来自 dev 环境变量 fallback，DB 未配置覆盖；本次按已有预发 canary 方式追加，未迁移配置来源。准入 capabilityDigest 沿用同协议 0.1.2 的 `e53a4981…`，7 项能力词表未变。Server 业务镜像仍为此前的 `7265d036` 修复构建；本次只滚动 catalog 环境变量。
+该次登记时有效配置来自 dev 环境变量 fallback，DB 未配置覆盖；当时按已有预发 canary 方式追加，未迁移配置来源。准入 capabilityDigest 沿用同协议 0.1.2 的 `e53a4981…`，7 项能力词表未变。当时 Server 业务镜像为 `7265d036` 修复构建，仅滚动 catalog 环境变量；后续 Server 灰度见各次交付记录。
 
 ## 已完成与未完成的验收
 
@@ -90,8 +108,8 @@ dev catalog 已追加 **0.1.4**，Server 滚动成功，真实 resolver 返回�
 
 需要 Lead 现在使用**新建 0.1.4 独立实例**运行对照 E2E。创建模板同时修改 `RuntimeVersion` 和 YAML 的 `runtime.version` 为 0.1.4，其余保持一致。重点记录冷启动首帧，以及空闲后客户端退出控制态、停止抓帧与续租。
 
-客户端需要配套的新插件 tarball：`/Users/xiayu/Downloads/AgentKit个人助理预览包-20261026-面板评审/kingsoftcloud-agentkit-personal-assistant-0.1.0.tgz`，SHA256 为 `5b9fb50dd5b50b54010fe228d7946994138fdfe757fe5d7cfaf921d258193cf1`，面板构建戳为 `2026-10-25T16:26:44.055Z`。这份预览包包含 Host 变更，安装后需重开应用；仅刷新旧客户端不足以验证新 idle 状态机。
+当时面板预览包为 `/Users/xiayu/Downloads/AgentKit个人助理预览包-20261026-面板评审/kingsoftcloud-agentkit-personal-assistant-0.1.0.tgz`，SHA256 `5b9fb50dd5b50b54010fe228d7946994138fdfe757fe5d7cfaf921d258193cf1`、构建戳 `2026-10-25T16:26:44.055Z`。此处只保留历史来源；验证 ws/12秒修复应使用本页开头的新完整包，不能沿用这个早期预览包。
 
 0.1.4 尚未声明 startup v2，Operator 的新 namespace 沙箱配置与目标 AppArmor 验收也尚未完成。镜像含 checker 的本地证据不等于 Pod 已启用该 init，也不等于 DSH 沙箱验收通过。Lead 已完成的直接 broker 桌面证据继续保留；Studio 页面完整验收与本方失败实例对照仍需分别记录。
 
-Lead 的 `scripts/build-client.mjs`、`package.json` 与《本地安装与云电脑连接.md》保持原样；云端产物来自干净 Git 导出，没有覆盖或提交这三个未提交改动。
+原0.1.4产物来自5f0a4a9的干净 Git 导出，没有夹带当时尚未提交的 Lead 改动。上述构建脚本、package.json 与安装文档后来已由 Lead 在 cd996a6 中提交；本方当前版本与该提交中的这三个文件逐字相同。
