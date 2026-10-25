@@ -1,117 +1,89 @@
-# AgentKit Personal Assistant
+# AgentKit 个人助理
 
-`@kingsoftcloud/agentkit-personal-assistant` is the standalone DSH plugin project for the cloud personal assistant. DSH remains the host/runtime foundation; this repository owns the assistant product surface, multi-Bot registry, and the explicit boundary to a user's dedicated Cloud Computer.
+`@kingsoftcloud/agentkit-personal-assistant` 是独立的 DSH 插件项目，负责个人助理页面、多逻辑 Bot、会话、记忆、日程，以及用户专属云电脑的工具入口。插件与 Host 使用 Node.js；云电脑中的 Python、Bash 等是供任务调用的工具。
 
-This repository is an executable broker-backed implementation. It does not create a Pod or expose a computer outside the loopback broker; a deployment supplies the two images and the per-user `Computer Broker` sidecar boundary.
+Studio 保留 DSH 宿主、插件中心和通用 Agent 能力。个人助理页面由本插件提供，不写回 Studio 产品代码。新安装默认关闭，也不会自动连接云电脑。
 
-## Design boundary
+## 本地安装
 
-One cloud sub-user owns one Personal Assistant Pod. The Pod is planned to run two independently versioned images and two containers:
+安装步骤见[本地安装与云电脑连接](docs/本地安装与云电脑连接.md)。开发目录执行：
 
-- `personal-assistant-runtime`: DSH plus this plugin, sessions, Bot orchestration, memory, schedules, approvals, and the gateway adapter.
-- `personal-assistant-computer`: Linux GUI/browser/terminal and the Computer Broker server.
+```sh
+npm ci
+npm run build:client
+npm pack
+```
 
-A single user can create several logical Bots in the assistant runtime. Each Bot has its own `botId`, system prompt revision, memory namespace, and tool policy. Bots can share the user's Computer only through a lease. The lease prevents two Bots from driving the same GUI at the same time.
+产物包含 Host 入口、DSH ModuleLoader 客户端产物 `dist/client.js` 和中文文档。需要使用包含 Personal Assistant 插件目录条目的 Studio bundle。已存在于 profile 的插件通过 `setBundleEnabled` 启用，不需要重新访问 npm registry。
 
-The plugin does not use a DSH private module or a profile name as a tenant boundary. DSH loader inputs are limited to `package.json.dsh.bundle.patch` and `package.json.dsh.client.{platform,inject,external,immediately}`; the package root and `./client` exports are the Host and browser entrypoints. It uses public DSH injection names and a versioned application protocol. The runtime stores sessions, Bot memory records, and schedules as profile-local JSON collections under `ASSISTANT_STATE_PATH`; the PVC is retained independently from the plugin bundle lifecycle.
+本地页面加载与云端验收是两项不同的交付。未配置网关时，页面显示配置提示；云端桌面的真实帧率、输入、AppArmor 和多 Bot 冲突需要另行实测。
 
-## Package surfaces
+## 运行架构
 
-- `@kingsoftcloud/agentkit-personal-assistant` — DSH Host entry (`apply`, `createRuntime`).
-- `@kingsoftcloud/agentkit-personal-assistant/client` — browser-safe gateway adapter plus the public DSH `inject/apply` entry that contributes the default-closed panel and sidebar row.
-- `@kingsoftcloud/agentkit-personal-assistant/bot-registry` — multi-Bot identity and policy registry.
-- `@kingsoftcloud/agentkit-personal-assistant/computer-broker` — runtime-side broker client and lease manager.
-- `@kingsoftcloud/agentkit-personal-assistant/computer-broker-protocol` — validated v1 message shapes.
-- `@kingsoftcloud/agentkit-personal-assistant/manifest` — application metadata manifest.
-- `@kingsoftcloud/agentkit-personal-assistant/plugin-manifest` — validators for the DSH package subset and application metadata.
+一个云上子用户独享一个个人助理 Pod，使用两个独立构建、独立版本的业务镜像：
 
-The application manifest records `metadata.defaultEnabled: false` and `metadata.autoConnect: false`. Those are AgentKit product metadata, validated by `src/plugin-manifest.mjs`; DSH itself only reads the supported `package.json.dsh` fields. Studio can ship the package in its catalog without showing a panel or opening a cloud connection until the user enables it.
+- `personal-assistant-runtime`：真实 DSH Host、本插件、独立 `DSH_HOME`，承载会话和回合执行。
+- `personal-assistant-computer`：Xvfb、fluxbox、Chromium、桌面采集、输入注入和 Computer Broker。
 
-## Multi-Bot example
+部署沿用 AgentEngine 的 Server → Runtime Service → Operator → AgentRuntime CR 链路；本项目不直接创建 Pod 或 PVC。两容器通过 localhost Broker 通信，持久化路径由 Runtime Service 注入。平台当前额外注入的日志 sidecar 需要在验收中如实计数，不能把三个容器记成两个。
+
+云电脑本期内置 Python 3、Bash/shell、Git、OpenSSH 客户端、Chromium 和终端。DSH 在 runtime 侧调度 skill，skill 的脚本经 Broker 在电脑侧执行；这些常见工具不做用户开关。支持执行不表示允许绕过租约、目录授权或沙箱约束。
+
+## 多逻辑 Bot
+
+每个 Bot 有独立的 `botId`、系统提示词版本、记忆命名空间和工具策略。多个 Bot 可以使用同一台用户专属电脑；控制操作必须持有租约，同一时间只允许一个控制者。其他连接可以只读旁观。发生控制冲突时服务端返回 409。
 
 ```js
-import { createRuntime } from '@kingsoftcloud/agentkit-personal-assistant'
+import { createRuntime } from '@kingsoftcloud/agentkit-personal-assistant';
 
 const runtime = createRuntime(ctx, {
   enabled: true,
   profileId: 'user-profile-1',
-  bots: [
-    {
-      botId: 'researcher',
-      displayName: 'Researcher',
-      systemPromptRevision: 'researcher@2026-10-23.1',
-      memoryNamespace: 'assistant:user-profile-1:bot:researcher',
-      toolPolicy: {
-        mode: 'allowlist',
-        allow: ['browser.search', 'files.read'],
-        requireApproval: ['files.write'],
-      },
+  bots: [{
+    botId: 'researcher',
+    displayName: '研究助理',
+    systemPromptRevision: 'researcher@2026-10-23.1',
+    memoryNamespace: 'assistant:user-profile-1:bot:researcher',
+    toolPolicy: {
+      mode: 'allowlist',
+      allow: ['browser.search', 'files.read'],
+      requireApproval: ['files.write'],
     },
-  ],
-})
-
-// No real Computer is connected unless computerTransport was supplied.
-const bot = runtime.registry.require('researcher')
-console.log(bot.memoryNamespace)
+  }],
+});
 ```
 
-## Computer Broker contract
+此示例只创建 Bot 配置；真实电脑连接必须另外提供 Broker 地址或 transport。
 
-The runtime sends validated messages through a supplied transport (the runtime image uses the localhost HTTP transport):
+## 桌面与工具通道
+
+浏览器通过 DSH 已鉴权 Connection RPC 向插件 Host 申请短时一次性 ticket，再通过同一云网关的独立 WebSocket 接收二进制 JPEG 帧和发送输入。长期凭据保留在 Host，token 不放在 URL query 中，桌面帧不进入 DSH remotes 白名单、磁盘或遥测。鉴权细节见[桌面通道鉴权](docs/桌面通道鉴权.md)。
+
+runtime 通过 localhost Broker 调用以下操作，租约与动作绑定 `userId`、`assistantId`、`botId`、`computerId`、`taskId`：
 
 - `computer.status`
-- `computer.lease.acquire`
-- `computer.lease.release`
+- `computer.lease.acquire` / `computer.lease.release`
 - `computer.action`
 
-Every lease and action is bound to `userId`, `assistantId`, `botId`, `computerId`, and `taskId`. The implemented tool surface covers bounded browser actions and `terminal.exec`; the runtime cannot access a display or a host shell directly. `createMockComputerBroker()` is available only for contract tests and marks every result as `simulated: true`.
+浏览器与终端工具由 `createComputerToolset()` 注册，包括受限浏览器动作、`cloud_bash` 和 `cloud_run_code`。runtime 不直接启动电脑侧的 Chromium 或 shell。`createMockComputerBroker()` 仅供契约测试，其返回值明确标记 `simulated: true`。
 
-## Development
+## 云端回合与持久化
+
+runtime 镜像中的真实 DSH Host 注入公开的 `sessionController`。插件通过 `sessionController.prompt()` 提交回合，并记录会话消息、执行结果和状态。缺少该服务时返回 `DSH_SESSION_CONTROLLER_UNAVAILABLE`，不能用排队记录或模拟回复冒充完成。
+
+HTTP 接口包括 `/v1/sessions`、会话 `messages` / `turns`、`/v1/memory`、`/v1/schedules`。状态保存在注入的工作区和状态目录中，禁用或卸载插件不负责删除 PVC 数据。真实 DSH 宿主验证范围见[云端 DSH 宿主验证](docs/云端DSH宿主验证.md)。
+
+## 开发与校验
 
 ```sh
 npm test
 npm run check
 npm run pack:check
+npm run build:artifacts
 ```
 
-The client entry uses the documented DSH `slots` service and contributes an inert default-closed panel/sidebar row. It uses no private DSH source; a later UI revision can replace the text components while keeping the same disabled-by-default and no-auto-connect contract.
+`package.json.dsh` 只使用 DSH 支持的 bundle / client 加载字段；`metadata.defaultEnabled` 和 `metadata.autoConnect` 属于本产品元数据，不冒充 DSH 加载器字段。Host 和浏览器分别从包根入口与 `./client` 导出。
 
-## Reference and licensing
+## 参考与许可
 
-The multi-Bot/persistent-state shape was informed by public behavior in [DeepSeek-Bot](https://github.com/Fei2411/DeepSeek-Bot). No DeepSeek-Bot source is copied in this skeleton. If code is later reused, preserve its Apache-2.0 license and notices as described in [`NOTICE`](./NOTICE).
-
-## Computer-backed capabilities
-
-The browser and code-execution capabilities are implemented as broker-backed DSH
- tools. `createComputerToolset()` registers the bounded browser actions and
-`cloud_bash`/`cloud_run_code` actions. The first action acquires a per-computer
-lease; `dispose()` releases it. The runtime never launches Chromium or a shell
-itself. The `personal-assistant-computer` image runs `computer-agentd` and owns
-those operations, including the Xvfb/fluxbox GUI, Chromium/CDP, terminal
-isolation, and egress policy.
-
-The computer image ships the standard automation toolchain in this release:
-Python 3, Bash/shell, Git, OpenSSH client, Chromium, and the DSH skill runtime
-are built in and are not feature switches. `cloud_run_code` exposes JavaScript
-and Python; `cloud_bash` can invoke the bundled shell, Git, SSH, and skill
-commands inside the broker's lease and sandbox. DSH itself and the plugin Host
-remain Node.js processes in the separate assistant-runtime image.
-
-The same project exports `ScheduleManager`, `PersonalAssistantStateStore`, and
-the managed workspace contract. The runtime exposes `GET/POST /v1/sessions`,
-durable session `messages` and `turns`, `GET/POST /v1/memory`, and
-`GET/POST/DELETE /v1/schedules`; all are profile-local and persist under the
-paths injected by runtime-service (`WORKSPACE_PATH` and the assistant state
-path). The standalone HTTP runtime persists a submitted turn as `queued` until
-a DSH Session Controller bridge is present; it never runs a fake local
-inference loop.
-
-When the Host process has injected the public DSH `sessionController`, the Host
-entry exposes `runtime.submitTurn(...)`. It resolves or creates the requested
-Session and calls `sessionController.prompt(...)`; the returned receipt is
-marked `execution: "dsh-session-controller"` only after DSH accepts the prompt.
-A Host without that service fails with
-`DSH_SESSION_CONTROLLER_UNAVAILABLE`. The standalone cloud HTTP artifact still
-has no in-process DSH Host, so its durable HTTP turn endpoint remains an
-explicit queue until runtime-service supplies a Session Controller bridge; it
-must never be presented as completed model work.
+多 Bot 与持久化设计参考过 DeepSeek-Bot 的公开行为。当前没有复制其项目源码；后续复用代码时需保留对应 Apache-2.0 许可和声明，见 [NOTICE](NOTICE)。
