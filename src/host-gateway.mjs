@@ -23,8 +23,9 @@ const ENDPOINT = '/api/personal-assistant';
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket']);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
+export const STUDIO_DESKTOP_SERVICE = 'studioPersonalAssistantDesktop';
 
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch, WebSocketImpl = DEFAULT_WEBSOCKET } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -38,14 +39,57 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     } catch { throw fail('PERSONAL_ASSISTANT_GATEWAY_INVALID', '云网关地址无效；预发 HTTP 需由 Host 显式允许'); }
   }
   const configured = Boolean(base && agentId && apiKey);
+  let studioSeen = false;
+  // 服务可晚于本插件加载，也可随 Studio 卸载；不缓存凭据或实例绑定。
+  async function callStudio(service, method, input, signal) {
+    try { return await service[method](input, signal || AbortSignal.timeout(10_000)); }
+    catch (error) {
+      const rawStatus = Number(error?.status ?? error?.details?.status);
+      const status = Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : 503;
+      // 原始异常可能包含上游 HTTP 头或凭据，不能进入页面 RPC。
+      throw fail(status >= 500 ? 'PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE' : 'PERSONAL_ASSISTANT_TICKET_REFUSED', 'Studio 暂时无法授权云电脑连接，请检查实例状态与云端登录', status);
+    }
+  }
+  async function binding(signal) {
+    let studio;
+    try { studio = getStudioDesktop(); }
+    catch { throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 云连接服务暂时不可用', 503); }
+    if (studio != null) {
+      studioSeen = true;
+      if (typeof studio.configuration !== 'function' || typeof studio.issueTicket !== 'function') throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', '请更新 Studio 云连接服务', 503);
+      const value = await callStudio(studio, 'configuration', agentId ? { agentId } : {}, signal);
+      if (!plain(value) || typeof value.configured !== 'boolean' || (value.configured && (typeof value.agentId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(value.agentId)))) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的实例绑定无效', 502);
+      return { configured: value.configured, agentId: value.configured ? value.agentId : undefined, studio };
+    }
+    if (studioSeen) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 云连接服务已卸载，请重新打开 Studio', 503);
+    // 独立开发 Host 的显式连接仍可用；Studio 拒绝/卸载时绝不降级到此分支。
+    return { configured, agentId, studio: undefined };
+  }
+  function publicStudioTicket(value, input) {
+    let ws;
+    try { ws = new URL(value?.wsUrl); } catch {}
+    const local = ws && ['127.0.0.1', 'localhost', '[::1]'].includes(ws.hostname);
+    const allowHttp = config.allowInsecureHttp === true || env.AGENTKIT_PERSONAL_ASSISTANT_ALLOW_HTTP_GATEWAY === '1';
+    const remaining = Date.parse(value?.expiresAt) - Date.now();
+    if (!plain(value) || !/^[A-Za-z0-9_-]{32,512}$/u.test(String(value.ticket || ''))
+      || value.agentId !== input.agentId || value.botId !== input.botId || value.readOnly !== (input.mode === 'read')
+      || value.protocol !== 'agentkit.personal-assistant.desktop.v1' || !Number.isFinite(remaining) || remaining <= 0 || remaining > 60_000
+      || !ws || ws.username || ws.password || ws.search || ws.hash || ws.pathname !== '/personal-assistant/desktop/ws'
+      || (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && (local || allowHttp)))
+      || (value.leaseId != null && (typeof value.leaseId !== 'string' || value.leaseId.length > 256))) throw fail('PERSONAL_ASSISTANT_TICKET_INVALID', 'Studio 返回的桌面授权格式错误', 502);
+    return { ticket: value.ticket, expiresAt: value.expiresAt, agentId: input.agentId, botId: input.botId,
+      wsUrl: ws.href, protocol: value.protocol, leaseId: value.leaseId ?? null, readOnly: input.mode === 'read' };
+  }
   async function request(operation, payload = {}, signal) {
     if (!plain(payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求参数格式错误');
+    if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
+    const current = await binding(signal);
     if (operation === 'personal-assistant.configuration') return {
-      configured, ...(configured ? { agentId } : {}),
+      configured: current.configured, ...(current.configured ? { agentId: current.agentId } : {}),
     };
     if (operation === 'personal-assistant.bots.list') {
-      if (!configured) return { bots: [], directoryAvailable: false };
-      const ticket = await request('personal-assistant.desktop.ticket', { botId: DIRECTORY_BOT_ID, mode: 'read' }, signal);
+      if (!current.configured) return { bots: [], directoryAvailable: false };
+      const ticket = await request('personal-assistant.desktop.ticket', { agentId: current.agentId, botId: DIRECTORY_BOT_ID, mode: 'read' }, signal);
       if (typeof WebSocketImpl !== 'function') throw fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 503);
       const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
       const bots = await new Promise((resolve, reject) => {
@@ -87,11 +131,16 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       });
       return { bots, directoryAvailable: true };
     }
-    if (operation !== 'personal-assistant.desktop.ticket') throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
-    if (!configured) throw fail('PERSONAL_ASSISTANT_GATEWAY_UNCONFIGURED', '请先配置云网关连接', 409);
-    if (payload.agentId && payload.agentId !== agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', 'Agent ID 与 Host 配置不一致', 403);
+    if (!current.configured) throw fail('PERSONAL_ASSISTANT_GATEWAY_UNCONFIGURED', '个人助理尚未绑定云端实例', 409);
+    if (payload.agentId && payload.agentId !== current.agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', '云端实例与 Host 绑定不一致', 403);
     const botId = String(payload.botId || '').trim();
-    if (!botId || botId.length > 64) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请输入已创建的 Bot ID');
+    if (!botId || botId.length > 64 || /[\u0000-\u001f]/u.test(botId)) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请选择已创建的助理');
+    if (payload.mode !== undefined && !['read', 'control'].includes(payload.mode)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '桌面访问模式无效');
+    if (botId === DIRECTORY_BOT_ID && payload.mode !== 'read') throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '目录授权只能用于只读查询', 403);
+    if (current.studio) {
+      const input = { agentId: current.agentId, botId, mode: payload.mode === 'read' ? 'read' : 'control', ...(payload.leaseId ? { leaseId: String(payload.leaseId) } : {}) };
+      return publicStudioTicket(await callStudio(current.studio, 'issueTicket', input, signal), input);
+    }
     const response = await fetchImpl(new URL('IssuePersonalAssistantDesktopTicket', base), {
       method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({ AgentId: agentId, BotId: botId, Mode: payload.mode === 'read' ? 'read' : 'control', ...(payload.leaseId ? { LeaseId: String(payload.leaseId) } : {}) }),
@@ -110,7 +159,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
 
 export function registerPersonalAssistantHostGateway(ctx, config = {}) {
   if (!ctx?.connection?.fetch?.register) return undefined;
-  const gateway = createPersonalAssistantHostGateway(config);
+  const gateway = createPersonalAssistantHostGateway(config, { getStudioDesktop: () => ctx.get?.(STUDIO_DESKTOP_SERVICE) });
   // Connection 的 /api 物理载体先执行 Host/Origin、浏览器鉴权及 owner Peer 校验。
   // 使用公开 exact Fetch 注册表，避免自建服务、抢占 Gateway interceptor 或修改 remotes。
   return ctx.connection.fetch.register({ path: ENDPOINT, methods: ['POST'], requestBody: 'buffered', async fetch(request) {
