@@ -21,12 +21,12 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  */
 export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false }) {
   return [
-    ...(desktop ? ['--kiosk', '--ozone-platform=x11'] : ['--headless=new']),
+    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90'] : ['--headless=new']),
     '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync',
     '--disable-background-networking', '--disable-breakpad', '--disable-crash-reporter',
     '--disable-translate', '--mute-audio', '--hide-scrollbars',
-    `--window-size=${windowSize}`,
+    `--window-size=${desktop ? '740,620' : windowSize}`,
     '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${userDataDir}`,
     `--proxy-server=${proxy}`,
