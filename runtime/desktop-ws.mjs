@@ -118,12 +118,30 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, paused: false, lastInputAt: Date.now(), lastFrameSeq: -1, timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve(), pendingMessages: 0 };
     const writer = createDesktopSocketWriter(socket);
     const send = value => { if (!state.closed) writer.write(jsonFrame(value)); };
-    const close = async () => {
-      if (state.closed) return; state.closed = true; if (state.timer) clearTimeout(state.timer); if (state.renewTimer) clearInterval(state.renewTimer);
-      writer.dispose();
-      if (state.sessionId) await brokerDesktopRequest('/broker/desktop/close', { sessionId: state.sessionId }).catch(() => {});
-      if (state.autoLease && state.leaseId) await brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId }).catch(() => {});
-      try { socket.end(frame(8)); } catch {}
+    const releaseResources = async () => {
+      const sessionId = state.sessionId, leaseId = state.autoLease ? state.leaseId : null;
+      state.sessionId = null; state.autoLease = false; state.leaseId = null;
+      // 独立发起清理，避免一个失联的 close 请求挡住租约释放。
+      await Promise.allSettled([
+        ...(sessionId ? [Promise.resolve().then(() => brokerDesktopRequest('/broker/desktop/close', { sessionId }))] : []),
+        ...(leaseId ? [Promise.resolve().then(() => brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId }))] : []),
+      ]);
+    };
+    const close = async ({ event, closeCode = 1000 } = {}) => {
+      if (state.closed) return releaseResources();
+      if (event) send({ type: 'closed', retryable: false, ...event });
+      state.closed = true; clearTimeout(state.timer); clearInterval(state.renewTimer);
+      state.timer = null; state.renewTimer = null; writer.dispose();
+      const payload = Buffer.alloc(2); payload.writeUInt16BE(closeCode);
+      try { socket.end(frame(8, Buffer.concat([payload, Buffer.from(event?.reason || 'desktop-closed')]))); } catch {}
+      await releaseResources();
+    };
+    const fail = async (error, fallback) => {
+      if (state.closed) return;
+      const status = error?.status || 400, code = error?.code || fallback;
+      const message = String(error?.message || 'desktop request failed');
+      send({ type: 'error', status, code, message });
+      if ([404, 409].includes(Number(status))) await close({ event: { status, code, message, reason: Number(status) === 409 ? 'lease-lost' : 'session-ended' } });
     };
     const poll = async () => {
       if (state.closed || state.paused || !state.sessionId || state.frameBusy) return;
@@ -143,7 +161,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
           // 元数据和 JPEG 一起写，回压期间不会只发送半对消息。
           if (!state.closed && writer.ready && writer.write(Buffer.concat([jsonFrame(metadata), frame(2, bytes)]))) state.lastFrameSeq = result.seq;
         } else send({ type: 'frame', seq: result.seq, unchanged: true, width: result.width, height: result.height });
-      } catch (error) { send({ type: 'error', code: error?.code || 'DESKTOP_FRAME_FAILED', message: String(error?.message || 'desktop frame failed') }); }
+      } catch (error) { await fail(error, 'DESKTOP_FRAME_FAILED'); }
       finally {
         state.frameBusy = false;
         if (!state.closed && !state.paused) state.timer = setTimeout(poll, Math.max(0, nextFrameDelayMs - (Date.now() - startedAt)));
@@ -155,6 +173,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       if (opcode === 9) { writer.write(frame(10, payload)); return; }
       if (opcode !== 1) return;
       let body; try { body = JSON.parse(payload.toString('utf8')); } catch { send({ type: 'error', code: 'INVALID_JSON' }); return; }
+      let brokerStarted = false;
       try {
         if (body.type === 'open') {
           if (state.sessionId) throw Object.assign(new Error('desktop session already open'), { code: 'DESKTOP_SESSION_ALREADY_OPEN', status: 409 });
@@ -162,15 +181,21 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
           if (claims?.mode === 'read' && (body.mode === 'control' || body.leaseId)) throw Object.assign(new Error('desktop permit is read-only'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
           if (claims && body.leaseId && body.leaseId !== claims.leaseId) throw Object.assign(new Error('desktop lease does not match permit'), { code: 'DESKTOP_LEASE_MISMATCH', status: 403 });
           state.botId = botIdOf(body.botId); state.taskId = taskIdOf(body.taskId); state.leaseId = body.leaseId || null;
+          brokerStarted = true;
           if ((claims ? claims.mode : body.mode) === 'control' && !state.leaseId) {
             const acquired = await brokerDesktopRequest('/broker/lease/acquire', { botId: state.botId, taskId: state.taskId, idempotencyKey: `desktop-ws:${state.botId}:${state.taskId}:${Date.now()}`, ttlMs: 120000 });
             state.leaseId = acquired.lease?.leaseId || null; state.autoLease = true;
+            if (state.closed) return releaseResources();
           }
           const opened = await brokerDesktopRequest('/broker/desktop/session', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId || undefined });
           state.sessionId = opened.sessionId;
+          if (state.closed) return releaseResources();
           if (state.autoLease) {
             state.renewTimer = setInterval(() => {
-              void brokerDesktopRequest('/broker/lease/renew', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, ttlMs: 120000 }).catch(error => { send({ type: 'error', status: 409, code: error?.code || 'COMPUTER_LEASE_REQUIRED' }); void close(); });
+              void brokerDesktopRequest('/broker/lease/renew', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, ttlMs: 120000 }).catch(async error => {
+                await fail(error, 'COMPUTER_LEASE_RENEW_FAILED');
+                if (!state.closed) await close({ event: { reason: 'broker-unavailable', code: error?.code || 'COMPUTER_LEASE_RENEW_FAILED', status: error?.status || 503, retryable: true }, closeCode: 1011 });
+              });
             }, 30_000);
             state.renewTimer.unref?.();
           }
@@ -179,7 +204,9 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         if (body.type === 'input') {
           if (!state.sessionId) throw Object.assign(new Error('desktop session is not open'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
           state.lastInputAt = Date.now();
+          brokerStarted = true;
           const accepted = await brokerDesktopRequest('/broker/desktop/input', { sessionId: state.sessionId, botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, event: body.event });
+          if (state.closed) return;
           if (state.timer) clearTimeout(state.timer);
           if (!state.frameBusy) state.timer = setTimeout(poll, 0);
           send({ type: 'input-accepted', ...accepted }); return;
@@ -189,9 +216,9 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         if (body.type === 'resume') { state.paused = false; void poll(); return; }
         send({ type: 'error', code: 'DESKTOP_MESSAGE_UNSUPPORTED' });
       } catch (error) {
+        if ((brokerStarted || body.type === 'input') && [404, 409].includes(Number(error?.status))) return fail(error, 'DESKTOP_REQUEST_FAILED');
         if (!state.sessionId && state.autoLease && state.leaseId) {
-          await brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId }).catch(() => {});
-          state.autoLease = false; state.leaseId = null;
+          await releaseResources();
         }
         send({ type: 'error', status: error?.status || 400, code: error?.code || 'DESKTOP_REQUEST_FAILED', message: String(error?.message || 'desktop request failed') });
       }
@@ -200,6 +227,6 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       if (++state.pendingMessages > 64) { socket.destroy(); void close(); return; }
       state.pending = state.pending.then(() => onMessage(opcode, payload)).catch(() => close()).finally(() => { state.pendingMessages -= 1; });
     }); } catch { close(); } });
-    socket.on('close', close); socket.on('error', close);
+    socket.on('close', () => { void close(); }); socket.on('error', () => { void close(); });
   });
 }
