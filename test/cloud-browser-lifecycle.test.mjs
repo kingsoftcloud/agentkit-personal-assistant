@@ -3,19 +3,27 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createCloudBrowser } from '../runtime/cloud-browser.mjs';
 
 async function fixture(t, options = {}) {
   const workspace = await mkdtemp(join(tmpdir(), 'pa-browser-lifecycle-'));
   const transports = [], commands = [];
+  let targetNumber = 0;
   const transportFactory = async () => {
     const page = { url: 'about:blank', title: 'Example Domain' };
-    const transport = { disposed: false, page, connection: {
+    const targets = new Set();
+    const transport = { disposed: false, page, targets, connection: {
       closed: false,
       async send(method, params) {
         commands.push({ method, params });
         await options.onSend?.(method, params);
-        if (method === 'Target.createTarget') { page.url = params.url; return { targetId: `target-${transports.length}` }; }
+        if (method === 'Target.createTarget') { page.url = params.url; const targetId = `target-${++targetNumber}`; targets.add(targetId); return { targetId }; }
+        if (method === 'Target.getTargetInfo') {
+          if (!targets.has(params.targetId)) throw Object.assign(new Error('No target with given id found'), { code: 'ASSISTANT_BROWSER_CDP_ERROR' });
+          return { targetInfo: { targetId: params.targetId } };
+        }
+        if (method === 'Target.closeTarget') { targets.delete(params.targetId); return {}; }
         if (method === 'Target.attachToTarget') return { sessionId: `page-${transports.length}` };
         if (method === 'Page.navigate') { page.url = params.url; return {}; }
         if (method === 'Runtime.evaluate') return { result: { value: params.expression === 'document.readyState' ? 'complete'
@@ -192,4 +200,59 @@ test('已通过异步权限钩子但尚未真正发送的旧命令仍会被本�
     await blocked; await browser.releaseInput(); proceed(); await refused;
     assert.equal(commands.some(command => command.method === 'Input.insertText'), false);
   } finally { proceed(); }
+});
+
+test('旧 close ACK 未返回时接管，在同一个 Chromium 上立即恢复替代页面', { timeout: 2000 }, async t => {
+  const owner = new AsyncLocalStorage();
+  let humanControlled = false, reached, proceed, blockedOnce = false;
+  const barrier = new Promise(resolve => { proceed = resolve; });
+  const blocked = new Promise(resolve => { reached = resolve; });
+  t.after(() => proceed());
+  const { browser, transports, commands } = await fixture(t, {
+    beforeCommand: async () => {
+      if (owner.getStore() === 'agent' && humanControlled) throw Object.assign(new Error('用户控制中'), { status: 409, code: 'COMPUTER_USER_CONTROLLED' });
+    },
+    onSend: async method => { if (method === 'Target.closeTarget' && !blockedOnce) { blockedOnce = true; reached(); await barrier; } },
+  });
+  const url = 'https://example.com/?restore=handoff';
+  await browser.open(url);
+  const oldTarget = commands.find(command => command.method === 'Target.attachToTarget').params.targetId;
+  const closing = owner.run('agent', () => browser.close());
+  const refused = assert.rejects(closing, { status: 409, code: 'COMPUTER_USER_CONTROLLED' });
+  await blocked;
+  humanControlled = true;
+  await browser.releaseInput();
+  const opened = await Promise.all([browser.openDesktopWindow(), browser.openDesktopWindow()]);
+  assert.deepEqual(opened.map(value => value.url), [url, url]);
+  assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 2, '并发接管只创建一个替代 page');
+  const newTarget = commands.filter(command => command.method === 'Target.attachToTarget').at(-1).params.targetId;
+  assert.notEqual(oldTarget, newTarget);
+  assert.equal(transports[0].targets.size, 2, '不等待旧 close ACK，就能完成新的页面准备');
+  assert.equal(transports.length, 1); assert.equal(transports[0].disposed, false);
+  proceed(); await refused;
+  assert.equal(transports[0].targets.has(oldTarget), false);
+  assert.equal(transports[0].targets.has(newTarget), true, '旧 close 的迟到 ACK 不能清掉新 target');
+  assert.equal((await browser.snapshot()).url, url);
+  assert.equal(commands.some(command => command.method === 'Browser.close'), false);
+});
+
+test('人工关掉 page 后只重建当前目标，不重启 Chromium 或丢掉最后 URL', async t => {
+  const { browser, transports, commands } = await fixture(t);
+  const url = 'https://example.com/?restore=closed-window';
+  await browser.open(url);
+  const oldTarget = commands.find(command => command.method === 'Target.attachToTarget').params.targetId;
+  transports[0].targets.delete(oldTarget);
+  assert.equal((await browser.openDesktopWindow()).url, url);
+  assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 2);
+  assert.equal(transports.length, 1); assert.equal(transports[0].disposed, false);
+  assert.equal(commands.some(command => command.method === 'Browser.close'), false);
+});
+
+test('页面探测遇到未知网络错误不能当作目标消失而静默重建', async t => {
+  const { browser, commands } = await fixture(t, { onSend: async method => {
+    if (method === 'Target.getTargetInfo') throw Object.assign(new Error('fixture CDP network failure'), { code: 'ASSISTANT_BROWSER_CDP_ERROR' });
+  } });
+  await browser.open('https://example.com/');
+  await assert.rejects(browser.openDesktopWindow(), { code: 'ASSISTANT_BROWSER_CDP_ERROR' });
+  assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 1);
 });

@@ -303,7 +303,8 @@ export function createCloudBrowser({
   const commandMs = Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0 ? commandTimeoutMs : CDP_COMMAND_TIMEOUT_MS;
 
   let transport = null, targetId = null, pageSession = null, launching = null, disposed = false, idleTimer = null, lastUrl = null;
-  let inputGeneration = 0, releasingInput;
+  let inputGeneration = 0, releasingInput, desktopTargetOpening;
+  const closingTargets = new Set();
   const heldMouseButtons = new Map(), heldKeys = new Map();
   const controlChanged = () => Object.assign(new Error('云电脑控制权已变化，旧操作已停止'), { code: 'COMPUTER_USER_CONTROLLED', status: 409 });
   const checkGeneration = generation => { if (generation !== inputGeneration) throw controlChanged(); };
@@ -441,6 +442,37 @@ export function createCloudBrowser({
     }
   }
 
+  async function ensureDesktopTarget() {
+    if (desktopTargetOpening) return desktopTargetOpening;
+    desktopTargetOpening = (async () => {
+      const current = await ensureBrowser();
+      const inspectedTarget = targetId;
+      let missing = !inspectedTarget || closingTargets.has(inspectedTarget);
+      if (!missing) {
+        try {
+          const result = await browserCommand('Target.getTargetInfo', { targetId: inspectedTarget });
+          if (result?.targetInfo?.targetId !== inspectedTarget) throw fail('Chromium 返回了无效的页面目标信息', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
+          // probe 在途时也可能刚好开始 close；不能只检查 probe 之前的状态。
+          missing = closingTargets.has(inspectedTarget);
+        } catch (error) {
+          if (error?.code === 'ASSISTANT_BROWSER_CDP_ERROR' && /no target|target.*(?:not found|closed)|not found.*target/iu.test(String(error.message))) missing = true;
+          else throw error;
+        }
+      }
+      if (!missing) return;
+      const restoreUrl = lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : 'about:blank';
+      // 只替换已关闭/正在关闭的 page，不重启 Chromium；不等待旧 close ACK。
+      const created = await browserCommand('Target.createTarget', { url: restoreUrl });
+      if (!created?.targetId) throw fail('Chromium 没有创建替代页面', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
+      const attached = await browserCommand('Target.attachToTarget', { targetId: created.targetId, flatten: true });
+      if (!attached?.sessionId) throw fail('Chromium 没有返回替代页面会话', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
+      await browserCommand('Target.activateTarget', { targetId: created.targetId });
+      if (transport !== current || disposed) throw fail('云端浏览器在恢复页面期间已变化', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
+      targetId = created.targetId; pageSession = attached.sessionId;
+    })();
+    try { await desktopTargetOpening; } finally { desktopTargetOpening = undefined; }
+  }
+
   async function closeBrowser({ trusted = false } = {}) {
     const current = transport;
     const closingTarget = targetId;
@@ -450,7 +482,9 @@ export function createCloudBrowser({
     if (closingTarget) {
       await authorize('Target.closeTarget', { targetId: closingTarget });
       if (!trusted) checkGeneration(generation);
+      closingTargets.add(closingTarget);
       try { await current.connection.send('Target.closeTarget', { targetId: closingTarget }, { timeoutMs: 3000 }); } catch {}
+      finally { closingTargets.delete(closingTarget); }
     }
     await authorize('Browser.close');
     if (!trusted) checkGeneration(generation);
@@ -758,7 +792,8 @@ function browserOutput(properties, required, render) {
     open(input, options) { return navigate(typeof input === 'string' ? input : input?.url, options); },
     async openDesktopWindow() {
       if (!desktopMode) throw fail('当前浏览器未启用桌面模式', 'ASSISTANT_BROWSER_DESKTOP_REQUIRED');
-      await ensureBrowser();
+      await ensureDesktopTarget();
+      ensureUsable();
       lastUrl ||= 'about:blank';
       return { url: lastUrl };
     },
