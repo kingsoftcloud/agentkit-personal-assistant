@@ -165,7 +165,7 @@ test('会话 RPC 只接受具名 Bot control permit，拒绝目录/只读/换身
   assert.equal(calls.length, 1);
   assert.equal(brokerCalls.length, 0);
   client.send({ type: 'open', botId: 'observer', taskId: 'must-use-another-connection', mode: 'observe' });
-  assert.equal((await client.next(row => row.type === 'error')).code, 'CLOUD_SESSION_CONNECTION_CONFLICT');
+  assert.equal((await client.next(row => row.code === 'CLOUD_SESSION_CONNECTION_CONFLICT')).status, 409);
   assert.equal(brokerCalls.length, 0, '文件会话不能随后变成拥有更大写缓冲的桌面连接');
 });
 
