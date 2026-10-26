@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** 将个人助理与原生侧栏补丁一起离线安装到指定 DSH profile；默认仅检查。 */
+/** 离线安装个人助理、原生侧栏和可选的 Studio 宿主包；默认仅检查。 */
 import { promises as fs } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 
 const PA = '@kingsoftcloud/agentkit-personal-assistant';
 const SIDEBAR = '@deepseek-ai/dsh-client-ui-sidebar-right';
+const STUDIO = '@kingsoftcloud/agentkit-studio';
 const NODE = '/Applications/AgentKit Studio.app/Contents/MacOS/AgentKit Studio';
 const DSH = '/Applications/AgentKit Studio.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js';
 const sha256 = value => createHash('sha256').update(value).digest('hex');
@@ -104,9 +105,10 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
   const original = await fs.readFile(packagePath), pkg = parseJson(original, 'profile package.json');
   const manifestPath = resolve(manifest), manifestBytes = await fs.readFile(manifestPath);
   const release = parseJson(manifestBytes, 'release manifest');
-  if (!Array.isArray(release.packages) || release.packages.length !== 2) fail('manifest 必须恰好包含两个包');
+  if (!Array.isArray(release.packages) || ![2, 3].includes(release.packages.length)) fail('manifest 必须包含个人助理、原生侧栏和可选的 Studio 包');
   const names = release.packages.map(item => item.pkgName);
-  if (new Set(names).size !== 2 || !names.includes(PA) || !names.includes(SIDEBAR)) fail('manifest 包集合不正确');
+  if (new Set(names).size !== names.length || !names.includes(PA) || !names.includes(SIDEBAR) ||
+      names.some(name => ![PA, SIDEBAR, STUDIO].includes(name))) fail('manifest 包集合不正确');
   const sourceCommit = release.sidebar?.sourceCommit || release.packages.find(item => item.pkgName === SIDEBAR).sourceCommit;
   if (!/^[a-f0-9]{40}$/.test(sourceCommit || '')) fail('manifest 缺少侧栏 sourceCommit');
   const prepared = [];
@@ -120,7 +122,7 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
     const files = readTar(archive), metaFile = files.find(file => file.path === 'package.json' && !file.directory);
     const meta = metaFile && parseJson(metaFile.data, '归档 package.json');
     if (meta?.name !== item.pkgName || meta?.version !== item.version) fail('归档包名或版本不匹配：' + item.pkgName);
-    const clientPath = item.pkgName === PA ? 'dist/client.js' : 'lib/client.js';
+    const clientPath = item.pkgName === SIDEBAR ? 'lib/client.js' : 'dist/client.js';
     const client = files.find(file => file.path === clientPath && !file.directory);
     if (!client?.data.length || (item.pkgName === SIDEBAR && !client.data.includes(Buffer.from('registerPanelSurface')))) fail('客户端产物缺失：' + item.pkgName);
     const [scope, leaf] = item.pkgName.split('/');
