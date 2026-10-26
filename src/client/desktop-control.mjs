@@ -32,7 +32,7 @@ export function createDesktopControl({ send, changed = () => {}, failed = () => 
       if (phase === 'controlling') { transmit(event); return true; }
       if ((!wanted || phase === 'observe') && (event.type === 'pointermove' || (['button', 'key'].includes(event.type) && event.action === 'up'))) return false;
       if (event.type === 'pointermove' && phase === 'observe') return false;
-      if (!available) { if (event.type !== 'pointermove') failed('当前为只读旁观；云端更新后可点击画面接管'); return false; }
+      if (!available) { if (event.type !== 'pointermove') failed('当前为只读旁观，鼠标和键盘不会发送到云电脑'); return false; }
       wanted = true;
       if (!buffer(event)) return false;
       if (phase === 'observe') start();
