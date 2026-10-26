@@ -157,11 +157,12 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
     await fs.mkdir(backup, { mode: 0o700 });
     await fs.writeFile(join(backup, 'package.json'), original, { mode: 0o600 });
     for (const name of configNames) {
-      const info = await stat(join(profile, name)); configModes.set(name, info?.mode);
+      const info = await stat(join(profile, name));
       if (info) {
         await fs.cp(join(profile, name), join(backup, name), { dereference: false, verbatimSymlinks: true });
         if (!info.isSymbolicLink()) await fs.chmod(join(backup, name), 0o600);
       }
+      configModes.set(name, info?.mode);
     }
     await fs.mkdir(stage, { mode: 0o700 });
     for (const entry of prepared) await extract(entry.files, join(stage, entry.leaf));
