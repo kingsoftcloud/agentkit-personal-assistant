@@ -75,3 +75,20 @@ test('每次 CDP 写操作前执行控制权钩子，拒绝后不会发送任何
   assert.equal(commands.some(command => command.method === 'Input.insertText'), false);
   assert.equal(checks.at(-1).method, 'Input.insertText');
 });
+
+test('已被人类接管的旧调用不能先重建浏览器再被权限钩子拒绝', async t => {
+  let humanControlled = false;
+  const { browser, transports, commands } = await fixture(t, { beforeCommand: async () => {
+    if (humanControlled) throw Object.assign(new Error('人类正在控制云电脑'), { status: 409, code: 'COMPUTER_USER_CONTROLLED' });
+  } });
+  humanControlled = true;
+  await assert.rejects(browser.open('https://example.com/'), { status: 409 });
+  assert.equal(transports.length, 0, '未授权调用不能启动 Chromium 或创建窗口');
+  humanControlled = false;
+  await browser.open('https://example.com/?retained=before-revoke');
+  transports[0].connection.closed = true;
+  humanControlled = true;
+  await assert.rejects(browser.snapshot(), { status: 409 });
+  assert.equal(transports.length, 1, '旧 agent 不能在新控制者工作时重建已断开的浏览器');
+  assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 1);
+});

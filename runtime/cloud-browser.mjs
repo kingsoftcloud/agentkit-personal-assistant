@@ -325,11 +325,13 @@ export function createCloudBrowser({
   function clearIdle() { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } }
 
   async function pageCommand(method, params = {}) {
+    await beforeCommand?.({ method, params, scope: 'page' });
     const current = await ensureBrowser();
     await beforeCommand?.({ method, params, scope: 'page' });
     return await current.connection.send(method, params, { sessionId: pageSession, timeoutMs: commandMs });
   }
   async function browserCommand(method, params = {}) {
+    await beforeCommand?.({ method, params, scope: 'browser' });
     const current = await ensureBrowser();
     await beforeCommand?.({ method, params, scope: 'browser' });
     return await current.connection.send(method, params, { timeoutMs: commandMs });
@@ -432,7 +434,6 @@ export function createCloudBrowser({
     const { url } = urlPolicy(rawUrl);
     ensureUsable();
     throwIfAborted(signal);
-    await ensureBrowser();
     const result = await pageCommand('Page.navigate', { url: url.href });
     // A download response aborts the navigation; that is not a navigation failure.
     if (result?.errorText && result.errorText !== 'net::ERR_ABORTED') throw fail(`页面导航失败: ${String(result.errorText).slice(0, 120)}`, 'ASSISTANT_BROWSER_NAVIGATION_FAILED');
