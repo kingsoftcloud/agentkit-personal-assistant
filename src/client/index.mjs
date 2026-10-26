@@ -452,7 +452,7 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
   return h('div', {
     key: `${scope.agentId}:${scope.botId}`, 'data-personal-assistant-home': 'true',
     'data-agent-id': scope.agentId, 'data-bot-id': scope.botId,
-    style: { height: '100%', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' },
+    style: { flex: '1 1 0px', height: '100%', maxHeight: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' },
   }, h(PersonalAssistantConversation, { React: R, request: scopedRequest, scope, onOpenComputer: () => nativeWorkbench.open() }));
 
 }

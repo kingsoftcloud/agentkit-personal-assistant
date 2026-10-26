@@ -12,11 +12,12 @@ const EMPTY_HINT = '有什么可以帮你？';
 
 const styles = {
   page: {
-    height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13,
+    flex: '1 1 0px', height: '100%', maxHeight: '100%', minHeight: 0, minWidth: 0,
+    overflow: 'hidden', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', fontSize: 13,
     color: 'var(--dsw-alias-label-primary, #17202c)', background: 'var(--dsw-alias-bg-layer-1, #fff)',
   },
   header: {
-    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px',
+    display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '10px 16px',
     borderBottom: '1px solid var(--dsw-alias-border-default, #d8dee8)', flex: 'none',
   },
   title: { margin: 0, fontSize: 14, fontWeight: 600 },
@@ -26,7 +27,7 @@ const styles = {
     border: '1px solid var(--dsw-alias-border-default, #d8dee8)', background: 'transparent',
     color: 'inherit', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', font: 'inherit', fontSize: 12,
   },
-  scroller: { flex: 1, minHeight: 0, overflowY: 'auto', padding: '20px 16px 8px' },
+  scroller: { flex: '1 1 0px', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overscrollBehavior: 'contain', boxSizing: 'border-box', padding: '20px 16px 8px' },
   thread: { maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 },
   row: { display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' },
   rowUser: { display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' },
@@ -62,14 +63,14 @@ const styles = {
   step: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #536174)', lineHeight: 1.7, overflowWrap: 'anywhere' },
   centered: { flex: 1, display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' },
   centeredInner: { maxWidth: 420, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center' },
-  composer: { flex: 'none', padding: '8px 16px 14px' },
+  composer: { flex: '0 0 auto', minWidth: 0, boxSizing: 'border-box', padding: '8px 16px 14px' },
   composerInner: {
-    maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 6,
+    maxWidth: 720, minWidth: 0, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 6,
     border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 16, padding: '10px 10px 8px 12px',
     background: 'var(--dsw-alias-bg-layer-1, #fff)',
   },
   textarea: {
-    flex: 1, minHeight: 24, maxHeight: 200, resize: 'none', border: 'none', outline: 'none',
+    flex: 1, width: '100%', minWidth: 0, boxSizing: 'border-box', minHeight: 24, maxHeight: 200, resize: 'none', border: 'none', outline: 'none',
     background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, lineHeight: 1.7,
   },
   composerBar: { display: 'flex', alignItems: 'center', gap: 8 },
@@ -121,7 +122,8 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
   const outboxRef = useRef(new Map());
   const generationRef = useRef(0);
   const aliveRef = useRef(true);
-  const bottomRef = useRef(null);
+  const scrollerRef = useRef(null);
+  const followLatestRef = useRef(true);
   const sessionRef = useRef('');
   sessionRef.current = sessionId;
 
@@ -173,6 +175,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
     setPhase('loading');
     setError('');
     cursorRef.current = 0;
+    followLatestRef.current = true;
     setMessages([]);
     try {
       const snapshot = await call('personal-assistant.session.snapshot', { sessionId: id });
@@ -251,8 +254,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
   }, [phase, sessionId, call, mergeEvents, openSession]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView?.({ block: 'end' });
-  }, [messages]);
+    // 只移动自己拥有的消息区，不能让 scrollIntoView 连带滚动宿主和输入框。
+    const scroller = scrollerRef.current;
+    if (scroller && followLatestRef.current) scroller.scrollTop = scroller.scrollHeight;
+  }, [messages, awaiting]);
 
   const pickFiles = async event => {
     const files = Array.from(event.target.files || []);
@@ -274,10 +279,11 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
 
   const submit = async (retryItem = null) => {
     const content = retryItem?.text ?? draft.trim();
-    if (!content || sending || !sessionId) return;
+    if (!content || sending || !sessionId || phase !== 'ready') return;
     const item = retryItem ?? { clientTurnId: crypto.randomUUID(), text: content, sessionId };
     const localId = `local-user-${item.clientTurnId}`;
     outboxRef.current.set(item.clientTurnId, item);
+    followLatestRef.current = true;
     setSending(true); setDraft(''); setError(''); setAwaiting(true);
     setMessages(previous => previous.some(row => row.clientTurnId === item.clientTurnId) ? previous.map(row => row.clientTurnId === item.clientTurnId ? { ...row, status: 'pending' } : row) : [...previous, { id: localId, clientTurnId: item.clientTurnId, role: 'user', text: content, done: false, status: 'pending' }]);
     try {
@@ -299,23 +305,19 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
     h('span', { style: styles.spacer }),
     onOpenComputer ? h('button', { type: 'button', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', style: { background: 'transparent', border: 0, color: 'inherit', cursor: 'pointer' } }, '云电脑') : null);
 
-  if (phase === 'loading') {
-    return h('section', { style: styles.page }, header, h('div', { style: styles.centered }, h('span', { style: styles.status }, '正在连接个人助理…')));
-  }
-  if (phase === 'error') {
-    return h('section', { style: styles.page }, header,
-      h('div', { style: styles.centered }, h('div', { style: styles.centeredInner },
-        h('strong', null, '暂时连不上个人助理'),
-        h('span', { style: styles.status }, error || '请稍后重试'),
-        h('button', { style: styles.ghost, onClick: () => void bootstrap() }, '重试'))));
-  }
-
-  return h('section', { style: styles.page }, header,
+  return h('section', { 'data-personal-assistant-conversation': 'true', style: styles.page }, header,
     h('style', null, '@keyframes pa-awaiting { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }'),
-    error ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } }, error) : null,
-    h('div', { style: styles.scroller },
+    error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } }, error) : null,
+    h('div', { ref: scrollerRef, 'data-personal-assistant-messages': 'true', style: styles.scroller, onScroll: event => {
+      const element = event.currentTarget;
+      followLatestRef.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64;
+    } },
       h('div', { style: styles.thread },
-        messages.length === 0 ? h('div', { style: { ...styles.status, paddingTop: 40, textAlign: 'center' } }, EMPTY_HINT) : null,
+        messages.length === 0 ? h('div', { style: { ...styles.status, paddingTop: 40, textAlign: 'center' } },
+          phase === 'error' ? h('div', { style: { ...styles.centeredInner, margin: '0 auto' } },
+            h('strong', null, '暂时连不上个人助理'), h('span', null, error || '请稍后重试'),
+            h('button', { style: styles.ghost, onClick: () => void bootstrap() }, '重试'))
+            : phase === 'loading' ? '正在连接个人助理…' : EMPTY_HINT) : null,
         messages.map(message => {
           if (message.role === 'step') return h('div', { key: message.id, style: styles.step }, `· ${message.text}`);
           const mine = message.role === 'user';
@@ -328,9 +330,8 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
         awaiting ? h('div', { key: 'awaiting', style: styles.row },
           h('span', { style: styles.who }, '助理'),
           h('div', { style: { ...styles.bubble, color: 'var(--dsw-alias-label-secondary, #536174)' } },
-            h('span', { style: styles.pulse }, '正在处理…'))) : null,
-        h('div', { ref: bottomRef }))),
-    h('div', { style: styles.composer },
+            h('span', { style: styles.pulse }, '正在处理…'))) : null)),
+    h('div', { 'data-personal-assistant-composer': 'true', style: styles.composer },
       h('div', { style: styles.composerInner },
         attachments.length > 0 ? h('div', { style: styles.attachRow }, attachments.map(item => h('span', { key: item.id, style: styles.attach },
           item.mimeType.startsWith('image/') ? h('img', { src: item.dataUrl, alt: '', style: styles.attachThumb }) : null,
@@ -342,10 +343,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
           }, closeGlyph(h))))) : null,
         h('textarea', {
           'aria-label': '给个人助理发消息', value: draft, rows: 1, style: styles.textarea,
-          placeholder: '给个人助理发消息，Enter 发送，Shift+Enter 换行',
+          placeholder: phase === 'ready' ? '给个人助理发消息，Enter 发送，Shift+Enter 换行' : '云端暂未连接，可先写下消息',
           onChange: event => setDraft(event.target.value),
           onKeyDown: event => {
-            if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); void submit(); }
+            if (phase === 'ready' && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); void submit(); }
           },
         }),
         h('div', { style: styles.composerBar },
@@ -354,8 +355,8 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
           h('span', { style: styles.spacer }),
           h('button', {
             'aria-label': '发送消息',
-            disabled: sending || (!draft.trim() && attachments.length === 0),
-            style: sending || (!draft.trim() && attachments.length === 0) ? { ...styles.send, ...styles.sendDisabled } : styles.send,
+            disabled: phase !== 'ready' || sending || (!draft.trim() && attachments.length === 0),
+            style: phase !== 'ready' || sending || (!draft.trim() && attachments.length === 0) ? { ...styles.send, ...styles.sendDisabled } : styles.send,
             onClick: () => void submit(),
           }, sendGlyph(h))))));
 }
