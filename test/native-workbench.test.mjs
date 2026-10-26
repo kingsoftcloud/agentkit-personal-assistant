@@ -1,47 +1,62 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAssistantWorkbench } from '../src/client/native-workbench.mjs';
+import { createAssistantWorkbench, AssistantNativeRightbar } from '../src/client/native-workbench.mjs';
 
-class Controller {
-  constructor({makeInitialTab}) { this.listeners=new Set();this.state={tabs:{one:makeInitialTab('one')},floats:[],expanded:false};this.publish(); }
-  publish(){this.snapshot={state:{...this.state},canSplit:true};for(const listener of this.listeners)listener();}
-  getSnapshot=()=>this.snapshot;
-  subscribe=listener=>{this.listeners.add(listener);return()=>this.listeners.delete(listener);};
-  setExpanded(expanded){this.state={...this.state,expanded};this.publish();}
-  openContent(tab){if(!Object.keys(this.state.tabs).length)this.state={...this.state,tabs:{one:{...tab,id:'one'}}};this.publish();}
-  closeTab(){this.state={...this.state,tabs:{}};this.publish();}
-}
-function fixture(){
-  const listeners=new Set(),registrations=[];let activePanelId=null;
-  const layout={panelInfo:{getSnapshot:()=>({activePanelId}),subscribe:fn=>{listeners.add(fn);return()=>listeners.delete(fn);}},closeRightbar(){}};
-  const slots={inject(name,factory){const entry={name,registration:factory(),removed:false};registrations.push(entry);return()=>{entry.removed=true;};},register(definition,component){return {definition,component};}};
-  const workbench=createAssistantWorkbench({layout,slots,DockKit:{DockController:Controller,DockLayout(){}}});
-  return {workbench,registrations,select(id){activePanelId=id;for(const fn of listeners)fn();}};
+function fixture() {
+  const registrations = [], surfaces = new Set(), opens = [];
+  const sidebarRight = {
+    registerPanelSurface(id) { assert.equal(surfaces.has(id), false); surfaces.add(id); return () => surfaces.delete(id); },
+    openPanelTab(panelId, kind) { assert.equal(surfaces.has(panelId), true); opens.push({ panelId, kind }); },
+    setPanelExpanded(panelId, expanded) { opens.push({ panelId, expanded }); },
+  };
+  const slots = {
+    inject(name, factory) { const entry = { name, registration: factory(), removed: false }; registrations.push(entry); return () => { entry.removed = true; }; },
+    register(definition, component) { return { definition, component }; },
+  };
+  const workbench = createAssistantWorkbench({ sidebarRight, slots });
+  return { workbench, registrations, surfaces, opens };
 }
 
-test('原生 rightbar 仅在个人助理页挂载，切走恢复原会话侧栏，不创建本地会话',()=>{
- const h=fixture();assert.equal(h.registrations.length,0);
- h.select('personal-assistant');assert.equal(h.registrations.length,1);
- assert.equal(h.registrations[0].registration.definition.name,'rightbar');
- assert.equal(h.registrations[0].registration.definition.priority,-90);
- h.select('overview');assert.equal(h.registrations[0].removed,true);
- h.select('personal-assistant');assert.equal(h.registrations.length,2);
- h.workbench.dispose();assert.equal(h.registrations[1].removed,true);
+test('云电脑只贡献 root tab 内容，布局和生命周期交给原生服务，不覆盖 rightbar', () => {
+  const h = fixture();
+  assert.equal(h.workbench.available, true);
+  assert.deepEqual(h.registrations.map(value => value.name), ['sidebar.right.panel.tab']);
+  assert.equal(h.registrations[0].registration.definition.key, 'personal-assistant-computer');
+  assert.deepEqual([...h.surfaces], ['personal-assistant']);
+  h.workbench.dispose();
+  assert.equal(h.registrations[0].removed, true); assert.equal(h.surfaces.size, 0);
 });
 
-test('云端唯一绑定穿过原生工作面板，关最后标签释放栏位，重开只恢复同一电脑',()=>{
- const h=fixture(),scope={agentId:'ar-cloud',botId:'default'},request=()=>{};
- assert.throws(()=>h.workbench.bind({agentId:'ar-cloud'},request),/尚未连接/u);
- h.workbench.bind(scope,request);
- const first=h.workbench.getSnapshot();assert.equal(first.dock.state.expanded,true);
- assert.equal(first.binding.request,request);assert.deepEqual(first.binding.scope,scope);
- assert.equal(Object.keys(first.dock.state.tabs).length,1);
- first.controller.closeTab('one');assert.equal(h.workbench.getSnapshot().dock.state.expanded,false);
- h.workbench.open();const restored=h.workbench.getSnapshot();assert.equal(restored.dock.state.expanded,true);
- assert.deepEqual(restored.binding.scope,scope);assert.equal(Object.keys(restored.dock.state.tabs).length,1);
- h.workbench.dispose();
+test('唯一云端绑定传入原生工作面板，重开与收起只操作同一面板', () => {
+  const h = fixture(), scope = { agentId: 'ar-cloud', botId: 'default', sessionId: 'cloud-session' }, request = () => {};
+  assert.throws(() => h.workbench.bind({ agentId: 'ar-cloud' }, request), /尚未连接/u);
+  h.workbench.bind(scope, request);
+  assert.deepEqual(h.workbench.getSnapshot().binding.scope, scope);
+  assert.equal(h.workbench.getSnapshot().binding.request, request);
+  h.workbench.collapse(); h.workbench.open();
+  assert.deepEqual(h.opens, [
+    { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
+    { panelId: 'personal-assistant', expanded: false },
+    { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
+  ]);
+  h.workbench.dispose();
 });
 
-test('宿主缺少公开 Frame/DockKit 时明确不可用，不退回固定双栏或本机会话',()=>{
- assert.equal(createAssistantWorkbench({}),null);
+test('原生 tab 向电脑内容透传云端身份、可见与全屏状态，不生成布局容器', () => {
+  const h = fixture(); h.workbench.bind({ agentId: 'ar-cloud', botId: 'default', sessionId: 'cloud-session' }, () => {});
+  const React = { createElement: (type, props) => ({ type, props }), useSyncExternalStore: (_listen, read) => read() };
+  const Panel = () => {};
+  const value = AssistantNativeRightbar({ React, workbench: h.workbench, Panel, active: true, fullscreen: true });
+  assert.equal(value.type, Panel); assert.equal(value.props.nativeFullscreen, true);
+  assert.equal(value.props.agentId, 'ar-cloud'); assert.equal(value.props.initialSessionId, 'cloud-session');
+  assert.equal(AssistantNativeRightbar({ React, workbench: h.workbench, Panel, active: false }), null);
+  h.workbench.dispose();
+});
+
+test('旧宿主无原生 root panel 能力时明确要求更新，不退回固定双栏', () => {
+  const workbench = createAssistantWorkbench({});
+  assert.equal(workbench.available, false);
+  assert.match(workbench.unavailableReason, /原生侧栏组件需要更新/u);
+  assert.throws(() => workbench.bind({ agentId: 'ar-cloud', botId: 'default' }, () => {}), { code: 'PERSONAL_ASSISTANT_NATIVE_SIDEBAR_REQUIRED' });
+  workbench.dispose();
 });
