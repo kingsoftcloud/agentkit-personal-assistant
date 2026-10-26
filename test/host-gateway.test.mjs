@@ -12,7 +12,8 @@ test('Host locks cloud origin and identity, normalizes tickets without disclosin
   } });
   const status = await gateway.request('personal-assistant.configuration');
   assert.equal(status.configured, true);
-  assert.equal(status.gatewayUrl, undefined);
+  // 设置页需要显示当前绑定的云端环境；只暴露 origin，凭据仍然不出 Host。
+  assert.equal(status.gatewayUrl, 'https://gateway.example');
   assert.equal(JSON.stringify(status).includes(config.apiKey), false);
   const result = await gateway.request('personal-assistant.desktop.ticket', { agentId: 'ar-real', botId: 'researcher', mode: 'read' });
   assert.equal(result.wsUrl, 'wss://gateway.example/personal-assistant/desktop/ws');

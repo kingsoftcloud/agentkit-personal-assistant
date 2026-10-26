@@ -65,7 +65,7 @@ test('Studio 拒绝、未绑定或代理异常均不回退静态 API key，原�
   const unbound = createPersonalAssistantHostGateway(direct, { env: {}, fetchImpl: offline,
     getStudioDesktop: () => ({ configuration: async () => ({ configured: false }), issueTicket: offline }),
   });
-  assert.deepEqual(await unbound.request('personal-assistant.configuration'), { configured: false });
+  assert.deepEqual(await unbound.request('personal-assistant.configuration'), { configured: false, gatewayUrl: 'https://legacy.example' });
   await assert.rejects(unbound.request('personal-assistant.desktop.ticket', { botId: 'default' }), { status: 409 });
 });
 

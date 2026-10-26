@@ -4,6 +4,7 @@ import { createComputerBrokerClient, createHttpComputerBrokerTransport } from '.
 import { createComputerToolset } from '../src/cloud-computer-tools.mjs';
 import { BotRegistry } from '../src/bot-registry.mjs';
 import { createPersonalAssistantStateStore } from '../src/persistent-state.mjs';
+import { createCloudSessionChannel } from './cloud-session-channel.mjs';
 import { attachDesktopWebSocket } from './desktop-ws.mjs';
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
@@ -165,6 +166,7 @@ const updateTurn = (turnId, patch) => stateStore.mutate('turns', rows => {
   return row;
 });
 const pendingTurns = new Set();
+const submissionLocks = new Map();
 const scheduler = runtime?.scheduleManager ?? createScheduleManager();
 const scheduleKey = row => `task-${createHash('sha256').update(JSON.stringify([row.botId, row.scheduleId])).digest('hex')}`;
 const patchSchedule = (record, patch) => stateStore.mutate('schedules', rows => {
@@ -188,16 +190,31 @@ function armSchedule(row) {
   } });
 }
 const turnWrite = async (body, sessionId) => {
+  const key = JSON.stringify([body.botId, sessionId]);
+  const previous = submissionLocks.get(key) || Promise.resolve();
+  const current = previous.catch(() => {}).then(() => submitCloudTurn(body, sessionId));
+  submissionLocks.set(key, current);
+  try { return await current; } finally { if (submissionLocks.get(key) === current) submissionLocks.delete(key); }
+};
+const submitCloudTurn = async (body, sessionId) => {
   const botId = stateBotId(body.botId);
   await requireSession(botId, sessionId);
   if (!turnBridge?.available) throw Object.assign(new Error('cloud DSH Session Controller unavailable'), { code: 'DSH_SESSION_CONTROLLER_UNAVAILABLE', status: 503 });
+  const clientTurnId = body.metadata?.clientTurnId;
+  if (clientTurnId) {
+    const existing = (await stateStore.turns(botId, sessionId)).find(row => row.metadata?.clientTurnId === clientTurnId);
+    if (existing) {
+      if (existing.input !== body.input) throw Object.assign(new Error('同一发送标识不能改变内容'), { code: 'CLIENT_TURN_CONFLICT', status: 409 });
+      return existing;
+    }
+  }
   const turn = await stateStore.createTurn({ botId, sessionId, input: body.input, metadata: body.metadata });
-  const message = await stateStore.appendMessage({ botId, sessionId, role: 'user', content: body.input, metadata: { turnId: turn.turnId } });
+  const message = await stateStore.appendMessage({ botId, sessionId, role: 'user', content: body.input, metadata: { turnId: turn.turnId, ...(clientTurnId ? { clientTurnId } : {}) } });
   try {
     const receipt = await turnBridge.submitTurn({ botId, sessionId, input: body.input, requestId: turn.turnId });
     await updateTurn(turn.turnId, { status: 'running', execution: receipt.execution, requestId: receipt.requestId });
     const pending = turnBridge.waitForTurn({ botId, sessionId, requestId: receipt.requestId }).then(async result => {
-      for (const content of result.messages) await stateStore.appendMessage({ botId, sessionId, role: 'assistant', content, metadata: { turnId: turn.turnId, execution: receipt.execution } });
+      for (const content of result.messages) await stateStore.appendMessage({ botId, sessionId, role: 'assistant', content, metadata: { turnId: turn.turnId, ...(clientTurnId ? { clientTurnId } : {}), execution: receipt.execution } });
       await updateTurn(turn.turnId, { status: result.status, result: result.messages.join('\n'), error: result.error || null });
       console.info(JSON.stringify({ event: 'personal-assistant.turn.finished', botId, sessionId, turnId: turn.turnId, status: result.status }));
     }).catch(error => updateTurn(turn.turnId, { status: 'failed', error: error.code || error.message }));
@@ -264,7 +281,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list() });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite }) });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
 return { server, stateStore, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }

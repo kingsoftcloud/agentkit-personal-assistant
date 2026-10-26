@@ -6,10 +6,12 @@ import { workspaceDir } from './workspace.mjs';
 import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { registerPersonalAssistantHostGateway } from './host-gateway.mjs';
+import { createHostSessionChannel } from './host-session-channel.mjs';
 import { loadPersonalAssistantManifest } from './platform-manifest.mjs';
 import { restrictPersonalAssistantToolScope } from './bot-tool-scope.mjs';
 export { IMPLEMENTED_RUNTIME_CAPABILITIES } from './implementation-capabilities.mjs';
 export { DshSessionControllerUnavailableError, createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
+export { createHostSessionChannel } from './host-session-channel.mjs';
 
 export const name = '@kingsoftcloud/agentkit-personal-assistant';
 export const inject = Object.freeze([
@@ -35,6 +37,18 @@ function configuredBots(value, env) {
   } catch (error) {
     throw Object.assign(new Error('Personal Assistant Bot registry could not be loaded'), { code: 'PERSONAL_ASSISTANT_BOT_REGISTRY_INVALID', cause: error });
   }
+}
+
+/**
+ * 面板对话不总是携带 botId，需要一个确定性的缺省 Bot：配置/环境显式指定优先，
+ * 其次取注册表里的第一个 Bot（单 Bot 部署即「就是它」；多 Bot 部署应由调用方显式选择）。
+ */
+function defaultPersonalAssistantBot(registry, config, env) {
+  for (const candidate of [config.botId, env.BOT_ID]) {
+    const botId = String(candidate ?? '').trim();
+    if (botId && registry.has(botId)) return botId;
+  }
+  return registry.list()[0]?.botId;
 }
 
 /**
@@ -90,10 +104,11 @@ export function createRuntime(ctx, config = {}) {
 
 export function apply(ctx, config = {}) {
   const runtime = createRuntime(ctx, config);
+  const env = runtimeEnvironment();
   if (typeof ctx.effect === 'function' && typeof ctx.connection?.fetch?.register === 'function') {
+    // 本地 Host 只鉴权和转发，云端会话不可退回本机 Session Controller。
     ctx.effect(() => registerPersonalAssistantHostGateway(ctx, config), 'personal-assistant:gateway');
   }
-  const env = runtimeEnvironment();
   if (env.AGENTKIT_PERSONAL_ASSISTANT_SERVE === '1') {
     if (!runtime.turnBridge.available) throw Object.assign(new Error('Cloud Personal Assistant requires the DSH Session Controller'), { code: 'DSH_SESSION_CONTROLLER_UNAVAILABLE' });
     const serve = async () => {

@@ -91,7 +91,7 @@ function parseFrames(state, chunk, onFrame) {
   }
 }
 
-export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots, env = process.env }) {
+export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots, sessionRequest, env = process.env }) {
   const usedPermits = new Map();
   server.on('upgrade', async (request, socket, head) => {
     const url = new URL(request.url || '/', 'http://desktop.local');
@@ -227,6 +227,22 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       let body; try { body = JSON.parse(payload.toString('utf8')); } catch { send({ type: 'error', code: 'INVALID_JSON' }); return; }
       let brokerStarted = false;
       try {
+        if (body.type === 'session.request') {
+          // control 票据授权交互执行；目录/只读桌面票据不能读取会话或提交回合。
+          // 不打开桌面、不申请电脑租约；真实云端工具执行时独立获取租约。
+          if (claims && (claims.mode !== 'control' || claims.botId === DIRECTORY_BOT_ID)) throw Object.assign(new Error('会话执行需要具名助理控制授权'), { code: 'CLOUD_SESSION_CONTROL_REQUIRED', status: 403 });
+          if (!/^[A-Za-z0-9_-]{1,80}$/u.test(String(body.requestId || ''))) throw Object.assign(new Error('会话请求标识无效'), { code: 'CLOUD_SESSION_REQUEST_INVALID', status: 400 });
+          if (body.agentId !== assistantId || (claims && body.botId !== claims.botId)) throw Object.assign(new Error('会话身份与票据不一致'), { code: 'CLOUD_SESSION_IDENTITY_MISMATCH', status: 403 });
+          if (state.sessionId) throw Object.assign(new Error('会话与桌面需要独立连接'), { code: 'CLOUD_SESSION_CONNECTION_CONFLICT', status: 409 });
+          if (typeof sessionRequest !== 'function') throw Object.assign(new Error('请升级云端会话服务'), { code: 'CLOUD_SESSION_UNAVAILABLE', status: 503 });
+          try {
+            const value = await sessionRequest({ agentId: assistantId, botId: botIdOf(body.botId), operation: body.operation, payload: body.payload });
+            send({ type: 'session.response', requestId: body.requestId, agentId: assistantId, botId: body.botId, ok: true, value });
+          } catch (error) {
+            send({ type: 'session.response', requestId: body.requestId, agentId: assistantId, botId: body.botId, ok: false, error: { code: error.code || 'CLOUD_SESSION_FAILED', message: error.status ? error.message : '云端会话请求失败', status: error.status || 503 } });
+          }
+          return;
+        }
         if (body.type === 'bots.list') {
           if (claims && (claims.mode !== 'read' || claims.botId !== DIRECTORY_BOT_ID)) throw Object.assign(new Error('助理目录需要独立只读授权'), { code: 'DESKTOP_DIRECTORY_SCOPE_REQUIRED', status: 403 });
           if (state.sessionId || typeof listBots !== 'function') throw Object.assign(new Error('助理目录暂不可用'), { code: 'DESKTOP_DIRECTORY_UNAVAILABLE', status: 503 });

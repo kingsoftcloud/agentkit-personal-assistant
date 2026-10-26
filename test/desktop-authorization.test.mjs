@@ -129,3 +129,34 @@ test('只读签名授权在空闲恢复时仍不能升级控制或申请租约',
   assert.equal(calls.some(v => v.path.endsWith('/acquire')), false);
   assert.equal(calls.some(v => v.path.endsWith('/input')), false);
 });
+
+test('会话 RPC 只接受具名 Bot control permit，拒绝目录/只读/换身份且不申请电脑租约', async t => {
+  const calls = [], brokerCalls = [];
+  const server = createServer();
+  attachDesktopWebSocket({ server, runtimeToken: 'private-token-at-least-24-characters', assistantId: 'ar-test', env,
+    botIdOf: value => value, taskIdOf: value => value,
+    sessionRequest: async value => { calls.push(value); return { executionTarget: 'cloud', sessionId: 'cloud-owned' }; },
+    brokerDesktopRequest: async path => { brokerCalls.push(path); return {}; },
+    brokerDesktopFrameBinary: async () => ({}),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const port = server.address().port;
+  for (const claim of [{ mode: 'read' }, { mode: 'control', botId: DIRECTORY_BOT_ID }]) {
+    const client = await connect(port, { 'X-AgentEngine-Desktop-Permit': permit(claim) });
+    t.after(() => client.socket.destroy());
+    client.send({ type: 'session.request', requestId: 'req-1', agentId: 'ar-test', botId: claim.botId || 'observer', operation: 'personal-assistant.turn.submit', payload: {} });
+    assert.equal((await client.next(row => row.type === 'error')).code, 'CLOUD_SESSION_CONTROL_REQUIRED');
+  }
+  const client = await connect(port, { 'X-AgentEngine-Desktop-Permit': permit({ mode: 'control' }) });
+  t.after(() => client.socket.destroy());
+  client.send({ type: 'session.request', requestId: 'bad', agentId: 'ar-test', botId: 'other', operation: 'personal-assistant.sessions.list' });
+  assert.equal((await client.next(row => row.type === 'error')).code, 'CLOUD_SESSION_IDENTITY_MISMATCH');
+  client.send({ type: 'session.request', requestId: 'good', agentId: 'ar-test', botId: 'observer', operation: 'personal-assistant.sessions.list', payload: {} });
+  const response = await client.next(row => row.type === 'session.response');
+  assert.equal(response.ok, true);
+  assert.equal(response.botId, 'observer');
+  assert.equal(response.value.executionTarget, 'cloud');
+  assert.equal(calls.length, 1);
+  assert.equal(brokerCalls.length, 0);
+});

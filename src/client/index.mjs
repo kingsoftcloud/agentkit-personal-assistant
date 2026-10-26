@@ -64,7 +64,9 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
 export const inject = Object.freeze(['slots', 'connection']);
 export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
 export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false, autoConnect: false });
+export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { mapDisplayPoint, normalizeDisplay } from './desktop-view.mjs';
+import { PersonalAssistantConversation } from './conversation.mjs';
 import { publicBotDirectory } from './bot-directory.mjs';
 export const PERSONAL_ASSISTANT_CLIENT_BUILD = typeof __PA_CLIENT_BUILD__ === 'string' ? __PA_CLIENT_BUILD__ : '开发模式';
 const FIRST_FRAME_TIMEOUT_MS = 12_000;
@@ -81,7 +83,7 @@ const canUseDefaultBot = error => ![401, 403].includes(Number(error?.status)) &&
 );
 const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
 
-export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
+export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page', onBotChange = null } = {}) {
   const R = clientReact || globalThis.React;
   if (!R) return '个人助理页面尚未就绪，请重新打开';
   const { createElement: h, useEffect, useRef, useState } = R;
@@ -250,7 +252,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
           setNotice(value.message || value.code || '云电脑请求失败');
           if (value.recoverable === true && Number(value.status) === 409) {
             if (value.code === 'DESKTOP_SESSION_IDLE') markIdle();
-            else { current.pendingInputs = []; current.readOnly = true; current.pressed.clear(); current.buttons.clear(); setReadOnly(true); }
+            else { current.pendingInputs = []; current.readOnly = true; current.pressed.clear(); current.buttons.clear(); setReadOnly(true); setPhase('readonly'); }
             return;
           }
           if (Number(value.status) === 409 && mode === 'control' && !current.session) { void open('read'); return; }
@@ -368,11 +370,42 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
   const selectable = bots.length > 0;
   const emptyTitle = phase === 'unconfigured' ? '开通后，在这里连接你的个人助理' : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? manualBotAvailable ? '当前云端版本暂不支持助理列表' : '暂时无法读取助理列表' : '正在检查助理状态';
   const emptyDetail = phase === 'unconfigured' ? '开通完成后，即可在这里连接专属云电脑。' : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
+  const stage = h('div', { ref: viewRef, style: { position: 'relative', flex: 1, minHeight: 240, background: active || phase === 'connecting' ? '#10151e' : 'transparent' } },
+    full ? h('button', { style: { ...buttonStyle, position: 'absolute', top: 12, right: 12, zIndex: 2 }, onClick: () => void document.exitFullscreen() }, '退出桌面全屏') : null,
+    ['dormant', 'resuming'].includes(phase) ? h('div', { role: 'status', style: { position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none', display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,0.45)', color: '#fff' } }, phase === 'dormant' ? '已空闲，操作桌面即可恢复' : '正在恢复桌面…') : null,
+    h('canvas', { ref: canvasRef, 'aria-label': '云电脑桌面', tabIndex: active ? 0 : -1, onPointerDown: pointer, onPointerUp: pointer, onPointerCancel: releasePointer, onLostPointerCapture: releasePointer, onPointerMove: event => { if (Date.now() - state.current.lastMove < 34) return; state.current.lastMove = Date.now(); input({ type: 'pointermove', ...point(event) }); }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'crosshair' } }),
+    !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', ...(phase === 'connecting' ? { color: '#e8edf5' } : {}) } },
+      h('h2', { style: { margin: 0, fontSize: 20, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
+      h('p', { style: { margin: 0, maxWidth: 380, lineHeight: 1.7, color: phase === 'connecting' ? '#b8c1d1' : 'var(--dsw-alias-label-secondary, #536174)' } }, selectable ? notice || '连接后即可使用云端桌面，关闭面板会释放本次控制。' : emptyDetail),
+      !selectable && manualBotAvailable ? h('button', { style: buttonStyle, onClick: () => setDiagnosticsOpen(true) }, '选择已有助理') : null,
+      !selectable && phase !== 'loading' ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, manualBotAvailable ? '刷新助理列表' : '检查开通状态') : null) : null,
+    h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
+  const secondaryInk = 'var(--dsw-alias-label-secondary, #536174)';
+  const ghostStyle = { ...buttonStyle, background: 'transparent', color: 'inherit', border: ui.border };
+  const pillStyle = { ...buttonStyle, borderRadius: 999, padding: '7px 16px', border: 'none', fontWeight: 500, background: 'var(--dsw-alias-label-primary, #17202c)', color: 'var(--dsw-alias-bg-layer-1, #fff)' };
+  if (variant === 'computer') {
+    return h('section', { 'data-personal-assistant-computer': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-layer-1, #fff)', color: 'inherit', fontSize: 13 } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: ui.border } },
+        h('strong', { style: { fontWeight: 500 } }, '云电脑'),
+        h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, stateText),
+        selectable ? h('label', { style: { marginLeft: 'auto', color: secondaryInk, fontSize: 12 } }, '助理 ', h('select', { 'aria-label': '当前助理', value: botId, onChange: event => { close(); setBotId(event.target.value); onBotChange?.(event.target.value); }, style: { ...ui, borderRadius: 6, padding: '4px 8px', maxWidth: 180 } }, bots.map(bot => h('option', { key: bot.botId, value: bot.botId }, bot.displayName)))) : null,
+        active ? h('button', { style: ghostStyle, onClick: () => { close(); setNotice(''); } }, '断开') : null,
+        active ? h('button', { style: ghostStyle, onClick: () => { if (document.fullscreenElement) void document.exitFullscreen(); else void viewRef.current?.requestFullscreen(); } }, full ? '退出全屏' : '全屏') : null),
+      readOnly && active ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
+      stage,
+      h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, padding: '10px 12px 14px', flexWrap: 'wrap' } },
+        !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open('control') }, phase === 'connecting' ? '正在启动…' : '连接云电脑') : null,
+        active && readOnly ? h('button', { style: pillStyle, onClick: () => { if (phase === 'dormant') void resumeIdle(); else void open('control'); } }, phase === 'dormant' ? '继续查看' : '申请控制权') : null,
+        active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '你正在控制这台云电脑') : null,
+        active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null),
+      h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD, style: { padding: '0 12px 10px', color: secondaryInk, opacity: 0.75 } }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`));
+  }
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },
     h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 12, borderBottom: ui.border } },
       h('strong', { style: { fontWeight: 500, marginRight: 8 } }, '个人助理'),
-      selectable ? h('label', null, '当前助理 ', h('select', { 'aria-label': '当前助理', value: botId, onChange: event => { close(); setBotId(event.target.value); }, style: { ...ui, borderRadius: 6, padding: '6px 8px', maxWidth: 220 } }, bots.map(bot => h('option', { key: bot.botId, value: bot.botId }, bot.displayName)))) : null,
+      selectable ? h('label', null, '当前助理 ', h('select', { 'aria-label': '当前助理', value: botId, onChange: event => { close(); setBotId(event.target.value); onBotChange?.(event.target.value); }, style: { ...ui, borderRadius: 6, padding: '6px 8px', maxWidth: 220 } }, bots.map(bot => h('option', { key: bot.botId, value: bot.botId }, bot.displayName)))) : null,
       selectable && ['idle', 'closed', 'error'].includes(phase) ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '刷新助理列表') : null,
+      typeof openInSidebar === 'function' ? h('button', { style: buttonStyle, onClick: openInSidebar }, '放到右侧栏') : null,
       selectable ? h('button', { style: buttonStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => phase === 'dormant' ? resumeIdle() : void open('control') }, phase === 'dormant' ? '恢复画面' : readOnly && phase === 'readonly' ? '申请控制' : active ? '重新连接' : '连接云电脑') : null,
       selectable ? h('button', { style: buttonStyle, disabled: phase === 'connecting', onClick: () => void open('read') }, '只读旁观') : null,
       active || phase === 'connecting' ? h('button', { style: buttonStyle, onClick: () => { close(); setNotice(''); } }, '断开连接') : null,
@@ -380,16 +413,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
       active ? h('span', { role: 'status', 'aria-live': 'polite', style: { marginLeft: 'auto', color: 'var(--dsw-alias-label-secondary, #536174)' } }, stateText) : null),
     phase === 'readonly' ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '当前为只读旁观，鼠标和键盘输入不会发送；可申请控制') : null,
     active && notice ? h('div', { role: 'status', style: { padding: '8px 12px' } }, notice) : null,
-    h('div', { ref: viewRef, style: { position: 'relative', flex: 1, minHeight: 240, background: active || phase === 'connecting' ? '#10151e' : 'transparent' } },
-      full ? h('button', { style: { ...buttonStyle, position: 'absolute', top: 12, right: 12, zIndex: 2 }, onClick: () => void document.exitFullscreen() }, '退出桌面全屏') : null,
-      ['dormant', 'resuming'].includes(phase) ? h('div', { role: 'status', style: { position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none', display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,0.45)', color: '#fff' } }, phase === 'dormant' ? '已空闲，操作桌面即可恢复' : '正在恢复桌面…') : null,
-      h('canvas', { ref: canvasRef, 'aria-label': '云电脑桌面', tabIndex: active ? 0 : -1, onPointerDown: pointer, onPointerUp: pointer, onPointerCancel: releasePointer, onLostPointerCapture: releasePointer, onPointerMove: event => { if (Date.now() - state.current.lastMove < 34) return; state.current.lastMove = Date.now(); input({ type: 'pointermove', ...point(event) }); }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'crosshair' } }),
-      !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', ...(phase === 'connecting' ? { color: '#e8edf5' } : {}) } },
-        h('h2', { style: { margin: 0, fontSize: 20, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
-        h('p', { style: { margin: 0, maxWidth: 380, lineHeight: 1.7, color: phase === 'connecting' ? '#b8c1d1' : 'var(--dsw-alias-label-secondary, #536174)' } }, selectable ? notice || '连接后即可使用云端桌面，关闭面板会释放本次控制。' : emptyDetail),
-        !selectable && manualBotAvailable ? h('button', { style: buttonStyle, onClick: () => setDiagnosticsOpen(true) }, '选择已有助理') : null,
-        !selectable && phase !== 'loading' ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, manualBotAvailable ? '刷新助理列表' : '检查开通状态') : null) : null,
-      h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } })),
+    stage,
     h('footer', { style: { display: 'flex', alignItems: 'start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', borderTop: ui.border } },
       h('details', { open: diagnosticsOpen, onToggle: event => setDiagnosticsOpen(event.currentTarget.open) }, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
         directoryCloseCode ? h('div', { style: { paddingTop: 8 } }, `目录连接关闭码：${directoryCloseCode}`) : null,
@@ -398,9 +422,132 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
           h('button', { style: buttonStyle, disabled: active || phase === 'connecting', onClick: selectManualBot }, '使用此助理')) : null,
         h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('div', null, `云端实例：${config?.agentId || '未开通'}`), h('div', null, `助理标识：${botId || '未选择'}`), h('div', null, `画面帧率：${fps} fps`), h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
       h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD, style: { opacity: 0.75 } }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
+}
+
+
+/** 主面板：对话式入口，云电脑在右侧栏。 */
+export function PersonalAssistantHome({ request } = {}) {
+  const R = clientReact || globalThis.React;
+  if (!R) return '个人助理页面尚未就绪，请重新打开';
+  const { createElement: h, useEffect, useState, useCallback } = R;
+  const [scope, setScope] = useState(null);
+  const [error, setError] = useState('');
+  const [attempt, retry] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setScope(null); setError('');
+    void (async () => {
+      try {
+        const config = await request('personal-assistant.configuration');
+        if (!config.configured) throw new Error('个人助理尚未开通，请先在设置中连接云端实例');
+        const directory = await request('personal-assistant.bots.list');
+        const bot = publicBotDirectory(directory.bots)[0];
+        if (!bot) throw new Error('云端还没有可用助理，请检查开通状态');
+        if (!cancelled) setScope({ agentId: config.agentId, botId: bot.botId });
+      } catch (failure) { if (!cancelled) setError(failure.message || '云端助理暂不可用'); }
+    })();
+    return () => { cancelled = true; };
+  }, [request, attempt]);
+  const scopedRequest = useCallback((operation, payload = {}) => {
+    if (!scope) throw new Error('云端助理尚未连接');
+    if (payload.agentId && payload.agentId !== scope.agentId) throw new Error('云端实例不一致');
+    if (operation !== 'personal-assistant.bots.list' && payload.botId && payload.botId !== scope.botId) throw new Error('云端助理不一致');
+    return request(operation, { ...payload, ...scope });
+  }, [request, scope?.agentId, scope?.botId]);
+  if (!scope) return h('div', { role: 'status', style: { padding: 24 } }, error || '正在连接云端个人助理…', error ? h('button', { onClick: () => retry(value => value + 1) }, '重新连接') : null);
+  return h('div', {
+    key: `${scope.agentId}:${scope.botId}`, 'data-personal-assistant-home': 'true',
+    'data-agent-id': scope.agentId, 'data-bot-id': scope.botId,
+    style: { display: 'flex', height: '100%', minHeight: 0, alignItems: 'stretch' },
+  },
+  h('div', { style: { flex: '1 1 42%', minWidth: 320, minHeight: 0, display: 'flex', flexDirection: 'column' } },
+    h(PersonalAssistantConversation, { React: R, request: scopedRequest, scope })),
+  h('div', { style: { flex: '1 1 58%', minWidth: 420, minHeight: 0, display: 'flex', flexDirection: 'column', borderLeft: ui.border } },
+    h(PersonalAssistantPanel, { request: scopedRequest, initialBotId: scope.botId, variant: 'computer', onBotChange: botId => setScope(current => ({ ...current, botId })) })));
 
 }
+
+
+const settingsStyle = {
+  page: { padding: '2px 2px 28px', display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 700, fontSize: 13, color: 'var(--dsw-alias-label-primary, #17202c)' },
+  title: { margin: 0, fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' },
+  lede: { margin: 0, color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 13, lineHeight: 1.7 },
+  card: { border: ui.border, borderRadius: 12, overflow: 'hidden' },
+  row: { display: 'flex', gap: 16, padding: '12px 14px', borderTop: '1px solid var(--dsw-alias-border-default, #d8dee8)', alignItems: 'flex-start' },
+  rowFirst: { display: 'flex', gap: 16, padding: '12px 14px', alignItems: 'flex-start' },
+  label: { width: 116, flex: 'none', color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 13, lineHeight: 1.7 },
+  value: { flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.7, overflowWrap: 'anywhere' },
+  mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12 },
+  actions: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
+  button: { ...ui, borderRadius: 8, padding: '6px 11px', cursor: 'pointer', font: 'inherit', fontSize: 13 },
+  note: { color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12, lineHeight: 1.7 },
+  badge: { display: 'inline-block', borderRadius: 999, padding: '1px 8px', fontSize: 12, lineHeight: 1.7 },
+  badgeOk: { background: 'color-mix(in srgb, #067647 12%, transparent)', color: '#067647' },
+  badgeIdle: { background: 'color-mix(in srgb, #946200 14%, transparent)', color: '#946200' },
+  badgeError: { background: 'color-mix(in srgb, #b42318 12%, transparent)', color: '#b42318' },
+};
+
+/** 设置页里的「个人助理」一节：状态、连接自检、能力与记忆位置。 */
+export function PersonalAssistantSettings({ request, openComputer = null } = {}) {
+  const R = clientReact || globalThis.React;
+  if (!R) return '设置页尚未就绪，请重新打开 Studio';
+  const { createElement: h, useEffect, useState, useCallback } = R;
+  const [config, setConfig] = useState(null);
+  const [bots, setBots] = useState(null);
+  const [error, setError] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [checkedAt, setCheckedAt] = useState('');
+
+  const check = useCallback(async () => {
+    setChecking(true); setError('');
+    const started = Date.now();
+    try {
+      const current = await request('personal-assistant.configuration');
+      setConfig(current);
+      if (current?.configured) {
+        const directory = await request('personal-assistant.bots.list');
+        setBots(Array.isArray(directory?.bots) ? directory.bots : []);
+      } else { setBots([]); }
+      setCheckedAt(`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · ${Date.now() - started} ms`);
+    } catch (reason) {
+      setError(reason?.message || '连接检查失败');
+      setCheckedAt(`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · 失败`);
+    } finally { setChecking(false); }
+  }, [request]);
+
+  useEffect(() => { void check(); }, [check]);
+
+  const configured = config?.configured === true;
+  const status = config === null ? '检查中' : configured ? '已开通' : '尚未开通';
+  const statusStyle = { ...settingsStyle.badge, ...(config === null ? settingsStyle.badgeIdle : configured ? settingsStyle.badgeOk : settingsStyle.badgeIdle) };
+  const line = (label, value, first = false) => h('div', { style: first ? settingsStyle.rowFirst : settingsStyle.row },
+    h('div', { style: settingsStyle.label }, label), h('div', { style: settingsStyle.value }, value));
+
+  return h('section', { 'data-personal-assistant-settings': 'true', style: settingsStyle.page },
+    h('div', null,
+      h('h1', { style: settingsStyle.title }, '个人助理'),
+      h('p', { style: { ...settingsStyle.lede, marginTop: 6 } }, '云端持续运行的助理，带一台独立云电脑。关掉窗口它也在工作；对话与云电脑在左侧「个人助理」页。')),
+    error ? h('div', { role: 'alert', style: { ...settingsStyle.note, color: '#b42318', background: 'color-mix(in srgb, #b42318 8%, transparent)', border: '1px solid color-mix(in srgb, #b42318 25%, transparent)', borderRadius: 10, padding: '9px 12px' } }, error) : null,
+    h('div', { style: settingsStyle.card },
+      line('状态', h('span', null, h('span', { style: statusStyle }, status), checkedAt ? h('span', { style: settingsStyle.note }, `　上次检查 ${checkedAt}`) : null), true),
+      line('云端实例', config?.agentId ? h('span', { style: settingsStyle.mono }, config.agentId) : h('span', { style: settingsStyle.note }, configured ? '未返回实例标识' : '开通后由 Studio 绑定')),
+      line('网关', config?.gatewayUrl ? h('span', { style: settingsStyle.mono }, config.gatewayUrl) : h('span', { style: settingsStyle.note }, '由 Studio Host 配置')),
+      line('助理', bots === null ? h('span', { style: settingsStyle.note }, '尚未读取')
+        : bots.length ? bots.map(bot => h('span', { key: bot.botId, style: { display: 'inline-block', marginRight: 6, border: ui.border, borderRadius: 999, padding: '0 9px', fontSize: 12 } }, bot.displayName || bot.botId))
+          : h('span', { style: settingsStyle.note }, '未返回可用助理')),
+      line('记忆', h('div', null, h('div', { style: settingsStyle.mono }, '/workspace/assistant-state'),
+        h('div', { style: settingsStyle.note }, '记忆、会话与定时任务随云电脑持久保存，换设备也在'))),
+      line('云端能力', h('div', null,
+        h('div', null, '默认开启：云端命令执行、云端浏览器'),
+        h('div', { style: settingsStyle.note }, '都跑在隔离工作区：读不到本机文件与凭证，不能访问内网与本机地址；敏感操作会先请你确认'))),
+      line('插件版本', h('span', { style: settingsStyle.note }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`))),
+    h('div', { style: settingsStyle.actions },
+      h('button', { style: settingsStyle.button, disabled: checking, onClick: () => void check() }, checking ? '正在检查…' : '检查连接'),
+      h('span', { style: settingsStyle.note }, '检查会读取开通状态并拉取一次助理列表，不会启动云电脑')));
+}
+
 export function PersonalAssistantPanelIcon() { return '助'; }
+export function PersonalAssistantComputerTabTitle() { return '云电脑'; }
 export function apply(ctx) {
   if (!ctx?.slots?.inject || !ctx.slots.register) throw new TypeError('Personal Assistant client requires the public DSH slots service');
   const request = async (operation, payload = {}) => {
@@ -409,7 +556,60 @@ export function apply(ctx) {
     if (!result?.ok) throw Object.assign(new Error(result?.error?.message || 'Studio Host 请求失败'), { code: result?.error?.code, status: result?.error?.details?.status, closeCode: result?.error?.details?.closeCode });
     return result.value;
   };
-  ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request }) }, PersonalAssistantPanel));
-  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PERSONAL_ASSISTANT_PANEL_ID, order: 90, label: '个人助理' }, PersonalAssistantPanelIcon));
+  // 注册一律走作用域助手：任一条注册失败只降级该入口，绝不让插件激活整体失败（激活失败会导致 Studio 重置 profile）。
+  const scope = (factory, label) => {
+    try {
+      const run = () => factory();
+      if (typeof ctx.effect === 'function') return ctx.effect(run, label);
+      return run();
+    } catch (error) {
+      try { console.warn(`[personal-assistant] ${label} 注册失败`, error); } catch {}
+      return undefined;
+    }
+  };
+  scope(() => ctx.slots.inject('main', () => ctx.slots.register({
+    name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request }),
+  }, PersonalAssistantHome)), 'personal-assistant: main panel');
+  scope(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist', id: PERSONAL_ASSISTANT_PANEL_ID, order: 90, label: '个人助理',
+  }, PersonalAssistantPanelIcon)), 'personal-assistant: sidebar row');
+  // Studio 设置页里的「个人助理」一节（原产品页被去重后留下的位置）。
+  scope(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section', id: `${PERSONAL_ASSISTANT_PANEL_ID}-settings`, order: 196, label: '个人助理',
+    inject: () => ({ request }),
+  }, PersonalAssistantSettings)), 'personal-assistant: settings section');
+  // 右侧栏标签页在「有会话」的场景下由 dsh 自己挂载；个人助理是独立页面，
+  // sidebarRight.openTab 会报 no session surface is mounted，所以页面内改用左右分栏。
+  const registerComputerTab = () => {
+    if (typeof ctx.inject !== 'function') return;
+    scope(() => ctx.inject(['sidebarRightTabs'], (sub) => {
+      const cleanups = [];
+      const add = (dispose) => { if (typeof dispose === 'function') cleanups.push(dispose); };
+      try {
+        const tabs = sub.sidebarRightTabs;
+        if (tabs === undefined || typeof tabs.register !== 'function') return undefined;
+        add(tabs.register({
+          id: PERSONAL_ASSISTANT_COMPUTER_TAB,
+          kind: PERSONAL_ASSISTANT_COMPUTER_TAB,
+          title: () => '云电脑',
+          guide: [{
+            order: 20,
+            title: () => '云电脑',
+            description: () => '个人助理的云端电脑画面，可获取控制权',
+          }],
+        }));
+        add(sub.slots.inject('sidebar.right.pane.tab', () => sub.slots.register({
+          name: 'sidebar.right.pane.tab', key: PERSONAL_ASSISTANT_COMPUTER_TAB, inject: () => ({ request }),
+        }, props => PersonalAssistantPanel({ ...props, variant: 'computer' }))));
+        add(sub.slots.inject('sidebar.right.pane.tab.title', () => sub.slots.register({
+          name: 'sidebar.right.pane.tab.title', key: PERSONAL_ASSISTANT_COMPUTER_TAB,
+        }, PersonalAssistantComputerTabTitle)));
+      } catch (error) {
+        try { console.warn('[personal-assistant] 右侧栏注册失败', error); } catch {}
+      }
+      return () => { for (const dispose of cleanups.reverse()) dispose(); };
+    }), 'personal-assistant: right tab');
+  };
+  registerComputerTab();
 }
 export const createClientPlugin = createPersonalAssistantClient;

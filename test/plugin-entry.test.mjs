@@ -9,6 +9,7 @@ import {
   PersonalAssistantPanel,
   PersonalAssistantPanelIcon,
   PERSONAL_ASSISTANT_CLIENT_DEFAULTS,
+  PERSONAL_ASSISTANT_COMPUTER_TAB,
   PERSONAL_ASSISTANT_PANEL_ID,
   inject as clientInject,
 } from '../src/client/index.mjs';
@@ -115,10 +116,14 @@ test('client maps durable session, memory, and schedule operations to the public
 test('public DSH client entry registers a closed main panel and sidebar row', () => {
   const entries = [];
   const ctx = {
+    sidebarRight: { openTab(kind) { opened.push(kind); } },
+    effect(factory) { return factory(); },
+    get() { return undefined; },
     slots: {
       inject(name, factory) {
         entries.push(factory());
-        assert.ok(['main', 'sidebar.panellist'].includes(name));
+        assert.ok(['main', 'sidebar.panellist', 'settings.section'].includes(name));
+        return () => {};
       },
       register(definition, component) {
         return { definition, component };
@@ -127,11 +132,13 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
   };
   applyClient(ctx);
   assert.deepEqual(clientInject, ['slots', 'connection']);
-  assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist']);
+  assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist', 'settings.section']);
   assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[0].component(), '个人助理页面尚未就绪，请重新打开');
   assert.equal(entries[1].component(), '助');
+  assert.equal(entries[2].definition.id, `${PERSONAL_ASSISTANT_PANEL_ID}-settings`);
+  assert.equal(entries[2].definition.label, '个人助理');
   assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
 });
 
@@ -159,4 +166,44 @@ test('desktop client maps display coordinates and drops oversized/stale frames',
 
 test('client apply rejects a context without the public DSH slots service', () => {
   assert.throws(() => applyClient({}), /public DSH slots service/);
+});
+
+test('右侧栏云电脑标签页与设置页注册在插件作用域内，卸载即撤销', () => {
+  const effectDisposers = [];
+  const injected = [];
+  const tabTypes = [];
+  const opened = [];
+  const slots = {
+    inject(name, factory) { injected.push(factory()); return () => {}; },
+    register(definition, component) { return { definition, component }; },
+  };
+  const sub = {
+    slots,
+    sidebarRightTabs: { register(definition) { tabTypes.push(definition); return () => {}; } },
+    sidebarRight: { openTab(kind) { opened.push(kind); } },
+  };
+  const ctx = {
+    sidebarRight: { openTab(kind) { opened.push(kind); } },
+    effect(factory) { const dispose = factory(); assert.equal(typeof dispose, 'function'); effectDisposers.push(dispose); return dispose; },
+    inject(names, factory) { return factory(sub); },
+    slots,
+  };
+  applyClient(ctx);
+
+  assert.equal(tabTypes.length, 1);
+  assert.equal(tabTypes[0].id, PERSONAL_ASSISTANT_COMPUTER_TAB);
+  assert.equal(tabTypes[0].kind, PERSONAL_ASSISTANT_COMPUTER_TAB);
+  assert.equal(tabTypes[0].title(), '云电脑');
+  assert.equal(tabTypes[0].guide.length, 1);
+  assert.equal(tabTypes[0].guide[0].title(), '云电脑');
+  assert.deepEqual(injected.map(entry => entry.definition.name), [
+    'main', 'sidebar.panellist', 'settings.section', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title',
+  ]);
+  assert.equal(injected[3].definition.key, PERSONAL_ASSISTANT_COMPUTER_TAB);
+  assert.equal(injected[4].component(), '云电脑');
+  // 页面内改为左右分栏（sidebarRight.openTab 在无会话页面会抛 no session surface）；
+  // 右栏标签页仍注册，供有会话的场景使用，卸载后全部随 effect 释放。
+  assert.equal(typeof injected[0].definition.inject().request, 'function');
+  assert.deepEqual(opened, []);
+  assert.equal(effectDisposers.length, 4);
 });

@@ -130,14 +130,15 @@ export function createDshTurnBridge({ ctx, sessionController, registry, platform
     return { botId };
   }
 
-  async function submitTurn({ botId, sessionId, input, requestId, mode = 'queue', clientTimeZone, signal } = {}) {
+  async function submitTurn({ botId, sessionId, input, parts, requestId, mode = 'queue', clientTimeZone, signal } = {}) {
     if (!available) return unavailable();
     const requestSignal = signal ?? new AbortController().signal;
     const id = requiredIdentifier(botId, 'botId', BOT_ID);
     const session = requiredIdentifier(sessionId, 'sessionId', SESSION_ID);
     const bot = registry?.require ? registry.require(id) : undefined;
     if (!['queue', 'steer'].includes(mode)) throw Object.assign(new TypeError('mode must be queue or steer'), { code: 'DSH_TURN_INPUT_INVALID' });
-    const content = contentOf(input);
+    // parts 允许调用方直接给出完整 content（例如带图片的对话）；缺省仍按纯文本处理。
+    const content = Array.isArray(parts) && parts.length > 0 ? parts : contentOf(input);
     const rpcId = requiredIdentifier(requestId ?? requestIdFactory(), 'requestId', SESSION_ID);
     const owner = sessionOwners.get(session) ?? (sessionOwnerResolver ? await sessionOwnerResolver(session) : undefined);
     if (owner && owner !== id) throw Object.assign(new Error('session belongs to another Bot'), { code: 'DSH_SESSION_BOT_CONFLICT', status: 409 });

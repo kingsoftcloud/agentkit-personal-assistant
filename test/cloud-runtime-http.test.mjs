@@ -59,3 +59,16 @@ test('cloud API records the DSH result and refuses another Bot on the owned Sess
   const turns = await f.request(`/v1/sessions/${session.sessionId}/turns?botId=writer`);
   assert.equal(turns.body.turns[0].status, 'completed');
 });
+
+test('云端回合按 clientTurnId 持久幂等，并发重复提交仅执行一次；改正文拒绝', async t => {
+  let calls = 0;
+  const f = await fixture(t, { available: true, async submitTurn(value) { calls++; return { accepted: true, requestId: value.requestId }; }, async waitForTurn() { return { status: 'completed', messages: ['done'] }; } });
+  const session = (await f.request('/v1/sessions', { botId: 'writer' })).body;
+  const body = { botId: 'writer', input: 'hello', metadata: { clientTurnId: 'stable-key' } };
+  const [first, second] = await Promise.all([f.request(`/v1/sessions/${session.sessionId}/turns`, body), f.request(`/v1/sessions/${session.sessionId}/turns`, body)]);
+  assert.equal(first.body.turnId, second.body.turnId);
+  assert.equal(calls, 1);
+  const mismatch = await f.request(`/v1/sessions/${session.sessionId}/turns`, { ...body, input: 'changed' });
+  assert.equal(mismatch.status, 409);
+  await f.handle.waitForIdle();
+});

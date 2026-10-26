@@ -1,6 +1,7 @@
 /** 通过 DSH 已鉴权 Connection RPC 转接到固定云网关；凭据始终留在 Host。 */
 import { createRequire } from 'node:module';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from './client/bot-directory.mjs';
+import { createCloudSessionTransport } from './cloud-session-transport.mjs';
 /**
  * 云网关会拒掉 Node 内置（undici）WebSocket：握手成功后立即 1006 断开且不带关闭帧，
  * 面板只能看到「连接暂时不可用」。实测同一张 ticket 下浏览器、Python websockets 与 `ws`
@@ -20,13 +21,32 @@ const resolveDefaultWebSocket = () => {
 };
 const DEFAULT_WEBSOCKET = resolveDefaultWebSocket();
 const ENDPOINT = '/api/personal-assistant';
-const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket']);
+// 所有会话操作必须经过云端绑定和具名 Bot 的签名 control 票据。
+const SESSION_OPERATIONS = Object.freeze([
+  'personal-assistant.sessions.list',
+  'personal-assistant.session.create',
+  'personal-assistant.session.snapshot',
+  'personal-assistant.session.events',
+  'personal-assistant.turn.submit',
+  'personal-assistant.schedule.create',
+]);
+const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket', ...SESSION_OPERATIONS]);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const safeCloseCode = value => Number.isInteger(value) && value >= 1000 && value <= 4999 ? value : undefined;
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const requireSessionId = value => {
+  const text = String(value ?? '').trim();
+  if (!SESSION_ID.test(text)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '会话标识无效');
+  return text;
+};
+import { createSystemFetch, trustedCAs } from './system-fetch.mjs';
+
 export const STUDIO_DESKTOP_SERVICE = 'studioPersonalAssistantDesktop';
 
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = fetch, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined } = {}) {
+// 默认走系统信任链：内网/预发网关的证书不在 Node 内置 CA 里，直接 fetch 会 "fetch failed"。
+const defaultFetchImpl = createSystemFetch();
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined, sessionChannel, cloudSessionTransport } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -81,12 +101,17 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     return { ticket: value.ticket, expiresAt: value.expiresAt, agentId: input.agentId, botId: input.botId,
       wsUrl: ws.href, protocol: value.protocol, leaseId: value.leaseId ?? null, readOnly: input.mode === 'read' };
   }
+  const cloudSessions = cloudSessionTransport ?? createCloudSessionTransport({
+    issueTicket: (scope, signal) => request('personal-assistant.desktop.ticket', scope, signal),
+    WebSocketImpl, ca: trustedCAs(),
+  });
   async function request(operation, payload = {}, signal) {
     if (!plain(payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求参数格式错误');
     if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
     const current = await binding(signal);
     if (operation === 'personal-assistant.configuration') return {
       configured: current.configured, ...(current.configured ? { agentId: current.agentId } : {}),
+      ...(base ? { gatewayUrl: base.origin } : {}),
     };
     if (operation === 'personal-assistant.bots.list') {
       if (!current.configured) return { bots: [], directoryAvailable: false };
@@ -104,7 +129,10 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         const abort = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT', '读取助理列表超时，请重试', 504));
         if (querySignal.aborted) return abort();
         querySignal.addEventListener('abort', abort, { once: true });
-        try { socket = new WebSocketImpl(ticket.wsUrl, ['agentkit.personal-assistant.desktop.v1', `agentkit.desktop.ticket.${ticket.ticket}`]); }
+        try {
+          // 内网网关是自签链：`ws` 需要显式并入系统 CA，否则 onerror 表现为目录不可用。
+          socket = new WebSocketImpl(ticket.wsUrl, ['agentkit.personal-assistant.desktop.v1', `agentkit.desktop.ticket.${ticket.ticket}`], { ca: trustedCAs() });
+        }
         catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502)); return; }
         socket.once?.('unexpected-response', (_request, response) => {
           const status = Number(response.statusCode) || 502;
@@ -142,6 +170,12 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (payload.agentId && payload.agentId !== current.agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', '云端实例与 Host 绑定不一致', 403);
     const botId = String(payload.botId || '').trim();
     if (!botId || botId.length > 64 || /[\u0000-\u001f]/u.test(botId)) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请选择已创建的助理');
+    if (SESSION_OPERATIONS.includes(operation)) {
+      if (botId === DIRECTORY_BOT_ID) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请选择真实云端助理', 403);
+      if (!['personal-assistant.sessions.list', 'personal-assistant.session.create'].includes(operation)) requireSessionId(payload.sessionId);
+      if (payload.cursor !== undefined && (!Number.isSafeInteger(payload.cursor) || payload.cursor < 0)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '增量游标无效');
+      return cloudSessions.request({ agentId: current.agentId, botId }, operation, payload, signal);
+    }
     if (payload.mode !== undefined && !['read', 'control'].includes(payload.mode)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '桌面访问模式无效');
     if (botId === DIRECTORY_BOT_ID && payload.mode !== 'read') throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '目录授权只能用于只读查询', 403);
     if (current.studio) {
@@ -161,15 +195,15 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     ws.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
     return { ticket: data.Ticket, expiresAt: data.ExpiresAt, agentId, botId, wsUrl: ws.href, protocol: 'agentkit.personal-assistant.desktop.v1', leaseId: data.LeaseId || null, readOnly: payload.mode === 'read' };
   }
-  return Object.freeze({ request });
+  return Object.freeze({ request, dispose: () => cloudSessions.dispose() });
 }
 
-export function registerPersonalAssistantHostGateway(ctx, config = {}) {
+export function registerPersonalAssistantHostGateway(ctx, config = {}, { sessionChannel, channelOptions } = {}) {
   if (!ctx?.connection?.fetch?.register) return undefined;
   const gateway = createPersonalAssistantHostGateway(config, { getStudioDesktop: () => ctx.get?.(STUDIO_DESKTOP_SERVICE) });
   // Connection 的 /api 物理载体先执行 Host/Origin、浏览器鉴权及 owner Peer 校验。
   // 使用公开 exact Fetch 注册表，避免自建服务、抢占 Gateway interceptor 或修改 remotes。
-  return ctx.connection.fetch.register({ path: ENDPOINT, methods: ['POST'], requestBody: 'buffered', async fetch(request) {
+  const unregister = ctx.connection.fetch.register({ path: ENDPOINT, methods: ['POST'], requestBody: 'buffered', async fetch(request) {
     let rpcId = 'invalid-request';
     const respond = result => Response.json({ type: 'server-response', rpcId, result }, { headers: { 'cache-control': 'no-store' } });
     try {
@@ -187,4 +221,5 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}) {
       return respond({ ok: false, error: { code: error.code || 'PERSONAL_ASSISTANT_GATEWAY_FAILED', message: error.message || '云电脑连接失败', details: { status: error.status || 500, ...(safeCloseCode(error.closeCode) ? { closeCode: error.closeCode } : {}) } } });
     }
   } });
+  return () => { unregister?.(); gateway.dispose(); };
 }
