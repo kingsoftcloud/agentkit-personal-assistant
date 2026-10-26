@@ -9,6 +9,7 @@ export const COMPUTER_BROKER_PROTOCOL = 'personal-assistant.computer-broker/v1';
 export const COMPUTER_BROKER_ACTIONS = Object.freeze([
   'computer.status',
   'computer.lease.acquire',
+  'computer.lease.renew',
   'computer.lease.release',
   'computer.action',
 ]);
@@ -76,6 +77,12 @@ export function createReleaseRequest(input = {}) {
     taskId: text(input.taskId, 'taskId'),
     leaseId: text(input.leaseId, 'leaseId'),
   });
+}
+
+export function createRenewRequest(input = {}) {
+  const ttlMs = positiveInteger(input.ttlMs, 'ttlMs', 60_000);
+  if (ttlMs > 300_000) throw new TypeError('ttlMs must not exceed 300000');
+  return Object.freeze({ ...createReleaseRequest(input), ttlMs });
 }
 
 export function createActionRequest(input = {}) {

@@ -114,6 +114,10 @@ test('缓存租约被人接管后，新动作等待交还再执行，不向旧�
       if (controlled) { blocked(); throw Object.assign(new Error('human'), { code: 'COMPUTER_USER_CONTROLLED', status: 409 }); }
       return { lease: { ...request, leaseId: `lease-${calls}`, expiresAt: Date.now() + 60000 } };
     },
+    renewLease: async request => {
+      if (controlled) throw Object.assign(new Error('human'), { code: 'COMPUTER_USER_CONTROLLED', status: 409 });
+      return { lease: { ...request, expiresAt: Date.now() + 60000 } };
+    },
     releaseLease: async () => ({ released: true }), action: async () => { calls++; return { accepted: true }; },
   } });
   await toolset.execute('cloud_browser_press', { key: 'Enter' });

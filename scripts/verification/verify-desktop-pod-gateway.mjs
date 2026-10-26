@@ -126,10 +126,18 @@ try {
   await text(primary, `printf %s ${files}/unique-comp`); await key(primary, 'Tab'); await text(primary, ` > ${completed}`); await key(primary, 'Enter');
   assert.equal((await waitFile(completed, Buffer.byteLength(completion))).toString(), completion);
   record('真实 WS 的 Esc 与 Tab 补全正确');
-  const activeAt = Date.now(); await sleep(2000);
+  // 真实容器 cgroup 计数，包含采集/编码、Broker 和本验收的协议开销。
+  const cpuSeconds = async () => {
+    try { return Number((await readFile('/sys/fs/cgroup/cpu.stat', 'utf8')).match(/^usage_usec (\d+)$/mu)?.[1]) / 1e6; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; return Number(await readFile('/sys/fs/cgroup/cpuacct/cpuacct.usage', 'utf8')) / 1e9; }
+  };
+  const cpuBefore = await cpuSeconds(), activeAt = Date.now(); await sleep(2000);
+  const cpuAfter = await cpuSeconds(), measuredMs = Date.now() - activeAt;
   const activeFrames = primary.frames.filter(frame => frame.at >= activeAt).length, activeFps = activeFrames / 2;
   assert.ok(activeFps >= 10, `active fps ${activeFps} < 10`);
-  record('有操作后的真实串流至少 10 fps，单帧不超过 300 KiB', { activeFps, maxFrameBytes: Math.max(...primary.frames.map(frame => frame.bytes)) });
+  const cpuPercentOfOneCore = (cpuAfter - cpuBefore) / (measuredMs / 1000) * 100;
+  assert.ok(Number.isFinite(cpuPercentOfOneCore) && cpuPercentOfOneCore >= 0);
+  record('有操作后的真实串流至少 10 fps，单帧不超过 300 KiB', { activeFps, maxFrameBytes: Math.max(...primary.frames.map(frame => frame.bytes)), measuredMs, cpuPercentOfOneCore });
 
   const { client: secondary } = await connect(input.secondaryBotId, 'control');
   await assert.rejects(acquire(secondary), { status: 409 });

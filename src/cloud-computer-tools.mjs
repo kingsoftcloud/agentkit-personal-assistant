@@ -89,7 +89,7 @@ export function createComputerToolset({
   now = () => Date.now(),
   agent,
 } = {}) {
-  if (!broker || typeof broker.action !== 'function' || typeof broker.acquireLease !== 'function') {
+  if (!broker || typeof broker.action !== 'function' || typeof broker.acquireLease !== 'function' || typeof broker.renewLease !== 'function') {
     throw new TypeError('A connected Computer Broker client is required');
   }
   const identity = {
@@ -145,12 +145,33 @@ export function createComputerToolset({
       action: name,
       args,
     });
-    try { return await broker.action(request); }
+    const cancellation = new AbortController();
+    const signal = execution.signal ? AbortSignal.any([execution.signal, cancellation.signal]) : cancellation.signal;
+    let renewing = false, heartbeat;
+    const renew = async () => {
+      if (disposed) throw new Error('COMPUTER_TOOLSET_DISPOSED');
+      const response = await broker.renewLease({ ...identity, taskId: lease.taskId, leaseId: lease.leaseId, ttlMs: leaseTtlMs }, { signal });
+      if (response?.lease?.leaseId !== lease.leaseId) throw new Error('COMPUTER_LEASE_INVALID');
+      if (activeLease?.leaseId === lease.leaseId) activeLease = response.lease;
+    };
+    try {
+      signal.throwIfAborted();
+      await renew();
+      signal.throwIfAborted();
+      heartbeat = setInterval(() => {
+        if (renewing || signal.aborted) return;
+        renewing = true;
+        void renew().catch(error => cancellation.abort(error)).finally(() => { renewing = false; });
+      }, Math.max(50, Math.min(20_000, Math.floor(leaseTtlMs / 3))));
+      heartbeat.unref?.();
+      return await broker.action(request, { signal });
+    }
     catch (error) {
       // 旧租约已被用户接管或撤销。只清缓存，不重放可能已经执行的动作。
       if (Number(error?.status) === 409) activeLease = null;
       throw error;
     }
+    finally { clearInterval(heartbeat); cancellation.abort(new Error('COMPUTER_ACTION_FINISHED')); }
   }
 
   const definitions = [

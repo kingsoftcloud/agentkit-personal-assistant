@@ -15,6 +15,7 @@ const workspace = env.AGENTKIT_WORKSPACE_DIR || '/workspace';
 const identity = Object.freeze({ userId: env.USER_ID || '', assistantId: env.ASSISTANT_ID || '', computerId: env.COMPUTER_ID || '' });
 const leases = new Map();
 const agentDesktopSessions = new Map();
+const agentExecutions = new Map();
 const controlGrants = new Map(), usedControlPermits = new Map();
 const actionContext = new AsyncLocalStorage();
 let starting = env.AGENTKIT_DESKTOP_MODE === '1', startupFailure, warmup, warmupMs = 0, closing = false;
@@ -92,7 +93,11 @@ const readBody = request => new Promise((resolve, reject) => {
 function identityMatches(body) {
   return body.userId === identity.userId && body.assistantId === identity.assistantId && body.computerId === identity.computerId;
 }
-function closeAgentSessions(leaseId) { agentDesktopSessions.delete(leaseId); desktop.closeSessionsForLease(leaseId); }
+function closeAgentSessions(leaseId) {
+  for (const controller of agentExecutions.get(leaseId) || []) controller.abort(Object.assign(new Error('电脑租约已撤销；命令可能已部分执行，请核对结果，不要重放'), { code: 'COMPUTER_LEASE_REVOKED', status: 409 }));
+  agentExecutions.delete(leaseId);
+  agentDesktopSessions.delete(leaseId); desktop.closeSessionsForLease(leaseId);
+}
 function expireLeases() {
   const now = Date.now();
   for (const [computerId, lease] of leases) if (!Number.isFinite(lease.expiresAt) || lease.expiresAt <= now) {
@@ -113,6 +118,7 @@ function leaseIdentityMatches(lease, body) {
   return identityMatches(body) && lease && lease.botId === body.botId && lease.taskId === body.taskId && lease.leaseId === body.leaseId && lease.expiresAt > Date.now();
 }
 function assertAgentLease(body) {
+  actionContext.getStore()?.signal?.throwIfAborted();
   const lease = leaseFor(body);
   if (lease.kind === 'human') throw Object.assign(new Error('用户正在操作云电脑，请等待交还后继续'), { code: 'COMPUTER_USER_CONTROLLED', status: 409 });
   return lease;
@@ -123,9 +129,10 @@ function leaseFor(body) {
   if (!leaseIdentityMatches(lease, body)) throw Object.assign(new Error(lease?.kind === 'human' ? '用户正在操作云电脑，请等待交还后继续' : 'COMPUTER_LEASE_REQUIRED'), { code: lease?.kind === 'human' ? 'COMPUTER_USER_CONTROLLED' : 'COMPUTER_LEASE_REQUIRED', status: 409 });
   return lease;
 }
-async function action(body) {
+async function action(body, { signal } = {}) {
+  signal?.throwIfAborted();
   const lease = assertAgentLease(body);
-  return actionContext.run({ ...body, leaseId: lease.leaseId }, async () => {
+  return actionContext.run({ ...body, leaseId: lease.leaseId, signal }, async () => {
   const args = body.args || {};
   if (body.action.startsWith('desktop.')) {
     let session = desktop.getSession(agentDesktopSessions.get(lease.leaseId));
@@ -184,7 +191,23 @@ async function action(body) {
   if (body.action === 'stop') { desktopBrowserOpening = undefined; return browser?.close(); }
   if (body.action === 'terminal.exec') {
     executor ||= executorFactory({ workspaceRoot: workspace });
-    return args.language === 'shell' ? executor.runBash(args) : executor.runCode(args);
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal.reason);
+    if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+    const active = agentExecutions.get(lease.leaseId) || new Set();
+    agentExecutions.set(lease.leaseId, active); active.add(controller);
+    try {
+      assertAgentLease(body);
+      return await (args.language === 'shell' ? executor.runBash(args, { signal: controller.signal }) : executor.runCode(args, { signal: controller.signal }));
+    } catch (error) {
+      const reason = controller.signal.aborted ? controller.signal.reason || error : error;
+      const failure = reason instanceof Error ? reason : new Error('云端命令已中断');
+      if (failure.code !== 'ASSISTANT_CLOUD_EXEC_REFUSED') failure.outcomeUnknown = true;
+      throw failure;
+    } finally {
+      signal?.removeEventListener('abort', abort); active.delete(controller);
+      if (!active.size && agentExecutions.get(lease.leaseId) === active) agentExecutions.delete(lease.leaseId);
+    }
   }
   throw new Error(`unsupported computer action: ${body.action}`);
   });
@@ -259,7 +282,13 @@ const server = createServer(async (request, response) => {
       else if (released) { leases.delete(body.computerId); closeAgentSessions(body.leaseId); }
       return send(response, 200, { protocol: body.protocol, released });
     }
-    if (request.url === '/broker/action') return send(response, 200, { protocol: body.protocol, ...(await action(body)) });
+    if (request.url === '/broker/action') {
+      const controller = new AbortController();
+      const disconnected = () => { if (!response.writableEnded) controller.abort(Object.assign(new Error('请求连接已取消；动作可能已部分执行，请核对结果'), { code: 'COMPUTER_ACTION_ABORTED', status: 499 })); };
+      response.on('close', disconnected); if (response.destroyed) disconnected();
+      try { return send(response, 200, { protocol: body.protocol, ...(await action(body, { signal: controller.signal })) }); }
+      finally { response.off('close', disconnected); }
+    }
     if (request.url === '/broker/desktop/session') {
       const desktopIdentityValue = desktopIdentity(body);
       expireLeases();
@@ -348,7 +377,8 @@ const server = createServer(async (request, response) => {
     }
     return send(response, 404, { error: 'not_found' });
   } catch (error) {
-    return send(response, Number(error?.status) || 400, { error: error?.code || error?.message || 'COMPUTER_ACTION_FAILED' });
+    if (response.destroyed || response.writableEnded) return;
+    return send(response, Number(error?.status) || 400, { error: error?.code || error?.message || 'COMPUTER_ACTION_FAILED', ...(error?.outcomeUnknown ? { outcomeUnknown: true, message: '动作已中断，可能已部分执行；请先核对结果，不要盲目重放' } : {}) });
   }
 });
 const leaseReaper = setInterval(expireLeases, 1000);
@@ -356,6 +386,7 @@ leaseReaper.unref();
 const close = () => {
   if (closePromise) return closePromise;
   closing = true; clearInterval(leaseReaper);
+  for (const leaseId of agentExecutions.keys()) closeAgentSessions(leaseId);
   closePromise = (async () => {
     const failures = [];
     try { await desktop.stopLauncher?.(); } catch (error) { failures.push(error); }

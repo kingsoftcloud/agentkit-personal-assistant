@@ -13,10 +13,10 @@ function permit(mode = 'control', botId = 'bot') {
   const body = Buffer.from(JSON.stringify({ iss: 'agentengine-server', aud: 'agentkit-personal-assistant-desktop', scope: 'desktop', agentId: 'a', botId, mode, iat: now, exp: now + 60, jti: randomUUID() })).toString('base64url');
   return `${header}.${body}.${sign(null, Buffer.from(`${header}.${body}`), privateKey).toString('base64url')}`;
 }
-async function fixture(t, { browserFactory, onInput } = {}) {
+async function fixture(t, { browserFactory, onInput, executorFactory } = {}) {
   const sessions = new Map(), inputs = [];
   const view = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controlEpoch: session.controlEpoch, idleMode: 'retain-desktop' });
-  const service = createComputerAgentServer({ env, browserFactory: browserFactory || (() => ({ available: true, openDesktopWindow: async () => ({}), dispose: async () => {} })), desktopFactory: () => ({
+  const service = createComputerAgentServer({ env, executorFactory, browserFactory: browserFactory || (() => ({ available: true, openDesktopWindow: async () => ({}), dispose: async () => {} })), desktopFactory: () => ({
     ensureDisplay: async () => {},
     openSession: async value => { const session = { ...value, sessionId: randomUUID(), controlEpoch: 0 }; sessions.set(session.sessionId, session); return view(session); },
     getSession: id => sessions.get(id),
@@ -30,7 +30,7 @@ async function fixture(t, { browserFactory, onInput } = {}) {
     launchApplication: async (_application, options) => options?.beforeCommand?.(),
   }) });
   service.listen(); await once(service.server, 'listening'); t.after(() => service.close());
-  const post = async (path, body = {}) => { const response = await fetch(`http://127.0.0.1:${service.server.address().port}/broker/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: 'u', assistantId: 'a', computerId: 'c', botId: 'bot', taskId: 'human', ...body }) }); return { status: response.status, value: await response.json() }; };
+  const post = async (path, body = {}, options = {}) => { const response = await fetch(`http://127.0.0.1:${service.server.address().port}/broker/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: 'u', assistantId: 'a', computerId: 'c', botId: 'bot', taskId: 'human', ...body }), ...options }); return { status: response.status, value: await response.json() }; };
   return { post, sessions, inputs };
 }
 
@@ -182,4 +182,49 @@ test('本地浏览器入口只复用受管浏览器，关闭先停入口且拒�
   await assert.rejects(options.onLaunchBrowser(), { code: 'DESKTOP_LAUNCH_CLOSED' });
   stopped(); await closing;
   assert.equal(factories, 1); assert.deepEqual(events, ['launcher-stop', 'launcher-stop', 'browser-dispose', 'desktop-dispose']);
+});
+
+const pendingExecutor = () => {
+  let started, cancelled;
+  const began = new Promise(resolve => { started = resolve; });
+  const aborted = new Promise(resolve => { cancelled = resolve; });
+  const run = async (_args, { signal }) => {
+    started(signal);
+    return new Promise((_resolve, reject) => {
+      const stop = () => { cancelled(); reject(new Error('executor was cancelled')); };
+      if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true });
+    });
+  };
+  return { began, aborted, factory: () => ({ runBash: run, runCode: run, dispose: async () => {} }) };
+};
+
+test('真人接管先取消旧租约中的命令，旧命令不在交还后被重放', async t => {
+  const execution = pendingExecutor(), { post } = await fixture(t, { executorFactory: execution.factory });
+  const lease = await post('lease/acquire', { taskId: 'agent-work', idempotencyKey: 'job', ttlMs: 60000 });
+  const job = post('action', { taskId: 'agent-work', leaseId: lease.value.lease.leaseId, action: 'terminal.exec', args: { language: 'shell', command: 'long-running-job' } });
+  const signal = await execution.began;
+  const opened = await post('desktop/session', { mode: 'observe', controlPermit: permit() });
+  const human = await post('desktop/control/acquire', { sessionId: opened.value.sessionId, controlEpoch: 0 });
+  assert.equal(human.status, 200); assert.equal(human.value.readOnly, false);
+  await execution.aborted; assert.equal(signal.aborted, true);
+  const stopped = await job; assert.equal(stopped.status, 409); assert.equal(stopped.value.error, 'COMPUTER_LEASE_REVOKED'); assert.equal(stopped.value.outcomeUnknown, true);
+  await post('desktop/control/release', { sessionId: opened.value.sessionId, leaseId: human.value.lease.leaseId, controlEpoch: human.value.controlEpoch });
+});
+
+test('请求断开取消服务端执行，不留下后台命令', async t => {
+  const execution = pendingExecutor(), { post } = await fixture(t, { executorFactory: execution.factory });
+  const first = await post('lease/acquire', { taskId: 'disconnect', idempotencyKey: 'disconnect', ttlMs: 60000 });
+  const cancel = new AbortController();
+  const job = assert.rejects(post('action', { taskId: 'disconnect', leaseId: first.value.lease.leaseId, action: 'terminal.exec', args: { language: 'shell', command: 'long-job' } }, { signal: cancel.signal }), { name: 'AbortError' });
+  await execution.began; cancel.abort(); await job; await execution.aborted;
+  await post('lease/release', { taskId: 'disconnect', leaseId: first.value.lease.leaseId });
+});
+
+test('无其他请求时租约到期仍取消命令，不依赖客户端保活', async t => {
+  const execution = pendingExecutor(), { post } = await fixture(t, { executorFactory: execution.factory });
+  const lease = await post('lease/acquire', { taskId: 'expiry', idempotencyKey: 'expiry', ttlMs: 1000 });
+  const job = post('action', { taskId: 'expiry', leaseId: lease.value.lease.leaseId, action: 'terminal.exec', args: { language: 'shell', command: 'never-finishes' } });
+  await execution.began;
+  const result = await job; assert.equal(result.status, 409); assert.equal(result.value.error, 'COMPUTER_LEASE_REVOKED'); assert.equal(result.value.outcomeUnknown, true);
+  await execution.aborted;
 });
