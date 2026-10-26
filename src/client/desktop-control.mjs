@@ -30,6 +30,7 @@ export function createDesktopControl({ send, changed = () => {}, failed = () => 
     },
     input(event) {
       if (phase === 'controlling') { transmit(event); return true; }
+      if ((!wanted || phase === 'observe') && (event.type === 'pointermove' || (['button', 'key'].includes(event.type) && event.action === 'up'))) return false;
       if (event.type === 'pointermove' && phase === 'observe') return false;
       if (!available) { if (event.type !== 'pointermove') failed('当前为只读旁观；云端更新后可点击画面接管'); return false; }
       wanted = true;
@@ -45,6 +46,7 @@ export function createDesktopControl({ send, changed = () => {}, failed = () => 
     },
     accept(value) {
       if (!Number.isSafeInteger(value.controlEpoch) || value.controlEpoch < epoch) return;
+      if (value.controlEpoch !== epoch) { clearTimer(textTimer); textTimer = undefined; text = ''; }
       epoch = value.controlEpoch; available = value.controlAvailable === true;
       if (value.readOnly) {
         if (phase !== 'releasing') { wanted = false; queue = []; }
@@ -57,6 +59,7 @@ export function createDesktopControl({ send, changed = () => {}, failed = () => 
       const pending = queue; queue = []; for (const event of pending) transmit(event);
     },
     reject(value) {
+      if (Number.isSafeInteger(value.controlEpoch) && value.controlEpoch < epoch) return;
       wanted = false; queue = []; clearTimer(textTimer); textTimer = undefined; text = '';
       if (Number.isSafeInteger(value.controlEpoch) && value.controlEpoch >= epoch) epoch = value.controlEpoch;
       phase = value.readOnly === false ? 'controlling' : 'observe'; notify(); failed(value.message || '控制权暂不可用，仍可继续旁观');

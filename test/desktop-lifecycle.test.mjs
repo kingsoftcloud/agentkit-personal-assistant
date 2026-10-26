@@ -294,6 +294,20 @@ test('原生全屏 Escape 交给宿主，不注入远端，也不自绘断开或
   assert.equal(panel.nodes().some(node => node.type === 'button' && /全屏|断开/.test(node.children.join(''))), false);
 });
 
+test('rAF 合并的旧移动在新按下前发送，不能迟到后拖回旧坐标', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'] }); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  socket.message({ type: 'ready', sessionId: 'viewer', readOnly: true, controlAvailable: true, controlEpoch: 0 });
+  socket.message({ type: 'frame', seq: 1 }); socket.message(new ArrayBuffer(8)); await flush();
+  panel.click('接管'); socket.message({ type: 'control', readOnly: false, controlAvailable: true, controlEpoch: 1 });
+  const canvas = panel.nodes().find(node => node.type === 'canvas'), before = socket.sent.length;
+  canvas.props.onPointerMove({ clientX: 100, clientY: 120 });
+  canvas.props.onPointerDown({ type: 'pointerdown', pointerId: 1, button: 0, clientX: 300, clientY: 220, preventDefault() {} });
+  t.mock.timers.tick(16); await flush();
+  const inputs = socket.sent.slice(before).filter(row => row.type === 'input').map(row => row.event);
+  assert.deepEqual(inputs, [{ type: 'pointermove', x: 100, y: 120 }, { type: 'button', action: 'down', button: 1, x: 300, y: 220 }]);
+});
+
 test('panel stops reconnecting after idle session closure, including visibility changes, but explicit open works', async t => {
   const panel = panelHarness(t), socket = await connectPanel(panel);
   assert.match(panel.text(), /当前为只读旁观，鼠标和键盘输入不会发送/u);

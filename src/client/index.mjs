@@ -126,11 +126,22 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     send,
     changed: value => {
       const current = state.current; current.controlPhase = value.phase; current.readOnly = value.readOnly; current.controlEpoch = value.controlEpoch;
+      if (value.readOnly && cursorRef.current) cursorRef.current.style.visibility = 'hidden';
+      if (value.phase === 'observe') { current.pressed.clear(); current.buttons.clear(); }
       if (current.mounted) { setReadOnly(value.readOnly); setControlPhase(value.phase); }
     },
     failed: message => { if (state.current.mounted) setNotice(message); },
   });
   const releaseControl = () => { releaseInputs(); controlRef.current.release(); state.current.pressed.clear(); state.current.buttons.clear(); };
+  const flushPointer = () => {
+    const current = state.current;
+    if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame);
+    current.pointerFrame = null;
+    const next = current.lastPointer; current.lastPointer = null;
+    if (next && (!current.readOnly || current.controlPhase === 'acquiring') && (!current.sentPointer || next.x !== current.sentPointer.x || next.y !== current.sentPointer.y)) {
+      controlRef.current.input({ type: 'pointermove', ...next }); current.sentPointer = next;
+    }
+  };
   const clearTimers = () => {
     clearTimeout(state.current.reconnect); clearTimeout(state.current.firstFrame);
     state.current.reconnect = null; state.current.firstFrame = null;
@@ -152,6 +163,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   };
   const input = event => {
     const current = state.current;
+    if (event.type !== 'pointermove') flushPointer();
     if (current.suspended || current.resuming) {
       if (event.type === 'pointermove') return false;
       const controlling = current.mode === 'control';
@@ -259,6 +271,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         if (value.type === 'frame') { if (!value.unchanged) current.frameMetadata = value; return; }
         if (value.type === 'closed') { if (value.retryable !== true) ended(value); return; }
         if (value.type === 'error') {
+          if (Number.isSafeInteger(value.controlEpoch) && value.controlEpoch < current.controlEpoch) return;
           setNotice(value.message || value.code || '云电脑请求失败');
           if (current.handoffSupported && value.recoverable === true) { controlRef.current.reject(value); return; }
           if (value.recoverable === true && Number(value.status) === 409) {
@@ -353,7 +366,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       const current = state.current, latest = event.nativeEvent?.getCoalescedEvents?.().at(-1) || event;
       if (cursorRef.current) { const rect = canvasRef.current.getBoundingClientRect(); cursorRef.current.style.transform = `translate(${latest.clientX - rect.left}px, ${latest.clientY - rect.top}px)`; cursorRef.current.style.visibility = current.readOnly ? 'hidden' : 'visible'; }
       current.lastPointer = point(latest);
-      if (!current.pointerFrame) current.pointerFrame = requestAnimationFrame(() => { current.pointerFrame = null; if (current.mounted && current.lastPointer && !current.readOnly) { const next = current.lastPointer; if (!current.sentPointer || next.x !== current.sentPointer.x || next.y !== current.sentPointer.y) { input({ type: 'pointermove', ...next }); current.sentPointer = next; } } });
+      if (!current.pointerFrame) current.pointerFrame = requestAnimationFrame(() => { if (current.mounted) flushPointer(); });
     }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'none' } }),
     h('div', { ref: cursorRef, 'aria-hidden': true, style: { position: 'absolute', top: 0, left: 0, pointerEvents: 'none', visibility: 'hidden', zIndex: 2, width: 18, height: 22 } }, h('svg', { viewBox: '0 0 18 22', width: 18, height: 22 }, h('path', { d: 'M1 1v16l4-4 3 7 3-1-3-7h6z', fill: '#fff', stroke: '#162033', strokeWidth: 1.2 }))),
     !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', ...(phase === 'connecting' ? { color: '#e8edf5' } : {}) } },

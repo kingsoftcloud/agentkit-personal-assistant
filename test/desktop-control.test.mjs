@@ -60,3 +60,34 @@ test('30ms text coalescing flushes before key/pointer/release barriers', t => {
   machine.input({ type: 'text', text: 'end' }); machine.release();
   assert.equal(packets.at(-2).event.text, 'end'); assert.equal(packets.at(-1).type, 'control.release');
 });
+
+test('旧文本不能在控制权失效后的新代次发送', t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { machine, packets } = control(t);
+  machine.acquire(); machine.accept({ readOnly: false, controlAvailable: true, controlEpoch: 1 });
+  machine.input({ type: 'text', text: 'old-owner-text' });
+  machine.accept({ readOnly: true, controlAvailable: true, controlEpoch: 2 });
+  machine.acquire(); machine.accept({ readOnly: false, controlAvailable: true, controlEpoch: 3 });
+  t.mock.timers.tick(30);
+  assert.equal(packets.some(row => row.type === 'input'), false);
+});
+
+test('旁观或已取消接管时，残留松开与移动事件不重新抢控制权', t => {
+  const { machine, packets } = control(t);
+  machine.input({ type: 'button', action: 'up', button: 1 }); machine.input({ type: 'key', action: 'up', key: 'Shift_L' });
+  assert.deepEqual(packets, []);
+  machine.acquire(); machine.release();
+  machine.input({ type: 'button', action: 'up', button: 1 }); machine.input({ type: 'pointermove', x: 1, y: 1 });
+  machine.accept({ readOnly: false, controlAvailable: true, controlEpoch: 1 });
+  assert.equal(packets.some(row => row.type === 'input'), false);
+  assert.equal(packets.at(-1).type, 'control.release');
+});
+
+test('过期错误不能撤销当前控制态或阻止点外交还', t => {
+  const { machine, packets } = control(t);
+  machine.reset({ readOnly: false, controlAvailable: true, controlEpoch: 5 });
+  machine.reject({ controlEpoch: 4, readOnly: true, message: 'stale failure' });
+  assert.equal(machine.snapshot.phase, 'controlling');
+  machine.release();
+  assert.deepEqual(packets.at(-1), { type: 'control.release', controlEpoch: 5 });
+});
