@@ -296,7 +296,8 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
   const header = h('header', { style: styles.header },
     h('h1', { style: styles.title }, '个人助理'),
     h('span', { style: styles.status }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
-    h('span', { style: styles.spacer }));
+    h('span', { style: styles.spacer }),
+    onOpenComputer ? h('button', { type: 'button', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', style: { background: 'transparent', border: 0, color: 'inherit', cursor: 'pointer' } }, '云电脑') : null);
 
   if (phase === 'loading') {
     return h('section', { style: styles.page }, header, h('div', { style: styles.centered }, h('span', { style: styles.status }, '正在连接个人助理…')));

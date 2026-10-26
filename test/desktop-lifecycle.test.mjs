@@ -270,7 +270,7 @@ test('聊天旁的云电脑默认旁观，不占助理租约；显式申请控�
   assert.equal(viewer.sent[0].mode, 'read');
   viewer.message({ type: 'ready', sessionId: 'viewer', readOnly: true, display: { width: 1280, height: 800 } });
   viewer.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); viewer.message(new ArrayBuffer(8)); await flush();
-  panel.click('申请控制权'); await flush();
+  panel.click('接管'); await flush();
   assert.equal(panel.tickets().at(-1).payload.mode, 'control');
 });
 

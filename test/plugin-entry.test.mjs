@@ -131,7 +131,7 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
     },
   };
   applyClient(ctx);
-  assert.deepEqual(clientInject, ['slots', 'connection']);
+  assert.deepEqual(clientInject, ['slots', 'connection', 'layout']);
   assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist', 'settings.section']);
   assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
