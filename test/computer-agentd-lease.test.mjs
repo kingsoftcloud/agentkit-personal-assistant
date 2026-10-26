@@ -8,7 +8,7 @@ test('real broker binds lease acquire/renew/release to Bot and task', async t =>
   await new Promise(resolve => portHolder.listen(0, '127.0.0.1', resolve));
   const port = portHolder.address().port;
   await new Promise(resolve => portHolder.close(resolve));
-  const child = spawn(process.execPath, ['runtime/computer-agentd.mjs'], { cwd: new URL('..', import.meta.url), env: { ...process.env, COMPUTER_HOST: '127.0.0.1', COMPUTER_PORT: String(port), USER_ID: 'u', ASSISTANT_ID: 'a', COMPUTER_ID: 'c' }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['runtime/computer-agentd.mjs'], { cwd: new URL('..', import.meta.url), env: { ...process.env, AGENTKIT_DESKTOP_MODE: '0', COMPUTER_HOST: '127.0.0.1', COMPUTER_PORT: String(port), USER_ID: 'u', ASSISTANT_ID: 'a', COMPUTER_ID: 'c' }, stdio: 'ignore' });
   t.after(async () => { if (child.exitCode !== null) return; child.kill('SIGTERM'); await new Promise(resolve => child.once('exit', resolve)); });
   const base = `http://127.0.0.1:${port}`;
   let ready = false;
