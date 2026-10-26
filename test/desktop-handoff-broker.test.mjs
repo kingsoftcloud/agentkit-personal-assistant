@@ -131,3 +131,22 @@ test('预热成功不会请求退出，显式停止时只清理一次', async ()
   await Promise.all([daemon.stop(0), daemon.stop(0)]);
   assert.equal(exits, 1); assert.equal(disposals, 1);
 });
+
+test('本地浏览器入口只复用受管浏览器，关闭先停入口且拒绝晚到请求', async () => {
+  let options, factories = 0, opens = 0, stopped;
+  const stoppedGate = new Promise(resolve => { stopped = resolve; });
+  const events = [];
+  const service = createComputerAgentServer({ env,
+    desktopFactory: value => { options = value; return { dispose: async () => events.push('desktop-dispose'), stopLauncher: async () => { events.push('launcher-stop'); await stoppedGate; } }; },
+    browserFactory: () => { factories++; return { available: true, openDesktopWindow: async () => { opens++; }, dispose: async () => events.push('browser-dispose') }; },
+  });
+  service.listen(); await service.whenReady;
+  await options.onLaunchBrowser(); await options.onLaunchBrowser();
+  assert.equal(factories, 1); assert.equal(opens, 2);
+  const endpoint = `http://127.0.0.1:${service.server.address().port}`;
+  const closing = service.close();
+  assert.equal((await fetch(endpoint + '/health')).status, 503);
+  await assert.rejects(options.onLaunchBrowser(), { code: 'DESKTOP_LAUNCH_CLOSED' });
+  stopped(); await closing;
+  assert.equal(factories, 1); assert.deepEqual(events, ['launcher-stop', 'launcher-stop', 'browser-dispose', 'desktop-dispose']);
+});

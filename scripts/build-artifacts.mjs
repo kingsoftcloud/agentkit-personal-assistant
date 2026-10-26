@@ -71,6 +71,7 @@ const results = [
     ['runtime/cloud-browser-cdp.mjs', join(root, 'runtime', 'cloud-browser-cdp.mjs')],
     ['runtime/cloud-execution.mjs', join(root, 'runtime', 'cloud-execution.mjs')],
     ['runtime/desktop-session.mjs', join(root, 'runtime', 'desktop-session.mjs')],
+    ['runtime/desktop-launcher.mjs', join(root, 'runtime', 'desktop-launcher.mjs')],
   ]),
 ];
 console.log(JSON.stringify({ node: process.versions.node, artifacts: results }, null, 2));

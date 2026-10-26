@@ -33,15 +33,28 @@ const closeDesktopBrowser = async () => {
   await current.dispose?.().catch?.(() => {});
 };
 const ensureDesktopBrowser = async () => {
+  if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   if (desktopBrowserOpening) return desktopBrowserOpening;
   browser ||= browserFactory({ workspace, env, beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); } });
   if (!browser.available) throw Object.assign(new Error(browser.resolution?.reason || 'desktop browser unavailable'), { code: 'ASSISTANT_BROWSER_UNAVAILABLE', status: 503 });
   // 桌面窗口和助理工具始终复用同一个可见 Chromium 实例。
   // 首帧只等待本地窗口，外网页面加载由明确的浏览器操作触发。
   desktopBrowserOpening = browser.openDesktopWindow();
-  try { return await desktopBrowserOpening; } finally { desktopBrowserOpening = undefined; }
+  try {
+    const result = await desktopBrowserOpening;
+    if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+    return result;
+  } finally { desktopBrowserOpening = undefined; }
 };
-desktop = desktopFactory({ onStop: closeDesktopBrowser, onIdle: async owner => {
+desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', workspace,
+  onLaunchBrowser: async ({ signal } = {}) => {
+    if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+    const result = await ensureDesktopBrowser();
+    if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+    return result;
+  },
+  onLaunchError: event => logger.error(JSON.stringify({ event: 'desktop-app-launch-failed', ...event })),
+  onStop: closeDesktopBrowser, onIdle: async owner => {
   if (!owner.releaseLeaseOnIdle || !owner.leaseId) return;
   const lease = leases.get(identity.computerId);
   if (leaseIdentityMatches(lease, { ...identity, botId: owner.botId, taskId: owner.taskId, leaseId: owner.leaseId })) leases.delete(identity.computerId);
@@ -154,6 +167,7 @@ async function releaseControl(body) {
   return { ...changed, controlAvailable: true, handoffProtocol: 'desktop-handoff/v1' };
 }
 const server = createServer(async (request, response) => {
+  if (closing) return send(response, 503, { error: 'COMPUTER_CLOSING' });
   if (request.method === 'GET' && ['/health', '/v1/status'].includes(request.url) && (starting || startupFailure)) return send(response, 503, { status: starting ? 'starting' : 'error', error: startupFailure?.code || (startupFailure ? 'DESKTOP_STARTUP_FAILED' : undefined), desktopReady: false, ...identity });
   if (request.method === 'GET' && request.url === '/health') return send(response, 200, { status: 'ok', desktopReady: !starting, warmupMs, ...identity });
   if (request.method === 'GET' && request.url === '/v1/status') return send(response, 200, { status: 'ready', desktopReady: !starting, warmupMs, ...identity, capabilities: ['computer-broker/v1'] });
@@ -289,8 +303,10 @@ const close = () => {
   if (closePromise) return closePromise;
   closing = true; clearInterval(leaseReaper);
   closePromise = (async () => {
-    await warmup;
     const failures = [];
+    try { await desktop.stopLauncher?.(); } catch (error) { failures.push(error); }
+    await warmup;
+    try { await desktop.stopLauncher?.(); } catch (error) { failures.push(error); }
     for (const cleanup of [() => browser?.dispose?.(), () => executor?.dispose?.(), () => desktop.dispose()]) {
       try { await cleanup(); } catch (error) { failures.push(error); }
     }

@@ -4,8 +4,9 @@ import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createDesktopController as createDesktopControllerWithWmProbe, createMjpegFrameParser } from '../runtime/desktop-session.mjs';
+import { requestDesktopLaunch } from '../runtime/desktop-launcher.mjs';
 
-function fakeProcess() { const p = new EventEmitter(); p.exitCode = null; p.killed = false; p.kill = () => { p.killed = true; p.exitCode = 0; p.emit('exit', 0); }; return p; }
+function fakeProcess() { const p = new EventEmitter(); p.exitCode = null; p.killed = false; p.kill = () => { p.killed = true; p.exitCode = 0; p.emit('exit', 0); }; queueMicrotask(() => p.emit('spawn')); return p; }
 const readyWindowProperties = '_NET_SUPPORTING_WM_CHECK(WINDOW): window id # 0x400001\n_NET_ACTIVE_WINDOW(WINDOW): window id # 0x800002\n';
 // 采集/输入等用例的假桌面已就绪；启动竞态用例直接使用原始控制器和受控 EWMH 响应。
 function createDesktopController(options) {
@@ -189,6 +190,59 @@ test('只有系统绑定文件缺失才回退到最小集，其他读取错误�
     await denied.openSession({ identity: {} });
     assert.equal(managers, 1);
   } finally { await denied.dispose(); }
+});
+
+test('真实应用底栏只启动固定程序、复用窗口，关闭观察不关闭 dock 和文件管理器', async () => {
+  const children = [], browserCalls = [];
+  let wmHome;
+  const controller = createDesktopController({ applications: true, workspace: '/workspace',
+    readWindowBindings: async () => Buffer.from('OnTitlebar Mouse1 :Focus\n'),
+    onLaunchBrowser: async options => { assert.equal(options.signal.aborted, false); browserCalls.push('same-managed-browser'); },
+    spawn(file, args, options) { const child = fakeProcess(); children.push({ file, args, options, child }); if (file === 'fluxbox') wmHome = options.env.HOME; return child; },
+    exec: async () => ({ stdout: '1234\n' }),
+  });
+  try {
+    const session = await controller.openSession({ identity: {} });
+    const desktop = await readFile(join(wmHome, 'browser.desktop'), 'utf8');
+    const socketPath = desktop.match(/--socket "([^"]+)"/)?.[1]; assert.ok(socketPath);
+    assert.match(desktop, /--action browser/); assert.equal(desktop.includes('chromium --'), false);
+    assert.match(await readFile(join(wmHome, 'init'), 'utf8'), /toolbar.visible: false/);
+    const dock = await readFile(join(wmHome, 'tint2rc'), 'utf8');
+    assert.match(dock, /disable_transparency = 1/); assert.match(dock, /background_color = #f8fbff 100/);
+    assert.equal((dock.match(/launcher_item_app = /g) || []).length, 3);
+    await Promise.all(Array.from({ length: 10 }, () => requestDesktopLaunch(socketPath, 'files')));
+    await requestDesktopLaunch(socketPath, 'terminal'); await requestDesktopLaunch(socketPath, 'browser');
+    assert.equal(children.filter(p => p.file === 'Xvfb').length, 1); assert.equal(children.filter(p => p.file === '/usr/bin/tint2').length, 1);
+    assert.equal(children.filter(p => p.file === '/usr/bin/dbus-run-session').length, 1);
+    assert.deepEqual(children.find(p => p.file === '/usr/bin/dbus-run-session').args, ['--', '/usr/bin/thunar', '/workspace']);
+    assert.equal(children.filter(p => p.file === 'xterm').length, 1); assert.deepEqual(browserCalls, ['same-managed-browser']);
+    controller.closeSession(session.sessionId);
+    assert.equal(controller.stats().dockRunning, true); assert.equal(controller.stats().fileManagerRunning, true);
+    assert.equal(children.some(p => p.child.killed), false);
+  } finally { await controller.dispose(); }
+  assert.ok(children.every(p => p.child.killed));
+});
+
+test('关闭桌面取消在途和排队的入口，晚返回浏览器不能复活 dock 或文件管理器', async () => {
+  const children = []; let home, started, finish;
+  const entered = new Promise(resolve => { started = resolve; });
+  const barrier = new Promise(resolve => { finish = resolve; });
+  const controller = createDesktopController({ applications: true,
+    readWindowBindings: async () => Buffer.from('OnTitlebar Mouse1 :Focus\n'),
+    onLaunchBrowser: async () => { started(); await barrier; },
+    spawn(file, args, options) { const child = fakeProcess(); children.push({ file, child }); if (file === 'fluxbox') home = options.env.HOME; return child; },
+    exec: async () => ({ stdout: '1234\n' }),
+  });
+  await controller.ensureDisplay();
+  const socket = (await readFile(join(home, 'browser.desktop'), 'utf8')).match(/--socket "([^"]+)"/)[1];
+  const browser = requestDesktopLaunch(socket, 'browser'); const rejectedBrowser = assert.rejects(browser, { code: 'DESKTOP_LAUNCH_CLOSED' });
+  await entered;
+  const files = requestDesktopLaunch(socket, 'files'); const rejectedFiles = assert.rejects(files, { code: 'DESKTOP_LAUNCH_CLOSED' });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  await controller.dispose(); await Promise.all([rejectedBrowser, rejectedFiles]);
+  const count = children.length; finish(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(children.length, count); assert.equal(children.some(p => p.file === '/usr/bin/dbus-run-session'), false);
+  assert.ok(children.every(p => p.child.killed));
 });
 
 test('桌面初始化超过首次清理周期时不会被误判为空闲', async t => {

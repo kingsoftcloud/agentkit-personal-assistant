@@ -11,6 +11,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createDesktopLauncherServer } from './desktop-launcher.mjs';
 
 const execFile = promisify(execFileCallback);
 export const DESKTOP_WIDTH = 1280;
@@ -93,12 +95,19 @@ export function createDesktopController({
   idleTimeoutMs = DESKTOP_IDLE_TIMEOUT_MS,
   idleRetentionMs = DESKTOP_IDLE_RETENTION_MS,
   windowManagerReadyTimeoutMs = 5000,
+  applications = false,
+  workspace = process.env.AGENTKIT_WORKSPACE_DIR || '/workspace',
+  onLaunchBrowser = null,
+  onLaunchError = () => {},
 } = {}) {
   const sessions = new Map();
   let xvfb;
   let wm;
   let windowManagerFailure;
   let terminalProcess;
+  let dockProcess, fileManagerProcess, launcher, launcherStopped = false, launcherShutdown = false;
+  let appQueue = Promise.resolve();
+  const processGroups = new Set();
   let collector;
   let collectorStarting;
   let collectorStopping;
@@ -147,8 +156,13 @@ export function createDesktopController({
     let timer;
     const finish = () => { clearTimeout(timer); resolve(); };
     child.once('exit', finish); child.once('error', finish);
-    timer = setTimeout(() => { child.kill('SIGKILL'); finish(); }, 500);
-    child.kill('SIGTERM');
+    const kill = signal => {
+      if (processGroups.has(child) && Number.isInteger(child.pid)) {
+        try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      } else child.kill(signal);
+    };
+    timer = setTimeout(() => { kill('SIGKILL'); finish(); }, 500);
+    kill('SIGTERM');
   });
   const spawnDisplay = () => {
     if (xvfb && xvfb.exitCode === null && !xvfb.killed) return;
@@ -206,8 +220,34 @@ export function createDesktopController({
         'toolbar.clock.font: Noto Sans CJK SC-9', 'toolbar.workspace.font: Noto Sans CJK SC-9',
         'toolbar.iconbar.focused.font: Noto Sans CJK SC-9', 'toolbar.iconbar.unfocused.font: Noto Sans CJK SC-9', '',
       ].join('\n'));
-      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12 -geometry 56x24+20+65}\n[end]\n');
-      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#dce5f0'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: true\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
+      let menu = '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12 -geometry 56x24+20+65}\n[end]\n';
+      if (applications) {
+        if (launcherShutdown) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+        launcherStopped = false;
+        launcher = await createDesktopLauncherServer({ launch: launchApplication, onError: onLaunchError });
+        const helper = fileURLToPath(new URL('./desktop-launcher.mjs', import.meta.url));
+        const quote = value => `"${String(value).replace(/[\\"`$]/g, '\\$&')}"`;
+        const command = action => [quote(process.execPath), quote(helper), '--socket', quote(launcher.socketPath), '--action', action].join(' ');
+        const entries = [
+          ['browser', '浏览器', '/usr/share/icons/hicolor/48x48/apps/chromium.png'],
+          ['terminal', '终端', '/usr/share/icons/Adwaita/48x48/legacy/utilities-terminal.png'],
+          ['files', '文件', '/usr/share/icons/Adwaita/48x48/places/folder.png'],
+        ];
+        for (const [action, name, icon] of entries) await writeFile(join(wmConfiguration, `${action}.desktop`), `[Desktop Entry]\nType=Application\nName=${name}\nExec=${command(action)}\nIcon=${icon}\nTerminal=false\nStartupNotify=false\n`);
+        menu = '[begin] (云电脑)\n' + entries.map(([action, name]) => `[exec] (${name}) {${command(action)}}\n`).join('') + '[end]\n';
+        await writeFile(join(wmConfiguration, 'tint2rc'), [
+          'rounded = 0', 'border_width = 1', 'background_color = #f8fbff 100', 'border_color = #c5d2e3 100',
+          'panel_items = L', 'panel_size = 184 54', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
+          'panel_background_id = 1', 'panel_position = bottom center horizontal', 'panel_layer = top',
+          'panel_monitor = primary', 'panel_dock = 0', 'panel_shrink = 0', 'panel_window_name = AgentKit Dock',
+          'disable_transparency = 1', 'mouse_effects = 1', 'wm_menu = 0',
+          'launcher_padding = 4 0 14', 'launcher_icon_size = 36', 'launcher_background_id = 0',
+          'launcher_icon_background_id = 0', 'launcher_icon_asb = 100 0 0', 'launcher_tooltip = 1',
+          ...entries.map(([action]) => `launcher_item_app = ${join(wmConfiguration, `${action}.desktop`)}`), '',
+        ].join('\n'));
+      }
+      await writeFile(join(wmConfiguration, 'menu'), menu);
+      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#dce5f0'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: ${applications ? 'false' : 'true'}\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
     }
@@ -225,14 +265,62 @@ export function createDesktopController({
       windowManagerFailure = Object.assign(new Error(`Fluxbox exited before desktop shutdown (${code})`), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503 });
     });
   };
-  const spawnTerminal = () => {
-    if (!terminal || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
+  const spawnTerminal = (force = false) => {
+    if ((!terminal && !force) || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
     // Latin 使用等宽 DejaVu 主字体；中文和 emoji 由 fontconfig 使用已安装的
     // Noto 后备字体。不要把 CJK 字体作为 -fa，或用 -fd 锁定所有宽字符，
     // 否则分别会拉宽英文单元格、破坏彩色 emoji 后备。56 列为多窗口留出空间。
     terminalProcess = trackStartupProcess('xterm', spawn('xterm', ['-display', display, '-u8', '-fa', 'DejaVu Sans Mono', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '56x24+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] }));
-    terminalProcess.once?.('exit', () => { terminalProcess = undefined; });
+    const child = terminalProcess;
+    child.once?.('exit', () => { if (terminalProcess === child) terminalProcess = undefined; });
+    return child;
   };
+  const assertApplicationActive = signal => {
+    if (disposed || launcherStopped || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+  };
+  const activateApplication = async (args, signal) => {
+    const deadline = performance.now() + 2000;
+    while (performance.now() < deadline) {
+      assertApplicationActive(signal);
+      let result;
+      try { result = await exec('xdotool', ['search', '--onlyvisible', ...args], { env: environment, timeout: 1000 }); }
+      catch (error) { if (error.code !== 1) throw error; }
+      assertApplicationActive(signal);
+      const id = String(result?.stdout || '').trim().split('\n')[0];
+      if (id) { await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 1000 }); return; }
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    throw Object.assign(new Error('桌面应用尚未显示窗口'), { code: 'DESKTOP_APP_WINDOW_UNAVAILABLE' });
+  };
+  const launchApplication = (action, { signal } = {}) => {
+    const pending = appQueue.then(async () => {
+      assertApplicationActive(signal);
+      await ensureDisplay();
+      assertApplicationActive(signal);
+      if (action === 'browser') {
+        if (!onLaunchBrowser) throw Object.assign(new Error('浏览器入口尚未连接'), { code: 'DESKTOP_BROWSER_UNAVAILABLE' });
+        await onLaunchBrowser({ signal });
+        // CDP 的 activateTarget 只选择标签页；应用入口还需让同一窗口获得 WM 焦点。
+        await activateApplication(['--class', '^Chromium$'], signal);
+      } else if (action === 'terminal') {
+        if (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed) await activateApplication(['--pid', String(terminalProcess.pid)], signal);
+        else { const child = spawnTerminal(true); await activateApplication(['--pid', String(child.pid)], signal); }
+      } else if (action === 'files') {
+        if (fileManagerProcess && fileManagerProcess.exitCode === null && !fileManagerProcess.killed) await activateApplication(['--class', '^Thunar$'], signal);
+        else {
+          const child = trackStartupProcess('thunar', spawn('/usr/bin/dbus-run-session', ['--', '/usr/bin/thunar', workspace], { env: environment, stdio: ['ignore', 'ignore', 'pipe'], detached: true }));
+          fileManagerProcess = child; processGroups.add(child);
+          child.once?.('exit', () => { processGroups.delete(child); if (fileManagerProcess === child) fileManagerProcess = undefined; });
+          await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+          await activateApplication(['--class', '^Thunar$'], signal);
+        }
+      }
+      assertApplicationActive(signal);
+    });
+    appQueue = pending.catch(() => {});
+    return pending;
+  };
+  const stopLauncher = async ({ permanent = true } = {}) => { launcherShutdown ||= permanent; launcherStopped = true; const current = launcher; launcher = undefined; await current?.close(); };
   const waitDisplay = async () => {
     if (displayReady) return displayReady;
     const began = performance.now();
@@ -281,6 +369,23 @@ export function createDesktopController({
         await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(50, wmDeadline - performance.now()))));
       }
       if (!wmReady) throw Object.assign(new Error(`Fluxbox on ${display} did not publish a ready desktop within ${windowManagerReadyTimeoutMs}ms`), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503, cause: probeError });
+      if (applications) {
+        const child = trackStartupProcess('tint2', spawn('/usr/bin/tint2', ['-c', join(wmConfiguration, 'tint2rc')], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] }));
+        dockProcess = child;
+        child.once?.('exit', () => { if (dockProcess === child) { dockProcess = undefined; displayReady = undefined; } });
+        await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+        const deadline = performance.now() + 2000;
+        let visible = false;
+        while (performance.now() < deadline && child.exitCode === null && !child.killed) {
+          assertApplicationActive();
+          try { visible = Boolean(String((await exec('xdotool', ['search', '--onlyvisible', '--pid', String(child.pid)], { env: environment, timeout: 500 })).stdout).trim()); }
+          catch (error) { if (error.code !== 1) throw error; }
+          if (visible) break;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        if (!visible) throw Object.assign(new Error('桌面应用底栏未显示'), { code: 'DESKTOP_DOCK_UNAVAILABLE' });
+        assertApplicationActive();
+      }
       return true;
     })();
     try { await displayReady; } catch (error) {
@@ -591,10 +696,11 @@ export function createDesktopController({
   const stopDisplay = () => {
     if (displayStopping) return displayStopping;
     const stopping = (async () => {
+      await stopLauncher({ permanent: false });
       await releasePressedInput();
       await stopCollector();
-      const processes = [wm, terminalProcess, xvfb];
-      wm = undefined; terminalProcess = undefined; xvfb = undefined; displayReady = undefined;
+      const processes = [dockProcess, fileManagerProcess, wm, terminalProcess, xvfb];
+      dockProcess = undefined; fileManagerProcess = undefined; wm = undefined; terminalProcess = undefined; xvfb = undefined; displayReady = undefined;
       await Promise.all(processes.map(stopProcess));
       const directory = wmConfiguration; wmConfiguration = undefined;
       if (directory) await rm(directory, { recursive: true, force: true });
@@ -605,8 +711,8 @@ export function createDesktopController({
     return stopping;
   };
   const dispose = () => { disposed = true; sessions.clear(); flushPendingText(); clearInterval(reaper); return inputQueue.then(stopDisplay); };
-  const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt });
+  const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), dockRunning: Boolean(dockProcess && dockProcess.exitCode === null), fileManagerRunning: Boolean(fileManagerProcess && fileManagerProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
-  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, dispose, stats, injectInput, captureFrame });
+  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, stopLauncher, dispose, stats, injectInput, captureFrame });
 }
