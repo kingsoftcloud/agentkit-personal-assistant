@@ -7,7 +7,7 @@
   "ManagedRuntimeConfig": {
     "RuntimeName": "personal-assistant",
     "RuntimeVersion": "0.1.2",
-    "Manifest": "name: pa-replay-template\nframework: personal-assistant\nartifact_type: ManagedRuntime\nruntime:\n  name: personal-assistant\n  version: \"0.1.2\"\nmodel: \"glm-5.1\"\nprompt: 请用中文完成用户任务。\n"
+    "Manifest": "name: pa-replay-template\nframework: personal-assistant\nartifact_type: ManagedRuntime\nruntime:\n  name: personal-assistant\n  version: \"0.1.2\"\nmodel: \"deepseek-v4.1-flash-1017\"\nprompt: 请用中文完成用户任务。\n"
   },
   "Resource": { "Cpu": 1, "Memory": 4 },
   "Scaling": { "MinReplicas": 1, "MaxReplicas": 1 },

@@ -26,6 +26,8 @@ async function fixture(t, { browserFactory } = {}) {
     closeSession: id => sessions.delete(id),
     stats: () => ({ sessions: sessions.size }), dispose: async () => {},
     frame: async ({ sessionId }) => ({ sessionId, data: 'frame' }),
+    windows: async () => [{ windowId: '0x123', title: 'AgentKit Cloud Desktop' }],
+    launchApplication: async (_application, options) => options?.beforeCommand?.(),
   }) });
   service.listen(); await once(service.server, 'listening'); t.after(() => service.close());
   const post = async (path, body = {}) => { const response = await fetch(`http://127.0.0.1:${service.server.address().port}/broker/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: 'u', assistantId: 'a', computerId: 'c', botId: 'bot', taskId: 'human', ...body }) }); return { status: response.status, value: await response.json() }; };
@@ -42,6 +44,20 @@ test('human control requires a signed control grant; read/forged/replayed grants
   const opened = await post('desktop/session', { mode: 'observe', controlPermit: token });
   assert.equal(opened.status, 200); assert.equal(opened.value.controlAvailable, true); assert.equal(opened.value.readOnly, true);
   assert.equal((await post('desktop/session', { mode: 'observe', controlPermit: token })).status, 401);
+});
+
+test('Agent 桌面输入绑定同一租约，人接管后旧 Agent 输入在服务端拒绝', async t => {
+  const { post, inputs } = await fixture(t);
+  const leaseId = (await post('lease/acquire', { taskId: 'agent-task' })).value.lease.leaseId;
+  const input = { taskId: 'agent-task', leaseId, action: 'desktop.input', args: { event: { type: 'text', text: 'cloud only' } } };
+  assert.equal((await post('action', input)).status, 200);
+  assert.equal(inputs.length, 1);
+  const windows = await post('action', { taskId: 'agent-task', leaseId, action: 'desktop.windows', args: {} });
+  assert.equal(windows.value.windows[0].windowId, '0x123');
+  const human = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value;
+  assert.equal((await post('desktop/control/acquire', { sessionId: human.sessionId, controlEpoch: 0 })).status, 200);
+  assert.equal((await post('action', input)).value.error, 'COMPUTER_USER_CONTROLLED');
+  assert.equal(inputs.length, 1);
 });
 
 test('human takeover preserves video session, fences old input, rejects second client and releases to agent', async t => {

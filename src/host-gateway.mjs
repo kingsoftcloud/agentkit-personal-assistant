@@ -29,6 +29,8 @@ const SESSION_OPERATIONS = Object.freeze([
   'personal-assistant.session.events',
   'personal-assistant.turn.submit',
   'personal-assistant.schedule.create',
+  'personal-assistant.file.upload',
+  'personal-assistant.file.download',
 ]);
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket', ...SESSION_OPERATIONS]);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
@@ -209,10 +211,11 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}, { session
     try {
       if (request.method !== 'POST') throw fail('PERSONAL_ASSISTANT_METHOD_INVALID', '仅支持 POST 请求', 405);
       if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') throw fail('PERSONAL_ASSISTANT_CONTENT_TYPE_INVALID', '请求必须使用 JSON', 415);
-      if (Number(request.headers.get('content-length')) > 16_384) throw fail('PERSONAL_ASSISTANT_REQUEST_TOO_LARGE', '请求过大', 413);
+      if (Number(request.headers.get('content-length')) > 768 * 1024) throw fail('PERSONAL_ASSISTANT_REQUEST_TOO_LARGE', '请求过大', 413);
       const text = await request.text(); request.signal.throwIfAborted();
-      if (Buffer.byteLength(text) > 16_384) throw fail('PERSONAL_ASSISTANT_REQUEST_TOO_LARGE', '请求过大', 413);
-      let body; try { body = JSON.parse(text); } catch { throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求 JSON 格式错误'); }
+      if (Buffer.byteLength(text) > 768 * 1024) throw fail('PERSONAL_ASSISTANT_REQUEST_TOO_LARGE', '请求过大', 413);
+      let body; try { body = JSON.parse(text); } catch { if (Buffer.byteLength(text) > 16_384) throw fail('PERSONAL_ASSISTANT_REQUEST_TOO_LARGE', '请求过大', 413); throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求 JSON 格式错误'); }
+      if (body?.payload?.operation !== 'personal-assistant.file.upload' && Buffer.byteLength(text) > 16_384) throw fail('PERSONAL_ASSISTANT_REQUEST_TOO_LARGE', '请求过大', 413);
       if (!plain(body) || body.type !== 'client-request' || typeof body.rpcId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/u.test(body.rpcId) || body.method !== 'personal-assistant' || !plain(body.payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求格式错误');
       rpcId = body.rpcId;
       if (!OPERATIONS.has(body.payload.operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);

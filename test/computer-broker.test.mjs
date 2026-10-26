@@ -93,3 +93,14 @@ test('computer-backed adapters validate browser selectors, keys, and code langua
   await assert.rejects(toolset.execute('cloud_browser_click', { selector: '' }), /non-empty/);
   await toolset.dispose();
 });
+
+test('已声明的浏览器按键和下载动作必须实际到达 Broker', async () => {
+  const mock = createMockComputerBroker();
+  const { createComputerToolset } = await import('../src/cloud-computer-tools.mjs');
+  const toolset = createComputerToolset({ broker: mock.client, assistantId: 'a', botId: 'b', computerId: 'mock-computer' });
+  try {
+    await toolset.execute('cloud_browser_press', { key: 'Tab' });
+    await toolset.execute('cloud_browser_download', { url: 'https://example.com/' });
+    assert.deepEqual(mock.actions.map(value => value.action), ['press', 'download']);
+  } finally { await toolset.dispose(); }
+});

@@ -9,6 +9,7 @@ import { attachDesktopWebSocket } from './desktop-ws.mjs';
 import { pathToFileURL } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { createScheduleManager } from '../src/schedule-manager.mjs';
+import { createCloudFileStore } from '../src/cloud-files.mjs';
 
 export async function startAssistantRuntime({ runtime, env = process.env, argv = [] } = {}) {
 const values = new Map();
@@ -39,6 +40,7 @@ await mkdir(workspace, { recursive: true, mode: 0o700 });
 await mkdir(artifacts, { recursive: true, mode: 0o750 });
 await mkdir(state, { recursive: true, mode: 0o700 });
 const stateStore = await createPersonalAssistantStateStore(state).init();
+const cloudFiles = createCloudFileStore(`${workspace}/workspace`);
 let bots = [];
 if (registryPath) {
   const parsed = JSON.parse(await readFile(registryPath, 'utf8'));
@@ -211,9 +213,20 @@ const submitCloudTurn = async (body, sessionId) => {
   const turn = await stateStore.createTurn({ botId, sessionId, input: body.input, metadata: body.metadata });
   const message = await stateStore.appendMessage({ botId, sessionId, role: 'user', content: body.input, metadata: { turnId: turn.turnId, ...(clientTurnId ? { clientTurnId } : {}) } });
   try {
-    const receipt = await turnBridge.submitTurn({ botId, sessionId, input: body.input, requestId: turn.turnId });
+    const content = [{ type: 'text', text: body.input }];
+    for (const attachment of body.attachments || []) {
+      const data = await cloudFiles.attachment({ botId, sessionId, path: attachment.path });
+      // 只有明确的图像附件进入模型图片通道；其他文件由工作区工具读取处理。
+      if (['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(attachment.mediaType)) {
+        const store = runtime?.ctx?.get?.('attachments');
+        if (!store?.saveImage) throw Object.assign(new Error('云端图片附件服务不可用'), { status: 503 });
+        const ref = await store.saveImage({ data, mediaType: attachment.mediaType, name: attachment.name });
+        content.push({ type: 'image', attachment: ref });
+      }
+    }
+    const receipt = await turnBridge.submitTurn({ botId, sessionId, input: body.input, parts: content, requestId: turn.turnId });
     await updateTurn(turn.turnId, { status: 'running', execution: receipt.execution, requestId: receipt.requestId });
-    const pending = turnBridge.waitForTurn({ botId, sessionId, requestId: receipt.requestId }).then(async result => {
+    const pending = turnBridge.waitForTurn({ botId, sessionId, requestId: receipt.requestId, onProgress: progress => updateTurn(turn.turnId, { progress }) }).then(async result => {
       for (const content of result.messages) await stateStore.appendMessage({ botId, sessionId, role: 'assistant', content, metadata: { turnId: turn.turnId, ...(clientTurnId ? { clientTurnId } : {}), execution: receipt.execution } });
       await updateTurn(turn.turnId, { status: result.status, result: result.messages.join('\n'), error: result.error || null });
       console.info(JSON.stringify({ event: 'personal-assistant.turn.finished', botId, sessionId, turnId: turn.turnId, status: result.status }));
@@ -235,6 +248,16 @@ for (const row of await stateStore.read('schedules')) {
   if (row.status === 'running') await patchSchedule(row, { status: 'interrupted', error: 'SCHEDULE_PROCESS_INTERRUPTED' });
   else if ((!row.status || row.status === 'pending') && row.metadata?.input && row.metadata?.sessionId) armSchedule(row);
 }
+runtime?.setAutomationService?.(async args => {
+  const botId = stateBotId(args.botId);
+  if (args.action === 'list') return { schedules: await stateStore.schedules(botId) };
+  if (args.action === 'create') return scheduleWrite({ botId, scheduleId: args.scheduleId || randomUUID(), runAt: args.runAt, input: args.input });
+  if (typeof args.scheduleId !== 'string') throw new TypeError('scheduleId is required');
+  const row = (await stateStore.schedules(botId)).find(row => row.scheduleId === args.scheduleId);
+  if (row?.status === 'running') throw Object.assign(new Error('任务已开始执行，不能伪报取消'), { status: 409 });
+  if (row) { scheduler.cancel(scheduleKey(row)); await patchSchedule(row, { status: 'cancelled' }); }
+  return { cancelled: Boolean(row) };
+});
 
 const server = createServer(async (request, response) => {
   try {
@@ -281,7 +304,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite }) });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles }) });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
 return { server, stateStore, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }

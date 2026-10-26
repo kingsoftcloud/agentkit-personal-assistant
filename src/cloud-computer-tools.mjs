@@ -12,6 +12,9 @@ import {
   createLeaseRequest,
   createReleaseRequest,
 } from './computer-broker-protocol.mjs';
+import { createDesktopTool } from './desktop-tools.mjs';
+import { createWorkspaceTool } from './workspace-tools.mjs';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 export const PERSONAL_ASSISTANT_BROWSER_CAPABILITY = 'personal-assistant-browser/v1';
 export const PERSONAL_ASSISTANT_CODE_EXECUTION_CAPABILITY = 'personal-assistant-code-execution/v1';
@@ -35,6 +38,7 @@ export const CLOUD_BROWSER_TOOL_NAMES = Object.freeze([
   'cloud_browser_close',
 ]);
 export const CLOUD_EXECUTION_TOOL_NAMES = Object.freeze(['cloud_bash', 'cloud_run_code']);
+export const CLOUD_DESKTOP_TOOL_NAMES = Object.freeze(['cloud_computer', 'cloud_workspace']);
 
 const CODE_LANGUAGES = Object.freeze(['javascript', 'python']);
 const KEY_ALLOWLIST = Object.freeze([
@@ -83,6 +87,7 @@ export function createComputerToolset({
   taskId = 'interactive',
   leaseTtlMs = 60_000,
   now = () => Date.now(),
+  agent,
 } = {}) {
   if (!broker || typeof broker.action !== 'function' || typeof broker.acquireLease !== 'function') {
     throw new TypeError('A connected Computer Broker client is required');
@@ -97,13 +102,24 @@ export function createComputerToolset({
   let activeLease = null;
   let disposed = false;
 
-  async function ensureLease(requestedTaskId = initialTaskId) {
+  async function ensureLease(requestedTaskId = initialTaskId, signal) {
     if (disposed) throw new Error('COMPUTER_TOOLSET_DISPOSED');
     const activeTaskId = taskIdOf(requestedTaskId);
     if (activeLease && activeLease.taskId === activeTaskId && activeLease.expiresAt > now()) return activeLease;
     if (activeLease) await release().catch(() => {});
     const idempotencyKey = `${identity.assistantId}:${identity.botId}:${identity.computerId}:${activeTaskId}`;
-    const response = await broker.acquireLease(createLeaseRequest({ ...identity, taskId: activeTaskId, idempotencyKey, ttlMs: leaseTtlMs }));
+    const deadline = Date.now() + 120000;
+    let response;
+    for (;;) {
+      signal?.throwIfAborted();
+      if (disposed) throw new Error('COMPUTER_TOOLSET_DISPOSED');
+      try { response = await broker.acquireLease(createLeaseRequest({ ...identity, taskId: activeTaskId, idempotencyKey, ttlMs: leaseTtlMs })); break; }
+      catch (error) {
+        if (error?.code !== 'COMPUTER_USER_CONTROLLED' || Date.now() >= deadline) throw error;
+        // 只等待取得新租约，不重放已经开始或结果未知的输入。
+        await sleep(500, undefined, { signal });
+      }
+    }
     const lease = response?.lease;
     if (!lease?.leaseId) throw new Error('COMPUTER_LEASE_INVALID');
     activeLease = lease;
@@ -120,7 +136,7 @@ export function createComputerToolset({
 
   async function action(name, args = {}, execution = {}) {
     if (!ACTIONS.has(name)) throw new TypeError(`Unsupported computer action: ${name}`);
-    const lease = await ensureLease(execution?.taskId);
+    const lease = await ensureLease(execution?.taskId, execution?.signal);
     const request = createActionRequest({
       ...identity,
       taskId: lease.taskId,
@@ -137,6 +153,8 @@ export function createComputerToolset({
   }
 
   const definitions = [
+    createDesktopTool({ action, agent }),
+    createWorkspaceTool({ action }),
     actionDefinition('cloud_browser_open', 'Open a public URL in the dedicated Cloud Computer browser.', { url: { type: 'string' } }, ['url'], 'open', action, args => ({ url: bounded(args.url, 'url', 4096) })),
     actionDefinition('cloud_browser_snapshot', 'Read bounded text and links from the current Cloud Computer page.', {}, [], 'snapshot', action),
     actionDefinition('cloud_browser_click', 'Click a CSS selector in the Cloud Computer browser.', { selector: { type: 'string' } }, ['selector'], 'click', action, args => ({ selector: bounded(args.selector, 'selector', 1024) })),
@@ -153,7 +171,7 @@ export function createComputerToolset({
       ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
     })),
     actionDefinition('cloud_browser_close', 'Close the Cloud Computer browser session.', {}, [], 'stop', action),
-    actionDefinition('cloud_bash', 'Run one command inside the Cloud Computer terminal sandbox.', { command: { type: 'string' }, timeoutMs: { type: 'number' } }, ['command'], 'terminal.exec', action, args => ({
+    actionDefinition('cloud_bash', 'Run bash, git, ssh and skill scripts in the Cloud Computer workspace. Public internet (DNS/HTTPS/SSH) is available by default; host credentials and private desktop control endpoints remain isolated.', { command: { type: 'string' }, timeoutMs: { type: 'number' } }, ['command'], 'terminal.exec', action, args => ({
       language: 'shell', command: bounded(args.command, 'command', 16 * 1024), ...(args.timeoutMs === undefined ? {} : { timeoutMs: Number(args.timeoutMs) }),
     })),
     actionDefinition('cloud_run_code', 'Run bounded JavaScript or Python inside the Cloud Computer terminal sandbox.', { language: { type: 'string', enum: [...CODE_LANGUAGES] }, code: { type: 'string' }, timeoutMs: { type: 'number' } }, ['language', 'code'], 'terminal.exec', action, args => {

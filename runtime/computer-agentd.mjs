@@ -14,6 +14,7 @@ const port = Number(env.COMPUTER_PORT || 8787);
 const workspace = env.AGENTKIT_WORKSPACE_DIR || '/workspace';
 const identity = Object.freeze({ userId: env.USER_ID || '', assistantId: env.ASSISTANT_ID || '', computerId: env.COMPUTER_ID || '' });
 const leases = new Map();
+const agentDesktopSessions = new Map();
 const controlGrants = new Map(), usedControlPermits = new Map();
 const actionContext = new AsyncLocalStorage();
 let starting = env.AGENTKIT_DESKTOP_MODE === '1', startupFailure, warmup, warmupMs = 0, closing = false;
@@ -91,6 +92,7 @@ const readBody = request => new Promise((resolve, reject) => {
 function identityMatches(body) {
   return body.userId === identity.userId && body.assistantId === identity.assistantId && body.computerId === identity.computerId;
 }
+function closeAgentSessions(leaseId) { agentDesktopSessions.delete(leaseId); desktop.closeSessionsForLease(leaseId); }
 function expireLeases() {
   const now = Date.now();
   for (const [computerId, lease] of leases) if (!Number.isFinite(lease.expiresAt) || lease.expiresAt <= now) {
@@ -104,7 +106,7 @@ function expireLeases() {
       continue;
     }
     leases.delete(computerId);
-    desktop.closeSessionsForLease(lease.leaseId);
+    closeAgentSessions(lease.leaseId);
   }
 }
 function leaseIdentityMatches(lease, body) {
@@ -125,6 +127,31 @@ async function action(body) {
   const lease = assertAgentLease(body);
   return actionContext.run({ ...body, leaseId: lease.leaseId }, async () => {
   const args = body.args || {};
+  if (body.action.startsWith('desktop.')) {
+    let session = desktop.getSession(agentDesktopSessions.get(lease.leaseId));
+    if (!session) {
+      const opened = await desktop.openSession({ identity, botId: body.botId, taskId: body.taskId, leaseId: lease.leaseId, controllable: true });
+      // 预热/打开期间可能已被人接管，旧授权不得跨过异步边界。
+      try { assertAgentLease(body); } catch (error) { desktop.closeSession(opened.sessionId); throw error; }
+      agentDesktopSessions.set(lease.leaseId, opened.sessionId);
+      session = desktop.getSession(opened.sessionId);
+    }
+    assertAgentLease(body);
+    if (body.action === 'desktop.capture') {
+      const frame = await desktop.frame({ sessionId: session.sessionId });
+      assertAgentLease(body);
+      return { image: { data: frame.data, mediaType: 'image/jpeg', width: frame.width, height: frame.height, bytes: frame.bytes } };
+    }
+    if (body.action === 'desktop.input') return desktop.input({ sessionId: session.sessionId, controlEpoch: session.controlEpoch, event: args.event });
+    if (body.action === 'desktop.windows') return { windows: await desktop.windows() };
+    if (body.action === 'desktop.focus') return desktop.focusWindow(args.windowId, () => assertAgentLease(body));
+    if (body.action === 'desktop.launch') {
+      if (!['browser', 'terminal', 'files'].includes(args.application)) throw Object.assign(new Error('unsupported desktop application'), { status: 400 });
+      await desktop.launchApplication(args.application, { beforeCommand: () => assertAgentLease(body) });
+      assertAgentLease(body);
+      return { application: args.application, opened: true };
+    }
+  }
   if (body.action === 'open') {
     if (env.AGENTKIT_DESKTOP_MODE === '1') {
       await desktop.ensureDisplay();
@@ -215,7 +242,7 @@ const server = createServer(async (request, response) => {
       const lease = leases.get(body.computerId);
       const released = Boolean(leaseIdentityMatches(lease, body));
       if (released && lease.kind === 'human') await releaseControl({ ...body, sessionId: lease.sessionId, controlEpoch: desktop.getSession(lease.sessionId)?.controlEpoch });
-      else if (released) { leases.delete(body.computerId); desktop.closeSessionsForLease(body.leaseId); }
+      else if (released) { leases.delete(body.computerId); closeAgentSessions(body.leaseId); }
       return send(response, 200, { protocol: body.protocol, released });
     }
     if (request.url === '/broker/action') return send(response, 200, { protocol: body.protocol, ...(await action(body)) });
@@ -249,7 +276,7 @@ const server = createServer(async (request, response) => {
       const lease = { ...identity, kind: 'human', sessionId: session.sessionId, botId: body.botId, taskId: body.taskId, leaseId: randomUUID(), ttlMs: 120000, expiresAt: Date.now() + 120000 };
       // 先封住旧助理租约；CDP 每次发命令前会再次检查，旧异步回调不能穿透。
       leases.set(identity.computerId, lease);
-      if (previous) desktop.closeSessionsForLease(previous.leaseId);
+      if (previous) closeAgentSessions(previous.leaseId);
       try {
         await browser?.releaseInput?.();
         await ensureDesktopBrowser();

@@ -2,6 +2,7 @@ import { BotRegistry } from './bot-registry.mjs';
 import { createComputerBrokerClient, createHttpComputerBrokerTransport } from './computer-broker.mjs';
 import { createComputerToolset, registerComputerTools } from './cloud-computer-tools.mjs';
 import { createScheduleManager } from './schedule-manager.mjs';
+import { registerAutomationTools } from './automation-tools.mjs';
 import { workspaceDir } from './workspace.mjs';
 import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 import { readFileSync } from 'node:fs';
@@ -69,6 +70,7 @@ export function createRuntime(ctx, config = {}) {
   const platformPrompt = env.AGENTENGINE_MANIFEST_PATH ? loadPersonalAssistantManifest(env).prompt : (config.platformSystemPrompt ?? '');
   const computerBroker = config.computerBroker ?? createComputerBrokerClient({ transport: computerTransport });
   const scheduleManager = config.scheduleManager ?? createScheduleManager({ now: config.now });
+  let automationService;
   const workspace = workspaceDir(config.workspace);
   const turnBridge = config.turnBridge ?? createDshTurnBridge({
     ctx,
@@ -79,7 +81,8 @@ export function createRuntime(ctx, config = {}) {
       // 只限制这个 PA Agent；Host 文件、shell、subagent 等全局工具不能绕过电脑租约或读私有状态。
       restrictPersonalAssistantToolScope(agent, botId, { getPolicy: () => registry.require(botId).toolPolicy });
       if (!identity.assistantId || !identity.computerId || !computerTransport) return;
-      const toolset = createComputerToolset({ broker: computerBroker, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId, botId, taskId: `dsh:${agent.id}` });
+      registerAutomationTools({ agent, botId, service: () => automationService });
+      const toolset = createComputerToolset({ broker: computerBroker, agent, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId, botId, taskId: `dsh:${agent.id}` });
       const registration = registerComputerTools({ agent, toolset });
       agent.ctx.effect?.(() => () => { for (const dispose of registration.disposers) dispose(); void toolset.dispose(); }, 'personal-assistant.computer-tools');
     },
@@ -95,6 +98,7 @@ export function createRuntime(ctx, config = {}) {
     registry,
     computerBroker,
     scheduleManager,
+    setAutomationService(value) { automationService = value; },
     workspace,
     turnBridge,
     submitTurn: turnBridge.submitTurn,

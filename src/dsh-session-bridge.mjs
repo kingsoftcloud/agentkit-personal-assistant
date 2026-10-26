@@ -159,14 +159,20 @@ export function createDshTurnBridge({ ctx, sessionController, registry, platform
     } catch (error) { busySessions.delete(session); throw error; }
   }
 
-  async function waitForTurn({ botId, sessionId, requestId, timeoutMs = 300000 } = {}) {
+  async function waitForTurn({ botId, sessionId, requestId, timeoutMs = 300000, onProgress } = {}) {
     const entry = pending.get(requestId);
     if (!entry || entry.botId !== botId || entry.sessionId !== sessionId || typeof controller.inspect !== 'function') throw new DshSessionControllerUnavailableError('DSH turn observation is unavailable');
     const deadline = Date.now() + timeoutMs;
+    let progressSeq = -1;
     try {
       while (Date.now() < deadline) {
         const inspection = await controller.inspect(sessionId, new AbortController().signal);
         const events = (inspection?.events || []).slice(entry.baseline);
+        const latest = events.findLast(event => event.type === 'tool/call' || event.type === 'tool/result');
+        if (latest && latest.seq !== progressSeq) {
+          progressSeq = latest.seq;
+          await onProgress?.({ tool: String(latest.data?.name || '').slice(0, 64), state: latest.type === 'tool/call' ? 'running' : 'settled' });
+        }
         const end = events.find(event => event.type === 'turn/end');
         if (end) {
           const completed = events.slice(0, events.indexOf(end));

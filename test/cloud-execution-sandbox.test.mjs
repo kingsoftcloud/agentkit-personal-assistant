@@ -15,7 +15,7 @@ test('Landlock readiness cannot pass when the actual namespace launcher is denie
   assert.equal(available, false);
   assert.equal(calls[0].file, sandbox.guard);
   assert.ok(calls[0].args.includes(sandbox.unshare));
-  assert.ok(calls[0].args.includes('--net'));
+  assert.equal(calls[0].args.includes('--net'), false, '公网是默认能力，不创建离线网络 namespace');
   assert.ok(calls[0].args.includes('--pid'));
   assert.ok(calls[0].args.includes(sandbox.guard));
 });
@@ -46,7 +46,7 @@ test('a Landlock fallback requires all three confined execution layers before be
   assert.deepEqual(plan.args.slice(0, 4), ['--workspace', root, '--', unshare]);
   assert.ok(plan.args.includes('--child'));
   assert.ok(plan.args.indexOf(guard) < plan.args.indexOf(launcher));
-  assert.ok(plan.args.includes('--net'));
+  assert.equal(plan.args.includes('--net'), false);
   assert.equal(plan.env.HOME, root);
   assert.equal(plan.env.AGENTKIT_RUNTIME_TOKEN, undefined);
   assert.equal(plan.args.includes('/proc'), false);

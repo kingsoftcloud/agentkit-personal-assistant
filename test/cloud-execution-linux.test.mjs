@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { createCloudExecutor } from '../runtime/cloud-execution.mjs';
 
 // 必须在目标 Linux 容器显式执行；macOS mock 不能替代真实内核及 AppArmor。
-test('真实 Linux 沙箱允许工作区 Git、Python 和元数据，并拒绝工作区外修改与联网', {
+test('真实 Linux 沙箱允许工作区 Git、Python 和元数据，默认公网并拒绝工作区外修改与内部控制访问', {
   skip: process.env.AGENTKIT_SANDBOX_LIVE !== '1',
 }, async t => {
   assert.equal(process.platform, 'linux');
@@ -39,6 +39,10 @@ test('真实 Linux 沙箱允许工作区 Git、Python 和元数据，并拒绝�
   const ssh = await executor.runBash({ command: 'ssh -F /dev/null -o BatchMode=yes -o ConnectTimeout=1 -o ConnectionAttempts=1 user@203.0.113.1 true' });
   assert.notEqual(ssh.exitCode, 0);
   assert.match(ssh.stderr, /Operation not permitted/);
+  const internet = await executor.runBash({ command: "set -eu; python3 -c \"import urllib.request; assert urllib.request.urlopen('https://example.com',timeout=15).status==200; print('PYTHON_HTTPS_200')\"; node -e \"fetch('https://example.com').then(r=>{if(r.status!==200)process.exit(1);console.log('NODE_HTTPS_200')}).catch(()=>process.exit(1))\"; git ls-remote https://github.com/git/git.git HEAD", timeoutMs: 60000 });
+  assert.equal(internet.exitCode, 0, internet.stderr);
+  assert.match(internet.stdout, /PYTHON_HTTPS_200/); assert.match(internet.stdout, /NODE_HTTPS_200/);
+  assert.match(internet.stdout, /[a-f0-9]{40}\s+HEAD/);
   const git = await executor.runBash({ command: 'set -eu; git -c init.defaultBranch=main init repo; cd repo; printf "中文 😀\\n" > hello.txt; git add hello.txt; git -c user.name=terminal-check -c user.email=terminal-check@example.test commit -m initial; git rev-parse --verify HEAD' });
   assert.equal(git.exitCode, 0, git.stderr);
   assert.match(git.stdout, /[a-f0-9]{40}\n$/);
@@ -93,7 +97,12 @@ link_fd=os.open(root+'/file-escape',os.O_PATH|os.O_NOFOLLOW)
 denied('symlink_fd_chmod',lambda:os.fchmod(link_fd,0o777),(1,9,13))
 os.close(link_fd)
 denied('host_proc_read',lambda:open('/proc/${process.pid}/environ').read(),(13,))
-denied('tcp_socket',lambda:socket.socket(socket.AF_INET,socket.SOCK_STREAM),(1,))
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.close()
+results['public_socket']='allowed'
+for label,address in [('loopback',('127.0.0.1',8787)),('metadata',('169.254.169.254',80)),('mapped_loopback',('::ffff:127.0.0.1',8787))]:
+ denied(label,lambda:socket.create_connection(address,1),(1,))
+a,b=socket.socketpair();a.send(b'worker');assert b.recv(6)==b'worker';a.close();b.close()
+results['anonymous_socketpair']='allowed'
 denied('unix_socket',lambda:socket.socket(socket.AF_UNIX,socket.SOCK_STREAM),(1,))
 # 线程发出的通知使用 TID；FD 复制必须定位对应线程组，不得误取其他进程。
 failures=[]

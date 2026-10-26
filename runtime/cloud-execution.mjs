@@ -32,7 +32,7 @@ const CLOUD_ENVIRONMENT = Object.freeze([
   ['TERM', 'dumb'], ['PYTHONDONTWRITEBYTECODE', '1'], ['NODE_OPTIONS', '--max-old-space-size=512'],
   ['AGENTKIT_CLOUD_EXECUTION', '1'],
 ]);
-const NAMESPACE_ARGS = Object.freeze(['--user', '--map-root-user', '--net', '--pid', '--fork', '--ipc', '--uts', '--kill-child']);
+const NAMESPACE_ARGS = Object.freeze(['--user', '--map-root-user', '--pid', '--fork', '--ipc', '--uts', '--kill-child']);
 const LANDLOCK_INFORMATIONAL = 'landlock-run: partial enforcement (older Landlock ABI)';
 const fail = (message, code = 'ASSISTANT_CLOUD_EXEC_REFUSED') => Object.assign(new Error(message), { code });
 
@@ -113,27 +113,20 @@ export function probeSandbox({ sandbox, run = spawnSync, timeoutMs = 5000 } = {}
 }
 
 /**
- * Resolve the confiner used for every cloud execution. bubblewrap keeps the
- * strongest isolation (private mounts, hidden Host state); the Landlock
- * launcher is the fallback for kernels or runtime policies where bwrap cannot
- * create its mount namespace. A backend is only reported usable after it
- * proved enforcement once; execution never degrades to an unconfined child.
+ * 公网是执行环境的默认能力。统一使用带 socket/文件隔离的 Landlock
+ * 启动链；不再回退到离线 bubblewrap，也不回退到未隔离的 Host shell。
+ * 原有 bubblewrap 规划函数只供已有隔离探针使用，不参与生产后端选择。
  */
 export function resolveCloudSandbox({ platform = process.platform, env = process.env, bwrapPath, landlockPath, unsharePath, guardPath, probe = probeSandbox } = {}) {
   if (platform !== 'linux') return { available: false, reason: '该运行环境没有可用的 Linux 执行沙箱' };
-  const bwrap = bwrapPath || env.AGENTKIT_BWRAP || '/usr/bin/bwrap';
-  if (isAbsolute(bwrap) && existsSync(bwrap)) {
-    const sandbox = { available: true, kind: 'bwrap', path: bwrap, isolation: 'namespaces' };
-    if (cachedProbe(`bwrap:${bwrap}`, () => probe({ sandbox }))) return sandbox;
-  }
   const launcher = landlockPath || resolveLandlockLauncher({ env });
   const unshare = unsharePath || env.AGENTKIT_UNSHARE || '/usr/bin/unshare';
   const guard = guardPath || env.AGENTKIT_TERMINAL_GUARD || '/usr/local/lib/agentkit/terminal-guard';
   if (launcher && isAbsolute(unshare) && existsSync(unshare) && isAbsolute(guard) && existsSync(guard)) {
-    const sandbox = { available: true, kind: 'landlock', path: launcher, unshare, guard, isolation: 'landlock+seccomp+namespaces' };
+    const sandbox = { available: true, kind: 'landlock', path: launcher, unshare, guard, isolation: 'landlock+seccomp+namespaces', network: 'public' };
     if (cachedProbe(`landlock:${launcher}:${guard}:${unshare}`, () => probe({ sandbox }))) return sandbox;
   }
-  return { available: false, reason: '运行环境没有可用的隔离后端：bubblewrap 与 Landlock 沙盒启动器均不可用' };
+  return { available: false, reason: '运行环境缺少可用的公网命令沙箱：Landlock、seccomp 或 namespace 启动器不可用' };
 }
 
 function timeoutOf(value) {
@@ -157,8 +150,8 @@ function cloudEnvironment(root) {
 /**
  * Build one confined invocation. bubblewrap mounts a private root; Landlock
  * runs the launcher inside fresh user/pid/ipc/uts/net namespaces with an
- * allow-list filesystem policy, so both backends keep the child offline and
- * bound to the workspace.
+ * allow-list filesystem policy。生产 Landlock 启动链继承公网网络，
+ * seccomp 仅隔离内部接口与 Unix socket，文件访问仍受工作区边界约束。
  */
 export function planCloudExecution({ sandbox, workspaceRoot, argv, timeoutMs }) {
   const root = checkedWorkspace(workspaceRoot);
@@ -311,13 +304,13 @@ export function registerAssistantCloudExecutionTools({ agent, workspaceRoot, exe
   if (previous) { previous.executor.dispose(); for (const dispose of previous.disposers) dispose(); }
   if (!executor.available) throw fail(executor.reason || '云端执行沙箱不可用', 'ASSISTANT_CLOUD_EXECUTION_UNAVAILABLE');
   const bash = {
-    name: CLOUD_BASH_TOOL, description: 'Run one shell command inside this assistant\'s confined cloud workspace. No network, no host credentials, no paths outside the workspace.',
+    name: CLOUD_BASH_TOOL, description: 'Run one shell command inside this assistant\'s confined cloud workspace. Public internet is available by default; host credentials and paths outside the workspace remain inaccessible.',
     parameters: { type: 'object', properties: { command: { type: 'string' }, timeoutMs: { type: 'number' } }, required: ['command'], additionalProperties: false },
     output: { schema: outputSchema(), render: renderOutput },
     execute: (args, exec) => executor.runBash(args, { signal: exec.signal }),
   };
   const code = {
-    name: CLOUD_RUN_CODE_TOOL, description: 'Run one bounded JavaScript or Python program inside this assistant\'s confined cloud workspace. No network, no host credentials, no paths outside the workspace.',
+    name: CLOUD_RUN_CODE_TOOL, description: 'Run one bounded JavaScript or Python program inside this assistant\'s confined cloud workspace. Public internet is available by default; host credentials and paths outside the workspace remain inaccessible.',
     parameters: { type: 'object', properties: { language: { type: 'string', enum: [...CODE_LANGUAGES] }, code: { type: 'string' }, timeoutMs: { type: 'number' } }, required: ['language', 'code'], additionalProperties: false },
     output: { schema: outputSchema(), render: renderOutput },
     execute: (args, exec) => executor.runCode(args, { signal: exec.signal }),

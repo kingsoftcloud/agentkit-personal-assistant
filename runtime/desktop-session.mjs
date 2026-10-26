@@ -278,7 +278,7 @@ export function createDesktopController({
   const assertApplicationActive = signal => {
     if (disposed || launcherStopped || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   };
-  const activateApplication = async (args, signal) => {
+  const activateApplication = async (args, signal, beforeCommand) => {
     const deadline = performance.now() + 2000;
     while (performance.now() < deadline) {
       assertApplicationActive(signal);
@@ -287,35 +287,35 @@ export function createDesktopController({
       catch (error) { if (error.code !== 1) throw error; }
       assertApplicationActive(signal);
       const id = String(result?.stdout || '').trim().split('\n')[0];
-      if (id) { await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 1000 }); return; }
+      if (id) { beforeCommand?.(); await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 1000 }); return; }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     throw Object.assign(new Error('桌面应用尚未显示窗口'), { code: 'DESKTOP_APP_WINDOW_UNAVAILABLE' });
   };
-  const launchApplication = (action, { signal } = {}) => {
+  const launchApplication = (action, { signal, beforeCommand } = {}) => {
     const pending = appQueue.then(async () => {
-      assertApplicationActive(signal);
+      assertApplicationActive(signal); beforeCommand?.();
       await ensureDisplay();
-      assertApplicationActive(signal);
+      assertApplicationActive(signal); beforeCommand?.();
       if (action === 'browser') {
         if (!onLaunchBrowser) throw Object.assign(new Error('浏览器入口尚未连接'), { code: 'DESKTOP_BROWSER_UNAVAILABLE' });
         await onLaunchBrowser({ signal });
         // CDP 的 activateTarget 只选择标签页；应用入口还需让同一窗口获得 WM 焦点。
-        await activateApplication(['--class', '^Chromium$'], signal);
+        await activateApplication(['--class', '^Chromium$'], signal, beforeCommand);
       } else if (action === 'terminal') {
-        if (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed) await activateApplication(['--pid', String(terminalProcess.pid)], signal);
-        else { const child = spawnTerminal(true); await activateApplication(['--pid', String(child.pid)], signal); }
+        if (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed) await activateApplication(['--pid', String(terminalProcess.pid)], signal, beforeCommand);
+        else { const child = spawnTerminal(true); await activateApplication(['--pid', String(child.pid)], signal, beforeCommand); }
       } else if (action === 'files') {
-        if (fileManagerProcess && fileManagerProcess.exitCode === null && !fileManagerProcess.killed) await activateApplication(['--class', '^Thunar$'], signal);
+        if (fileManagerProcess && fileManagerProcess.exitCode === null && !fileManagerProcess.killed) await activateApplication(['--class', '^Thunar$'], signal, beforeCommand);
         else {
           const child = trackStartupProcess('thunar', spawn('/usr/bin/dbus-run-session', ['--', '/usr/bin/thunar', workspace], { env: environment, stdio: ['ignore', 'ignore', 'pipe'], detached: true }));
           fileManagerProcess = child; processGroups.add(child);
           child.once?.('exit', () => { processGroups.delete(child); if (fileManagerProcess === child) fileManagerProcess = undefined; });
           await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
-          await activateApplication(['--class', '^Thunar$'], signal);
+          await activateApplication(['--class', '^Thunar$'], signal, beforeCommand);
         }
       }
-      assertApplicationActive(signal);
+      assertApplicationActive(signal); beforeCommand?.();
     });
     appQueue = pending.catch(() => {});
     return pending;
@@ -714,5 +714,21 @@ export function createDesktopController({
   const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), dockRunning: Boolean(dockProcess && dockProcess.exitCode === null), fileManagerRunning: Boolean(fileManagerProcess && fileManagerProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
-  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, stopLauncher, dispose, stats, injectInput, captureFrame });
+  const windows = async () => {
+    await ensureDisplay();
+    const result = await exec('xprop', ['-root', '_NET_CLIENT_LIST'], { env: environment, timeout: 2000 });
+    const ids = [...new Set(String(result.stdout).match(/0x[0-9a-f]+/giu) || [])].filter(id => Number(id) > 0).slice(0, 64);
+    return Promise.all(ids.map(async windowId => {
+      const name = await exec('xdotool', ['getwindowname', windowId], { env: environment, timeout: 2000 });
+      return { windowId, title: String(name.stdout).trim().slice(0, 512) };
+    }));
+  };
+  const focusWindow = async (windowId, beforeCommand) => {
+    const id = String(windowId || '');
+    if (!/^0x[0-9a-f]{1,16}$/iu.test(id) || !(await windows()).some(row => Number(row.windowId) === Number(id))) throw inputError('windowId must identify a current desktop window');
+    beforeCommand?.();
+    await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 2000 });
+    return { windowId: id, focused: true };
+  };
+  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, stopLauncher, dispose, stats, injectInput, captureFrame, windows, focusWindow, launchApplication });
 }

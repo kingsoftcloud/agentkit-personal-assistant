@@ -111,7 +111,7 @@ export function renderMarkdown(h, source, styles = {}) {
     if (node.type === 'code') return h('code', { key, style: styles.inlineCode }, node.text);
     if (node.type === 'strong') return h('strong', { key }, node.text);
     if (node.type === 'em') return h('em', { key }, node.text);
-    if (node.type === 'link') return h('a', { key, href: node.href, target: '_blank', rel: 'noreferrer noopener', style: styles.link }, node.text);
+    if (node.type === 'link') return /^(https?:|mailto:|cloud-file:)/iu.test(node.href) ? h('a', { key, href: node.href, target: '_blank', rel: 'noreferrer noopener', style: styles.link }, node.text) : h('span', { key }, node.text);
     return h('span', { key }, node.text);
   });
   return blocks.map((block, order) => {

@@ -1,6 +1,6 @@
-import { CLOUD_BROWSER_TOOL_NAMES, CLOUD_EXECUTION_TOOL_NAMES } from './cloud-computer-tools.mjs';
+import { CLOUD_BROWSER_TOOL_NAMES, CLOUD_EXECUTION_TOOL_NAMES, CLOUD_DESKTOP_TOOL_NAMES } from './cloud-computer-tools.mjs';
 
-export const PA_SAFE_TOOL_NAMES = Object.freeze([...CLOUD_BROWSER_TOOL_NAMES, ...CLOUD_EXECUTION_TOOL_NAMES, 'bot_memory_search', 'bot_memory_save', 'bot_plan_update']);
+export const PA_SAFE_TOOL_NAMES = Object.freeze([...CLOUD_BROWSER_TOOL_NAMES, ...CLOUD_EXECUTION_TOOL_NAMES, ...CLOUD_DESKTOP_TOOL_NAMES, 'assistant_schedule', 'bot_memory_search', 'bot_memory_save', 'bot_plan_update']);
 const safe = new Set(PA_SAFE_TOOL_NAMES);
 
 /** deny 优先；空 allowlist 是零权限。任何 Bot 配置都不能扩大固定 PA 安全面。 */

@@ -118,6 +118,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
   const [sending, setSending] = useState(false);
   // 回合已提交、助理还没出第一条消息时的等待态：不给反馈会让人以为没发出去。
   const [awaiting, setAwaiting] = useState(false);
+  const [progressText, setProgressText] = useState('');
   const cursorRef = useRef(0);
   const outboxRef = useRef(new Map());
   const generationRef = useRef(0);
@@ -238,6 +239,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
         mergeEvents(page?.events);
         if (Array.isArray(page.turns)) {
           setAwaiting(page.turns.some(turn => ['queued', 'running'].includes(turn.status)));
+          const active = page.turns.findLast(turn => ['queued', 'running'].includes(turn.status));
+          const labels = { cloud_computer: '操作云电脑', cloud_workspace: '处理云端文件', cloud_bash: '执行云端命令', cloud_run_code: '运行云端代码', assistant_schedule: '设置云端任务' };
+          const tool = active?.progress?.tool;
+          setProgressText(tool ? `${active.progress.state === 'running' ? '正在' : '已完成'}${labels[tool] || (tool.startsWith('cloud_browser_') ? '操作云端浏览器' : '执行工具')}` : '');
           mergeEvents(page.turns.filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn.status)).map(turn => ({ type: 'step', id: `turn-status-${turn.turnId}`, text: `任务${turn.status === 'failed' ? '失败' : '已中断'}：${turn.error || '请检查任务状态后重试'}` })));
         }
         setError('');
@@ -264,7 +269,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
     event.target.value = '';
     const loaded = [];
     for (const file of files.slice(0, 4)) {
-      if (!file || file.size > 8 * 1024 * 1024) continue;
+      if (!file || file.size > 512 * 1024) { setError('每个附件最多 512 KiB，请先压缩或拆分文件'); continue; }
       const dataUrl = await new Promise(resolve => {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ''));
@@ -278,16 +283,24 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
   };
 
   const submit = async (retryItem = null) => {
-    const content = retryItem?.text ?? draft.trim();
+    const content = retryItem?.text ?? (draft.trim() || (attachments.length ? '请查看附件。' : ''));
     if (!content || sending || !sessionId || phase !== 'ready') return;
-    const item = retryItem ?? { clientTurnId: crypto.randomUUID(), text: content, sessionId };
+    setSending(true);
+    let item = retryItem;
+    if (!item) {
+      const uploaded = [];
+      try {
+        for (const attachment of attachments) uploaded.push(await call('personal-assistant.file.upload', { sessionId, name: attachment.name, dataUrl: attachment.dataUrl }));
+        item = { clientTurnId: crypto.randomUUID(), text: content, sessionId, attachments: uploaded.map(({ path, name, mediaType, bytes }) => ({ path, name, mediaType, bytes })) };
+      } catch (failure) { setError(failure.message || '文件上传失败，消息尚未发送'); setSending(false); return; }
+    }
     const localId = `local-user-${item.clientTurnId}`;
     outboxRef.current.set(item.clientTurnId, item);
     followLatestRef.current = true;
-    setSending(true); setDraft(''); setError(''); setAwaiting(true);
+    setSending(true); setDraft(''); setAttachments([]); setError(''); setAwaiting(true);
     setMessages(previous => previous.some(row => row.clientTurnId === item.clientTurnId) ? previous.map(row => row.clientTurnId === item.clientTurnId ? { ...row, status: 'pending' } : row) : [...previous, { id: localId, clientTurnId: item.clientTurnId, role: 'user', text: content, done: false, status: 'pending' }]);
     try {
-      const receipt = await call('personal-assistant.turn.submit', { sessionId: item.sessionId, text: content, clientTurnId: item.clientTurnId });
+      const receipt = await call('personal-assistant.turn.submit', { sessionId: item.sessionId, text: content, clientTurnId: item.clientTurnId, attachments: item.attachments || [] });
       if (!aliveRef.current) return;
       outboxRef.current.delete(item.clientTurnId);
       setMessages(previous => previous.map(row => row.clientTurnId === item.clientTurnId ? { ...row, status: 'accepted', turnId: receipt.turnId } : row));
@@ -303,9 +316,20 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
     h('h1', { style: styles.title }, '个人助理'),
     h('span', { style: styles.status }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
     h('span', { style: styles.spacer }),
-    onOpenComputer ? h('button', { type: 'button', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', style: { background: 'transparent', border: 0, color: 'inherit', cursor: 'pointer' } }, '云电脑') : null);
+    onOpenComputer ? h('button', { type: 'button', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
 
-  return h('section', { 'data-personal-assistant-conversation': 'true', style: styles.page }, header,
+  return h('section', { 'data-personal-assistant-conversation': 'true', style: styles.page, onClick: async event => {
+    const link = event.target.closest?.('a[href^="cloud-file:"]');
+    if (!link) return;
+    event.preventDefault();
+    try {
+      const value = await call('personal-assistant.file.download', { sessionId, path: decodeURIComponent(link.getAttribute('href').slice('cloud-file:'.length)) });
+      const bytes = Uint8Array.from(atob(value.data), char => char.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+      const download = document.createElement('a'); download.href = url; download.download = value.name; download.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (failure) { setError(failure.message || '云端文件下载失败'); }
+  } }, header,
     h('style', null, '@keyframes pa-awaiting { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }'),
     error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } }, error) : null,
     h('div', { ref: scrollerRef, 'data-personal-assistant-messages': 'true', style: styles.scroller, onScroll: event => {
@@ -330,7 +354,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
         awaiting ? h('div', { key: 'awaiting', style: styles.row },
           h('span', { style: styles.who }, '助理'),
           h('div', { style: { ...styles.bubble, color: 'var(--dsw-alias-label-secondary, #536174)' } },
-            h('span', { style: styles.pulse }, '正在处理…'))) : null)),
+            h('span', { style: styles.pulse }, progressText || '正在处理…'))) : null)),
     h('div', { 'data-personal-assistant-composer': 'true', style: styles.composer },
       h('div', { style: styles.composerInner },
         attachments.length > 0 ? h('div', { style: styles.attachRow }, attachments.map(item => h('span', { key: item.id, style: styles.attach },
@@ -350,7 +374,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
           },
         }),
         h('div', { style: styles.composerBar },
-          h('button', { 'aria-label': '添加附件', style: styles.iconButton, disabled: true, title: '云端附件上传尚未开放', onClick: () => fileRef.current?.click() }, plusGlyph(h)),
+          h('button', { 'aria-label': '添加附件', style: styles.iconButton, disabled: phase !== 'ready' || sending, title: '上传到云电脑：最多 4 个文件，每个 512 KiB', onClick: () => fileRef.current?.click() }, plusGlyph(h)),
           h('input', { ref: fileRef, type: 'file', multiple: true, accept: 'image/*,.txt,.md,.json,.pdf', style: { display: 'none' }, onChange: pickFiles }),
           h('span', { style: styles.spacer }),
           h('button', {
