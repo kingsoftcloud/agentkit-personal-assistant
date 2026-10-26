@@ -419,7 +419,7 @@ export function createDesktopController({
       await ensureDisplay();
       collectorFailure = undefined; latestFrame = undefined;
       let stderr = '';
-      const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'warning', '-nostdin', '-f', 'x11grab', '-draw_mouse', '0', '-video_size', `${width}x${height}`, '-framerate', String(DESKTOP_CAPTURE_FPS), '-i', `${display}.0+0,0`, '-an', '-vf', `setpts=N/(${DESKTOP_CAPTURE_FPS}*TB)`, '-c:v', 'mjpeg', '-pix_fmt', 'yuvj420p', '-filter_threads', '2', '-q:v', '8', '-threads', '2', '-fps_mode', 'passthrough', '-f', 'image2pipe', 'pipe:1'], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'warning', '-nostdin', '-f', 'x11grab', '-draw_mouse', '0', '-video_size', `${width}x${height}`, '-framerate', String(DESKTOP_CAPTURE_FPS), '-i', `${display}.0+0,0`, '-an', '-vf', `setpts=N/(${DESKTOP_CAPTURE_FPS}*TB)`, '-c:v', 'mjpeg', '-pix_fmt', 'yuvj444p', '-filter_threads', '2', '-q:v', '3', '-threads', '2', '-fps_mode', 'passthrough', '-f', 'image2pipe', 'pipe:1'], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
       collector = child;
       const receive = createMjpegFrameParser({ onFrame: data => {
         if (collector !== child || disposed) return;
