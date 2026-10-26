@@ -15,23 +15,27 @@ const frame = (opcode, payload = Buffer.alloc(0)) => {
 const accept = key => createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
 const jsonFrame = value => frame(1, JSON.stringify(value));
 export const DESKTOP_MAX_PENDING_BYTES = 2 * (maxFrame + 1024);
+export const CLOUD_SESSION_MAX_PENDING_BYTES = 1024 * 1024;
 
-/** 慢客户端最多保留两帧大小；等待 drain 时跳帧，不建立帧队列。 */
-export function createDesktopSocketWriter(socket) {
+function createBoundedSocketWriter(socket, maxPendingBytes) {
   let blocked = false;
   const drain = () => { blocked = false; };
   socket.on('drain', drain);
   return {
-    get ready() { return !socket.destroyed && !blocked && socket.writableLength < DESKTOP_MAX_PENDING_BYTES; },
+    get ready() { return !socket.destroyed && !blocked && socket.writableLength < maxPendingBytes; },
     write(packet) {
       if (socket.destroyed) return false;
-      if (socket.writableLength + packet.length > DESKTOP_MAX_PENDING_BYTES) { socket.destroy(); return false; }
+      if (socket.writableLength + packet.length > maxPendingBytes) { socket.destroy(); return false; }
       if (!socket.write(packet)) blocked = true;
       return true;
     },
     dispose() { socket.off('drain', drain); },
   };
 }
+/** 慢桌面客户端最多保留两帧；等待 drain 时跳帧，不建立帧队列。 */
+export const createDesktopSocketWriter = socket => createBoundedSocketWriter(socket, DESKTOP_MAX_PENDING_BYTES);
+/** 独立会话连接容纳一个 512 KiB 文件的 base64 响应；仍有固定内存上限。 */
+export const createCloudSessionSocketWriter = socket => createBoundedSocketWriter(socket, CLOUD_SESSION_MAX_PENDING_BYTES);
 export { verifyDesktopPermit } from './desktop-permit.mjs';
 const loopback = address => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
 const equalToken = (left, right) => {
@@ -81,7 +85,8 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     if (head?.length) socket.unshift(head);
     const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, paused: false, idle: false, idleTimer: null, idleTransition: null, suspendSupported: false, epoch: 0, lastInputAt: Date.now(), lastFrameSeq: -1, timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve(), pendingMessages: 0 };
     const writer = createDesktopSocketWriter(socket);
-    const send = value => { if (!state.closed) writer.write(jsonFrame(value)); };
+    let sessionWriter;
+    const send = value => { if (!state.closed) (value.type === 'session.response' ? sessionWriter || writer : writer).write(jsonFrame(value)); };
     const releaseResources = async () => {
       const sessionId = state.sessionId, leaseId = state.autoLease ? state.leaseId : null;
       state.sessionId = null; state.autoLease = false; state.leaseId = null;
@@ -95,7 +100,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       if (state.closed) return releaseResources();
       if (event) send({ type: 'closed', retryable: false, ...event });
       state.closed = true; state.epoch++; clearTimeout(state.timer); clearInterval(state.renewTimer); clearTimeout(state.idleTimer);
-      state.timer = null; state.renewTimer = null; writer.dispose();
+      state.timer = null; state.renewTimer = null; writer.dispose(); sessionWriter?.dispose();
       const payload = Buffer.alloc(2); payload.writeUInt16BE(closeCode);
       try { socket.end(frame(8, Buffer.concat([payload, Buffer.from(event?.reason || 'desktop-closed')]))); } catch {}
       await releaseResources();
@@ -220,6 +225,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
           if (body.agentId !== assistantId || (claims && body.botId !== claims.botId)) throw Object.assign(new Error('会话身份与票据不一致'), { code: 'CLOUD_SESSION_IDENTITY_MISMATCH', status: 403 });
           if (state.sessionId) throw Object.assign(new Error('会话与桌面需要独立连接'), { code: 'CLOUD_SESSION_CONNECTION_CONFLICT', status: 409 });
           if (typeof sessionRequest !== 'function') throw Object.assign(new Error('请升级云端会话服务'), { code: 'CLOUD_SESSION_UNAVAILABLE', status: 503 });
+          sessionWriter ??= createCloudSessionSocketWriter(socket);
           try {
             const value = await sessionRequest({ agentId: assistantId, botId: botIdOf(body.botId), operation: body.operation, payload: body.payload });
             send({ type: 'session.response', requestId: body.requestId, agentId: assistantId, botId: body.botId, ok: true, value });
@@ -235,6 +241,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
           return close();
         }
         if (body.type === 'open') {
+          if (sessionWriter) throw Object.assign(new Error('会话与桌面需要独立连接'), { code: 'CLOUD_SESSION_CONNECTION_CONFLICT', status: 409 });
           if (claims?.botId === DIRECTORY_BOT_ID) throw Object.assign(new Error('目录授权不能打开桌面'), { code: 'DESKTOP_DIRECTORY_READ_ONLY', status: 403 });
           if (state.sessionId) throw Object.assign(new Error('desktop session already open'), { code: 'DESKTOP_SESSION_ALREADY_OPEN', status: 409 });
           if (claims && body.botId !== claims.botId) throw Object.assign(new Error('desktop Bot does not match permit'), { code: 'DESKTOP_BOT_MISMATCH', status: 403 });
