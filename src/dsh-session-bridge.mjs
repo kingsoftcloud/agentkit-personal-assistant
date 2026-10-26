@@ -169,7 +169,8 @@ export function createDshTurnBridge({ ctx, sessionController, registry, platform
         const latest = events.findLast(event => event.type === 'tool/call' || event.type === 'tool/result');
         if (latest && latest.seq !== progressSeq) {
           progressSeq = latest.seq;
-          const called = latest.type === 'tool/call' ? latest : events.findLast(event => event.type === 'tool/call' && event.data?.callId === latest.data?.callId);
+          // DSH 的结果事件承载 ToolResultMessage，关联键在 message.toolCallId。
+          const called = latest.type === 'tool/call' ? latest : events.findLast(event => event.type === 'tool/call' && event.data?.callId === latest.data?.message?.toolCallId);
           await onProgress?.({ tool: String(called?.data?.name || '').slice(0, 64), state: latest.type === 'tool/call' ? 'running' : 'settled' });
         }
         const end = events.find(event => event.type === 'turn/end');

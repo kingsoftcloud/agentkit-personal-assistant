@@ -11,7 +11,7 @@ test('云端回合完成即交还电脑，后续定时任务不等待旧回合�
       resolveAgent: async () => ({ agent }),
       inspect: async () => created ? { events } : undefined,
       create: async () => { created = true; },
-      prompt: async () => { events.push({ seq: events.length + 1, type: 'tool/call', data: { name: 'cloud_bash', callId: 'test-call' } }, { seq: events.length + 2, type: 'tool/result', data: { callId: 'test-call' } }, { seq: events.length + 3, type: 'turn/end', data: { reason: { kind: 'completed' } } }); return { accepted: true }; },
+      prompt: async () => { events.push({ seq: events.length + 1, type: 'tool/call', data: { name: 'cloud_bash', callId: 'test-call' } }, { seq: events.length + 2, type: 'tool/result', data: { message: { role: 'tool', toolCallId: 'test-call', content: [] } } }, { seq: events.length + 3, type: 'turn/end', data: { reason: { kind: 'completed' } } }); return { accepted: true }; },
     },
   });
   let progress;
