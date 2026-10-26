@@ -161,3 +161,12 @@ test('未开通的新 profile 安装只注册 bundle，不伪造云绑定', asyn
   await assert.rejects(fs.lstat(join(f.profile, 'cordis.patch.yml')), { code: 'ENOENT' });
   assert.doesNotMatch(JSON.stringify(p), /gatewayUrl|agentId|apiKey|defaultBotId/);
 });
+
+test('损坏的 profile JSON 不把配置片段泄露到安装错误', async t => {
+  const f = await fixture(t); await fs.writeFile(join(f.profile, 'package.json'), 'PRIVATE_CREDENTIAL_SHOULD_STAY_PRIVATE');
+  const cli = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/install-local.mjs');
+  const result = spawnSync(process.execPath, [cli, '--profile', f.profile, '--manifest', f.manifest, '--apply'], { encoding: 'utf8' });
+  assert.equal(result.status, 1); assert.match(result.stderr, /不是有效 JSON/);
+  assert.doesNotMatch(result.stdout + result.stderr, /PRIVATE_CREDENTIAL_SHOULD_STAY_PRIVATE/);
+  await assert.rejects(fs.lstat(join(f.profile, '.pa-backups')), { code: 'ENOENT' });
+});

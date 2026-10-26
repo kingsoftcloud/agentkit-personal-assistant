@@ -14,6 +14,9 @@ const DSH = '/Applications/AgentKit Studio.app/Contents/Resources/app.asar/dsh/n
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const stat = async path => fs.lstat(path).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
 const fail = message => { throw new Error(message); };
+function parseJson(bytes, label) {
+  try { return JSON.parse(bytes.toString()); } catch (error) { fail(label + ' 不是有效 JSON；不打印原文'); }
+}
 
 function readTar(archive) {
   const tar = gunzipSync(archive, { maxOutputLength: 200 * 1024 * 1024 });
@@ -98,9 +101,9 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
   const packagePath = join(profile, 'package.json');
   const packageInfo = await stat(packagePath);
   if (!packageInfo?.isFile()) fail('profile package.json 不存在或为链接');
-  const original = await fs.readFile(packagePath), pkg = JSON.parse(original);
+  const original = await fs.readFile(packagePath), pkg = parseJson(original, 'profile package.json');
   const manifestPath = resolve(manifest), manifestBytes = await fs.readFile(manifestPath);
-  const release = JSON.parse(manifestBytes);
+  const release = parseJson(manifestBytes, 'release manifest');
   if (!Array.isArray(release.packages) || release.packages.length !== 2) fail('manifest 必须恰好包含两个包');
   const names = release.packages.map(item => item.pkgName);
   if (new Set(names).size !== 2 || !names.includes(PA) || !names.includes(SIDEBAR)) fail('manifest 包集合不正确');
@@ -115,7 +118,7 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
     const archive = await fs.readFile(source);
     if (sha256(archive) !== item.sha256) fail('安装包 SHA256 不匹配：' + item.pkgName);
     const files = readTar(archive), metaFile = files.find(file => file.path === 'package.json' && !file.directory);
-    const meta = metaFile && JSON.parse(metaFile.data.toString());
+    const meta = metaFile && parseJson(metaFile.data, '归档 package.json');
     if (meta?.name !== item.pkgName || meta?.version !== item.version) fail('归档包名或版本不匹配：' + item.pkgName);
     const clientPath = item.pkgName === PA ? 'dist/client.js' : 'lib/client.js';
     const client = files.find(file => file.path === clientPath && !file.directory);
