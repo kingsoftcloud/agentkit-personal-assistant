@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createPersonalAssistantHostGateway } from '../src/host-gateway.mjs';
-import { DIRECTORY_BOT_ID, publicBotDirectory } from '../src/client/bot-directory.mjs';
+import { DIRECTORY_BOT_ID, publicBotDirectory, resolveAssistantBotId } from '../src/client/bot-directory.mjs';
 
 test('真实目录通过已有网关鉴权通道查询，Host 不再返回固定空数组', async () => {
   const calls = [], sockets = [];
@@ -102,4 +102,13 @@ for (const code of [1006, 1008]) test(`目录关闭只保留安全诊断码 ${co
     assert.equal(error.message.includes('must-never-leak'), false);
     return true;
   });
+});
+
+
+test('唯一助理由系统绑定，默认身份不受目录排序影响，失配不静默切换', () => {
+  const rows = [{ botId: 'researcher' }, { botId: 'default' }];
+  assert.equal(resolveAssistantBotId(rows), 'default');
+  assert.equal(resolveAssistantBotId(rows, 'researcher'), 'researcher');
+  assert.throws(() => resolveAssistantBotId(rows, 'missing'), { code: 'PERSONAL_ASSISTANT_BINDING_UNAVAILABLE' });
+  assert.throws(() => resolveAssistantBotId([{ botId: 'one' }, { botId: 'two' }]), { code: 'PERSONAL_ASSISTANT_BINDING_UNAVAILABLE' });
 });

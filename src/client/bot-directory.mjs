@@ -11,3 +11,13 @@ export function publicBotDirectory(rows) {
     return { botId, displayName: botId === 'default' && displayName === 'Personal Assistant' ? '默认助理' : botId === 'researcher' && displayName === 'Researcher' ? '研究助理' : displayName };
   });
 }
+
+/** 系统确定唯一绑定；不把内部逻辑 Bot 变成用户必须选择的产品分类。 */
+export function resolveAssistantBotId(rows, boundBotId = '') {
+  const bots = publicBotDirectory(rows);
+  const bound = String(boundBotId || '').trim();
+  const selected = bound ? bots.find(bot => bot.botId === bound)
+    : bots.find(bot => bot.botId === 'default') || (bots.length === 1 ? bots[0] : undefined);
+  if (!selected) throw Object.assign(new Error('云端助理绑定尚未就绪，请稍后重试'), { code: 'PERSONAL_ASSISTANT_BINDING_UNAVAILABLE' });
+  return selected.botId;
+}

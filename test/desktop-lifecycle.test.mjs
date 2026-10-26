@@ -263,7 +263,8 @@ async function connectPanel(panel, mode = 'read') {
 
 test('聊天旁的云电脑默认旁观，不占助理租约；显式申请控制才获取 control 票据', async t => {
   const panel = panelHarness(t, { variant: 'computer' });
-  await flush(); panel.click('连接云电脑'); await flush();
+  await flush();
+  assert.equal(panel.tickets().length, 1, 'opening the bound computer pane connects automatically');
   assert.equal(panel.tickets().at(-1).payload.mode, 'read');
   const viewer = panel.sockets.at(-1); viewer.open();
   assert.equal(viewer.sent[0].mode, 'read');
@@ -514,78 +515,31 @@ test('未开通/空目录只展示一个检查入口，没有凭据字段或可�
   }
 });
 
-test('助理只从真实目录选择，诊断字段折叠，页面默认不连接电脑', async t => {
-  const panel = panelHarness(t, { bots: [{ botId: 'writer', displayName: '写作助理' }, { botId: 'researcher', displayName: '研究助理' }] }); await flush();
+test('界面不展示助理分类或选择器，系统固定使用宿主绑定', async t => {
+  const panel = panelHarness(t, { bots: [{ botId: 'researcher', displayName: '研究助理' }, { botId: 'writer', displayName: '写作助理' }] }); await flush();
   const nodes = panel.nodes();
-  const selector = nodes.find(node => node.type === 'select');
-  assert.equal(selector.props.value, 'writer');
-  assert.deepEqual(selector.children.map(node => node.children[0]), ['写作助理', '研究助理']);
+  assert.equal(nodes.some(node => node.type === 'select'), false);
+  assert.doesNotMatch(panel.visibleText(), /写作助理|研究助理|默认助理|Bot ID/u);
   assert.equal(nodes.some(node => node.type === 'details' && node.props.open), false);
-  const diagnostic = nodes.find(node => node.type === 'details');
-  assert.match(JSON.stringify(diagnostic), /ar-test|writer/u);
-  assert.equal(nodes.some(node => node.type === 'small' && node.props['data-personal-assistant-build']), true);
   assert.equal(panel.sockets.length, 0);
-  assert.equal(panel.requests.filter(row => row.operation.endsWith('.bots.list')).length, 1);
-});
-
-
-test('目录临时故障可选择默认助理，恢复目录后覆盖回退项', async t => {
-  for (const error of [
-    failure(502, 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE'),
-    failure(504, 'PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT'),
-  ]) await t.test(error.code, async child => {
-    const options = { directoryError: error };
-    const panel = panelHarness(child, options); await flush();
-    const select = panel.nodes().find(node => node.type === 'select');
-    assert.ok(select, 'fallback supplies a fixed choice rather than a text field');
-    assert.equal(select.props.value, 'default');
-    assert.deepEqual(select.children.map(node => node.children[0]), ['默认助理']);
-    assert.match(panel.visibleText(), /暂时无法读取助理列表，已使用默认助理/u);
-    assert.equal(panel.tickets().length, 0, 'fallback does not auto-connect');
-    panel.click('连接云电脑'); await flush();
-    assert.equal(panel.tickets().length, 1);
-    assert.equal(panel.tickets()[0].payload.botId, 'default');
-    assert.equal(panel.tickets()[0].payload.mode, 'control');
-    panel.click('断开连接'); await flush();
-    options.directoryError = null; options.bots = [{ botId: 'writer', displayName: '写作助理' }];
-    panel.click('刷新助理列表'); await flush();
-    const refreshed = panel.nodes().find(node => node.type === 'select');
-    assert.equal(refreshed.props.value, 'writer');
-    assert.deepEqual(refreshed.children.map(node => node.children[0]), ['写作助理']);
-    assert.doesNotMatch(panel.visibleText(), /已使用默认助理/u);
-    assert.equal(panel.tickets().length, 1, 'directory refresh does not open a computer');
-  });
-});
-
-test('旧目录协议只在折叠诊断提供手动标识，云端目录恢复后自动隐藏', async t => {
-  const options = { directoryError: failure(409, 'PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED') };
-  const panel = panelHarness(t, options); await flush();
-  assert.equal(panel.nodes().some(node => node.type === 'select'), false);
-  assert.equal(panel.nodes().find(node => node.type === 'details').props.open, false);
-  assert.equal(panel.tickets().length, 0);
-  assert.match(panel.visibleText(), /当前云端版本暂不支持助理列表/u);
-  panel.click('选择已有助理');
-  assert.equal(panel.nodes().find(node => node.type === 'details').props.open, true);
-  const field = () => panel.nodes().find(node => node.type === 'input' && node.props['aria-label'] === '已有助理标识');
-  assert.ok(field());
-  field().props.onChange({ target: { value: '__directory__' } });
-  panel.click('使用此助理'); await flush();
-  assert.equal(panel.nodes().some(node => node.type === 'select'), false);
-  assert.equal(panel.tickets().length, 0);
-  assert.match(panel.visibleText(), /请输入有效的已有助理标识/u);
-  field().props.onChange({ target: { value: 'researcher' } });
-  panel.click('使用此助理'); await flush();
-  assert.equal(panel.nodes().find(node => node.type === 'select').props.value, 'researcher');
-  assert.equal(panel.tickets().length, 0, '选择标识不会创建助理、签票或自动连接');
   panel.click('只读旁观'); await flush();
-  assert.equal(panel.tickets()[0].payload.botId, 'researcher');
-  assert.equal(panel.tickets()[0].payload.mode, 'read');
-  panel.click('断开连接'); await flush();
-  options.directoryError = null; options.bots = [{ botId: 'writer', displayName: '写作助理' }];
-  panel.click('刷新助理列表'); await flush();
-  assert.equal(field(), undefined);
-  assert.equal(panel.nodes().find(node => node.type === 'select').props.value, 'writer');
-  assert.equal(panel.tickets().length, 1);
+  assert.equal(panel.tickets().at(-1).payload.botId, 'writer', 'directory order cannot change the binding');
+});
+
+test('目录超时、旧协议或绑定消失时不让用户填 Bot ID，也不切换到其它助理', async t => {
+  for (const options of [
+    { directoryError: failure(502, 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE') },
+    { directoryError: failure(504, 'PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT') },
+    { directoryError: failure(409, 'PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED') },
+    { bots: [{ botId: 'researcher', displayName: '研究助理' }] },
+  ]) await t.test(JSON.stringify(options), async child => {
+    const panel = panelHarness(child, options); await flush();
+    assert.equal(panel.nodes().some(node => node.type === 'select'), false);
+    assert.equal(panel.nodes().some(node => node.type === 'input' && node.props['aria-label'] === '已有助理标识'), false);
+    assert.equal(panel.tickets().length, 0);
+    assert.doesNotMatch(panel.visibleText(), /使用此助理|默认助理|研究助理/u);
+    assert.ok(panel.nodes().some(node => node.type === 'button'), 'one recovery action remains available');
+  });
 });
 
 test('目录鉴权失败、格式错误和空目录不伪造默认助理', async t => {
