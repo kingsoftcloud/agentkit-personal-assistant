@@ -280,9 +280,8 @@ function downloadTimeout(value) {
 }
 
 /**
- * One cloud browser per managed Session. It launches lazily on first use and
- * never reconnects: an idle or explicit close disposes the Chromium process
- * group, and disposal refuses all later calls.
+ * 每个托管 Session 一个懒启动浏览器。可见桌面保留窗口，CDP 异常后恢复最后
+ * 已知的合法 URL；非桌面模式仍按空闲超时关闭，显式 dispose 后拒绝新调用。
  */
 export function createCloudBrowser({
   workspace, sessionId = 'session', env = process.env, spawn = spawnChild,
@@ -456,6 +455,7 @@ export function createCloudBrowser({
     let url = typeof state.url === 'string' && state.url ? state.url : lastUrl;
     try { url = urlPolicy(String(url)).url.href; }
     catch { throw fail('当前页面地址已被拒绝', 'ASSISTANT_BROWSER_URL_REFUSED'); }
+    lastUrl = url;
     const text = sliceUtf8(typeof state.text === 'string' ? state.text : '', MAX_SNAPSHOT_BYTES);
     const links = Array.isArray(state.links) ? state.links.slice(0, MAX_LINKS).map(link => ({
       text: sliceUtf8(typeof link?.text === 'string' ? link.text : '', 256).text,

@@ -10,7 +10,7 @@ async function fixture(t, options = {}) {
   const transports = [], commands = [];
   const transportFactory = async () => {
     const page = { url: 'about:blank', title: 'Example Domain' };
-    const transport = { disposed: false, connection: {
+    const transport = { disposed: false, page, connection: {
       closed: false,
       async send(method, params) {
         commands.push({ method, params });
@@ -50,6 +50,16 @@ test('CDP 异常断开后在同一浏览器管理器恢复最后合法 URL，不
   assert.deepEqual(commands.filter(command => command.method === 'Target.createTarget').map(command => command.params.url),
     ['about:blank', 'https://example.com/?recover=last-visible-page']);
   assert.equal((await browser.snapshot()).url, view.url);
+});
+
+test('人工导航后的快照更新最后已知 URL，异常恢复不回到旧工具地址', async t => {
+  const { browser, transports, commands } = await fixture(t);
+  await browser.open('https://example.com/?old=tool');
+  transports[0].page.url = 'https://example.org/?new=human';
+  assert.equal((await browser.snapshot()).url, 'https://example.org/?new=human');
+  transports[0].connection.closed = true;
+  assert.equal((await browser.openDesktopWindow()).url, 'https://example.org/?new=human');
+  assert.equal(commands.filter(command => command.method === 'Target.createTarget').at(-1).params.url, 'https://example.org/?new=human');
 });
 
 test('非桌面浏览器仍按原有超时关闭，显式关闭不会恢复旧页面', async t => {
