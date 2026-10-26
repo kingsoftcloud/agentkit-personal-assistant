@@ -1,6 +1,6 @@
 {
   "name": "@kingsoftcloud/agentkit-personal-assistant",
-  "version": "0.1.1-cloud-session.20261026",
+  "version": "0.1.2-desktop.20261026",
   "description": "Standalone personal assistant DSH plugin with multi-Bot profiles and an explicit Cloud Computer Broker boundary.",
   "homepage": "https://ezone.ksyun.com/code/agentkit/agentkit-personal-assistant",
   "repository": {
@@ -67,8 +67,7 @@
         "@deepseek-ai/dsh-client-ui-layout"
       ],
       "external": [
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-dockkit"
+        "@deepseek-ai/dsh-client-connection"
       ]
     },
     "bundle": {

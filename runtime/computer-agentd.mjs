@@ -1,14 +1,21 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { pathToFileURL } from 'node:url';
+import { verifyDesktopPermit } from './desktop-permit.mjs';
 import { createCloudBrowser } from './cloud-browser.mjs';
 import { createCloudExecutor } from './cloud-execution.mjs';
 import { createDesktopController } from './desktop-session.mjs';
 
-const host = process.env.COMPUTER_HOST || '127.0.0.1';
-const port = Number(process.env.COMPUTER_PORT || 8787);
-const workspace = process.env.AGENTKIT_WORKSPACE_DIR || '/workspace';
-const identity = Object.freeze({ userId: process.env.USER_ID || '', assistantId: process.env.ASSISTANT_ID || '', computerId: process.env.COMPUTER_ID || '' });
+export function createComputerAgentServer({ env = process.env, desktopFactory = createDesktopController, browserFactory = createCloudBrowser, executorFactory = createCloudExecutor } = {}) {
+const host = env.COMPUTER_HOST || '127.0.0.1';
+const port = Number(env.COMPUTER_PORT || 8787);
+const workspace = env.AGENTKIT_WORKSPACE_DIR || '/workspace';
+const identity = Object.freeze({ userId: env.USER_ID || '', assistantId: env.ASSISTANT_ID || '', computerId: env.COMPUTER_ID || '' });
 const leases = new Map();
+const controlGrants = new Map(), usedControlPermits = new Map();
+const actionContext = new AsyncLocalStorage();
+let starting = env.AGENTKIT_DESKTOP_MODE === '1', startupFailure, warmup, warmupMs = 0, closing = false;
 let browser;
 let desktopBrowserOpening;
 let executor;
@@ -23,16 +30,14 @@ const closeDesktopBrowser = async () => {
 };
 const ensureDesktopBrowser = async () => {
   if (desktopBrowserOpening) return desktopBrowserOpening;
-  browser ||= createCloudBrowser({ workspace });
+  browser ||= browserFactory({ workspace, env, beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); } });
   if (!browser.available) throw Object.assign(new Error(browser.resolution?.reason || 'desktop browser unavailable'), { code: 'ASSISTANT_BROWSER_UNAVAILABLE', status: 503 });
-  // A visible browser window is part of the desktop session.  The desktop
-  // mode launcher uses DISPLAY=:99 and kiosk/X11 flags; this is intentionally
-  // separate from the headless cloud_browser tool path.
+  // 桌面窗口和助理工具始终复用同一个可见 Chromium 实例。
   // 首帧只等待本地窗口，外网页面加载由明确的浏览器操作触发。
-  desktopBrowserOpening = browser.openDesktopWindow().catch(error => { desktopBrowserOpening = undefined; throw error; });
-  return desktopBrowserOpening;
+  desktopBrowserOpening = browser.openDesktopWindow();
+  try { return await desktopBrowserOpening; } finally { desktopBrowserOpening = undefined; }
 };
-desktop = createDesktopController({ onStop: closeDesktopBrowser, onIdle: async owner => {
+desktop = desktopFactory({ onStop: closeDesktopBrowser, onIdle: async owner => {
   if (!owner.releaseLeaseOnIdle || !owner.leaseId) return;
   const lease = leases.get(identity.computerId);
   if (leaseIdentityMatches(lease, { ...identity, botId: owner.botId, taskId: owner.taskId, leaseId: owner.leaseId })) leases.delete(identity.computerId);
@@ -59,6 +64,15 @@ function identityMatches(body) {
 function expireLeases() {
   const now = Date.now();
   for (const [computerId, lease] of leases) if (!Number.isFinite(lease.expiresAt) || lease.expiresAt <= now) {
+    if (lease.kind === 'human') {
+      if (!lease.expiring) {
+        lease.expiring = true;
+        void desktop.setSessionControl({ sessionId: lease.sessionId, controllable: false }).finally(() => {
+          if (leases.get(computerId) === lease) leases.delete(computerId);
+        }).catch(() => {});
+      }
+      continue;
+    }
     leases.delete(computerId);
     desktop.closeSessionsForLease(lease.leaseId);
   }
@@ -66,21 +80,29 @@ function expireLeases() {
 function leaseIdentityMatches(lease, body) {
   return identityMatches(body) && lease && lease.botId === body.botId && lease.taskId === body.taskId && lease.leaseId === body.leaseId && lease.expiresAt > Date.now();
 }
+function assertAgentLease(body) {
+  const lease = leaseFor(body);
+  if (lease.kind === 'human') throw Object.assign(new Error('用户正在操作云电脑，请等待交还后继续'), { code: 'COMPUTER_USER_CONTROLLED', status: 409 });
+  return lease;
+}
 function leaseFor(body) {
   expireLeases();
   const lease = leases.get(body.computerId);
-  if (!leaseIdentityMatches(lease, body)) throw Object.assign(new Error('COMPUTER_LEASE_REQUIRED'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+  if (!leaseIdentityMatches(lease, body)) throw Object.assign(new Error(lease?.kind === 'human' ? '用户正在操作云电脑，请等待交还后继续' : 'COMPUTER_LEASE_REQUIRED'), { code: lease?.kind === 'human' ? 'COMPUTER_USER_CONTROLLED' : 'COMPUTER_LEASE_REQUIRED', status: 409 });
   return lease;
 }
 async function action(body) {
-  leaseFor(body);
+  const lease = assertAgentLease(body);
+  return actionContext.run({ ...body, leaseId: lease.leaseId }, async () => {
   const args = body.args || {};
   if (body.action === 'open') {
-    if (process.env.AGENTKIT_DESKTOP_MODE === '1') {
+    if (env.AGENTKIT_DESKTOP_MODE === '1') {
       await desktop.ensureDisplay();
+      assertAgentLease(body);
       await ensureDesktopBrowser();
     }
-    return (browser ||= createCloudBrowser({ workspace })).open(args.url);
+    assertAgentLease(body);
+    return (browser ||= browserFactory({ workspace, env, beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); } })).open(args.url);
   }
   if (body.action === 'snapshot') return browser?.snapshot();
   if (body.action === 'click') return browser?.click(args);
@@ -90,10 +112,11 @@ async function action(body) {
   if (body.action === 'download') return browser?.download(args);
   if (body.action === 'stop') { desktopBrowserOpening = undefined; return browser?.close(); }
   if (body.action === 'terminal.exec') {
-    executor ||= createCloudExecutor({ workspaceRoot: workspace });
+    executor ||= executorFactory({ workspaceRoot: workspace });
     return args.language === 'shell' ? executor.runBash(args) : executor.runCode(args);
   }
   throw new Error(`unsupported computer action: ${body.action}`);
+  });
 }
 function desktopIdentity(body) {
   if (!identityMatches(body)) throw Object.assign(new Error('COMPUTER_IDENTITY_MISMATCH'), { code: 'COMPUTER_IDENTITY_MISMATCH', status: 403 });
@@ -107,9 +130,29 @@ function desktopLease(body) {
   }
   return lease;
 }
+const viewControl = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controlAvailable: controlGrants.has(session.sessionId), controlEpoch: session.controlEpoch, handoffProtocol: 'desktop-handoff/v1' });
+function controlSession(body, checkEpoch = true) {
+  desktopIdentity(body);
+  const session = desktop.getSession(body.sessionId);
+  if (!session) throw Object.assign(new Error('DESKTOP_SESSION_NOT_FOUND'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+  const grant = controlGrants.get(session.sessionId);
+  if (!grant || grant.botId !== body.botId || grant.taskId !== body.taskId || session.botId !== body.botId || session.taskId !== body.taskId) throw Object.assign(new Error('桌面只读授权不能取得控制权'), { code: 'DESKTOP_CONTROL_GRANT_REQUIRED', status: 403 });
+  if (checkEpoch && (!Number.isSafeInteger(body.controlEpoch) || body.controlEpoch !== session.controlEpoch)) throw Object.assign(new Error('桌面控制代次已改变'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
+  return session;
+}
+async function releaseControl(body) {
+  const session = controlSession(body), lease = leases.get(identity.computerId);
+  if (!session.controllable) return viewControl(session);
+  if (!leaseIdentityMatches(lease, body) || lease.kind !== 'human' || lease.sessionId !== session.sessionId) throw Object.assign(new Error('COMPUTER_LEASE_REQUIRED'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+  // 清掉鼠标/修饰键后才开放租约，避免助理接到卡住的按键状态。
+  const changed = await desktop.setSessionControl({ sessionId: session.sessionId, controllable: false, controlEpoch: body.controlEpoch });
+  if (leases.get(identity.computerId) === lease) leases.delete(identity.computerId);
+  return { ...changed, controlAvailable: true, handoffProtocol: 'desktop-handoff/v1' };
+}
 const server = createServer(async (request, response) => {
-  if (request.method === 'GET' && request.url === '/health') return send(response, 200, { status: 'ok', ...identity });
-  if (request.method === 'GET' && request.url === '/v1/status') return send(response, 200, { status: 'ready', ...identity, capabilities: ['computer-broker/v1'] });
+  if (request.method === 'GET' && ['/health', '/v1/status'].includes(request.url) && (starting || startupFailure)) return send(response, 503, { status: starting ? 'starting' : 'error', error: startupFailure?.code || (startupFailure ? 'DESKTOP_STARTUP_FAILED' : undefined), desktopReady: false, ...identity });
+  if (request.method === 'GET' && request.url === '/health') return send(response, 200, { status: 'ok', desktopReady: !starting, warmupMs, ...identity });
+  if (request.method === 'GET' && request.url === '/v1/status') return send(response, 200, { status: 'ready', desktopReady: !starting, warmupMs, ...identity, capabilities: ['computer-broker/v1'] });
   if (request.method !== 'POST' || !request.url?.startsWith('/broker/')) return send(response, 404, { error: 'not_found' });
   try {
     const body = await readBody(request);
@@ -123,10 +166,10 @@ const server = createServer(async (request, response) => {
       if (typeof body.botId !== 'string' || !body.botId.trim() || body.botId.length > 128 || typeof body.taskId !== 'string' || !body.taskId.trim() || body.taskId.length > 128) return send(response, 400, { error: 'COMPUTER_LEASE_IDENTITY_INVALID' });
       const existing = leases.get(body.computerId);
       if (existing && existing.botId === body.botId && existing.taskId === body.taskId && body.idempotencyKey && existing.idempotencyKey === body.idempotencyKey) return send(response, 200, { protocol: body.protocol, lease: existing });
-      if (existing) return send(response, 409, { error: 'COMPUTER_LEASE_CONFLICT' });
+      if (existing) return send(response, 409, { error: existing.kind === 'human' ? 'COMPUTER_USER_CONTROLLED' : 'COMPUTER_LEASE_CONFLICT' });
       const ttlMs = Number(body.ttlMs || 60000);
       if (!Number.isSafeInteger(ttlMs) || ttlMs < 1000 || ttlMs > 300000) return send(response, 400, { error: 'COMPUTER_LEASE_TTL_INVALID' });
-      const lease = { ...identity, botId: body.botId, taskId: body.taskId, idempotencyKey: body.idempotencyKey, ttlMs, leaseId: randomUUID(), expiresAt: Date.now() + ttlMs };
+      const lease = { ...identity, kind: 'agent', botId: body.botId, taskId: body.taskId, idempotencyKey: body.idempotencyKey, ttlMs, leaseId: randomUUID(), expiresAt: Date.now() + ttlMs };
       leases.set(body.computerId, lease);
       return send(response, 200, { protocol: body.protocol, lease });
     }
@@ -140,19 +183,56 @@ const server = createServer(async (request, response) => {
     if (request.url === '/broker/lease/release') {
       const lease = leases.get(body.computerId);
       const released = Boolean(leaseIdentityMatches(lease, body));
-      if (released) { leases.delete(body.computerId); desktop.closeSessionsForLease(body.leaseId); }
+      if (released && lease.kind === 'human') await releaseControl({ ...body, sessionId: lease.sessionId, controlEpoch: desktop.getSession(lease.sessionId)?.controlEpoch });
+      else if (released) { leases.delete(body.computerId); desktop.closeSessionsForLease(body.leaseId); }
       return send(response, 200, { protocol: body.protocol, released });
     }
     if (request.url === '/broker/action') return send(response, 200, { protocol: body.protocol, ...(await action(body)) });
     if (request.url === '/broker/desktop/session') {
       const desktopIdentityValue = desktopIdentity(body);
       expireLeases();
+      let controlGrant;
+      if (body.mode === 'observe') {
+        const claims = await verifyDesktopPermit(body.controlPermit, { assistantId: identity.assistantId, env });
+        if (claims.mode !== 'control' || claims.botId === '__directory__' || claims.botId !== body.botId || !body.taskId || body.leaseId) throw Object.assign(new Error('桌面接管需要具名助理控制授权'), { code: 'DESKTOP_CONTROL_GRANT_REQUIRED', status: 403 });
+        for (const [nonce, expiry] of usedControlPermits) if (expiry <= Date.now()) usedControlPermits.delete(nonce);
+        if (usedControlPermits.has(claims.jti)) throw Object.assign(new Error('desktop permit already used'), { code: 'DESKTOP_UNAUTHORIZED', status: 401 });
+        usedControlPermits.set(claims.jti, claims.exp * 1000);
+        controlGrant = { botId: body.botId, taskId: body.taskId };
+      }
       const lease = body.leaseId ? desktopLease({ ...body, ...desktopIdentityValue }) : null;
       const opened = await desktop.openSession({ identity: desktopIdentityValue, botId: body.botId || null, controllable: Boolean(lease), leaseId: lease?.leaseId || null, taskId: body.taskId || null, releaseLeaseOnIdle: body.releaseLeaseOnIdle === true });
       try { await ensureDesktopBrowser(); }
       catch (error) { desktop.closeSession(opened.sessionId); throw error; }
-      return send(response, 200, opened);
+      if (controlGrant) controlGrants.set(opened.sessionId, controlGrant);
+      return send(response, 200, { ...opened, controlAvailable: Boolean(controlGrant), handoffProtocol: 'desktop-handoff/v1' });
     }
+    if (request.url === '/broker/desktop/control/acquire') {
+      const session = controlSession(body);
+      expireLeases();
+      const previous = leases.get(identity.computerId);
+      if (previous?.kind === 'human') {
+        if (previous.sessionId !== session.sessionId || previous.expiring) return send(response, 409, { error: 'COMPUTER_LEASE_CONFLICT' });
+        return send(response, 200, { ...viewControl(session), lease: previous });
+      }
+      const lease = { ...identity, kind: 'human', sessionId: session.sessionId, botId: body.botId, taskId: body.taskId, leaseId: randomUUID(), ttlMs: 120000, expiresAt: Date.now() + 120000 };
+      // 先封住旧助理租约；CDP 每次发命令前会再次检查，旧异步回调不能穿透。
+      leases.set(identity.computerId, lease);
+      if (previous) desktop.closeSessionsForLease(previous.leaseId);
+      try {
+        await browser?.releaseInput?.();
+        await ensureDesktopBrowser();
+        const changed = await desktop.setSessionControl({ sessionId: session.sessionId, controllable: true, leaseId: lease.leaseId, taskId: body.taskId, controlEpoch: body.controlEpoch });
+        return send(response, 200, { ...changed, controlAvailable: true, handoffProtocol: 'desktop-handoff/v1', lease });
+      } catch (error) { if (leases.get(identity.computerId) === lease) leases.delete(identity.computerId); throw error; }
+    }
+    if (request.url === '/broker/desktop/control/state') {
+      const session = controlSession(body, false);
+      expireLeases();
+      const lease = leases.get(identity.computerId);
+      return send(response, 200, { ...viewControl(session), lease: lease?.kind === 'human' && lease.sessionId === session.sessionId && !lease.expiring ? lease : null });
+    }
+    if (request.url === '/broker/desktop/control/release') return send(response, 200, await releaseControl(body));
     if (['/broker/desktop/idle', '/broker/desktop/resume'].includes(request.url)) {
       desktopIdentity(body);
       const session = desktop.getSession(body.sessionId);
@@ -178,14 +258,20 @@ const server = createServer(async (request, response) => {
       const session = desktop.getSession(body.sessionId);
       if (!session || session.identity.computerId !== identity.computerId) throw Object.assign(new Error('DESKTOP_SESSION_NOT_FOUND'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
       if (session.idle) throw Object.assign(new Error('DESKTOP_SESSION_IDLE'), { code: 'DESKTOP_SESSION_IDLE', status: 409 });
+      if (controlGrants.has(session.sessionId) && body.controlEpoch !== session.controlEpoch) throw Object.assign(new Error('桌面控制代次已改变'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
       if (session.leaseId !== body.leaseId || session.taskId !== body.taskId) throw Object.assign(new Error('COMPUTER_LEASE_REQUIRED'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
       desktopLease({ ...body, computerId: identity.computerId });
-      return send(response, 202, await desktop.input({ sessionId: body.sessionId, event: body.event }));
+      return send(response, 202, await desktop.input({ sessionId: body.sessionId, event: body.event, controlEpoch: body.controlEpoch }));
     }
     if (request.url === '/broker/desktop/close') {
       desktopIdentity(body);
+      const session = desktop.getSession(body.sessionId), lease = leases.get(identity.computerId);
+      if (controlGrants.has(body.sessionId) && lease?.kind === 'human' && lease.sessionId === body.sessionId) {
+        await releaseControl({ ...body, botId: session.botId, taskId: session.taskId, leaseId: lease.leaseId, controlEpoch: session.controlEpoch });
+      }
       const closed = desktop.closeSession(body.sessionId);
-      if (desktop.stats().sessions === 0) await closeDesktopBrowser();
+      controlGrants.delete(body.sessionId);
+      // 关闭观察面板只停止采集，不关闭桌面窗口。
       return send(response, 200, { closed });
     }
     return send(response, 404, { error: 'not_found' });
@@ -193,8 +279,27 @@ const server = createServer(async (request, response) => {
     return send(response, Number(error?.status) || 400, { error: error?.code || error?.message || 'COMPUTER_ACTION_FAILED' });
   }
 });
-server.listen(port, host);
 const leaseReaper = setInterval(expireLeases, 1000);
 leaseReaper.unref();
-const close = async () => { await browser?.dispose?.(); executor?.dispose?.(); await desktop.dispose(); server.close(() => process.exit(0)); };
-process.on('SIGTERM', close);
+const close = async () => { closing = true; clearInterval(leaseReaper); await warmup; await browser?.dispose?.(); executor?.dispose?.(); await desktop.dispose(); await new Promise(resolve => server.close(resolve)); };
+return { server, listen: () => server.listen(port, host, () => {
+  if (!starting) return;
+  const began = Date.now();
+  warmup = (async () => {
+    try {
+      await desktop.ensureDisplay();
+      if (!closing) await ensureDesktopBrowser();
+      warmupMs = Date.now() - began;
+      if (!closing) console.info(JSON.stringify({ event: 'desktop-ready', warmupMs, computerId: identity.computerId }));
+    } catch (error) {
+      startupFailure = error;
+      console.error(JSON.stringify({ event: 'desktop-startup-failed', code: error.code || 'DESKTOP_STARTUP_FAILED', message: String(error.message).slice(0, 500) }));
+    } finally { starting = false; }
+  })();
+}), close };
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const service = createComputerAgentServer();
+  service.listen();
+  process.on('SIGTERM', () => { void service.close().then(() => process.exit(0)); });
+}

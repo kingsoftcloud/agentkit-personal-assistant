@@ -2,7 +2,7 @@
   "$schema": "./personal-assistant.plugin.schema.json",
   "format": "agentkit-personal-assistant.plugin/v1",
   "pluginId": "@kingsoftcloud/agentkit-personal-assistant",
-  "version": "0.1.0",
+  "version": "0.1.2-desktop.20261026",
   "compatibility": {
     "requiredDsh": "0.2.1-rc.2",
     "requiredHostApi": "dsh-native/0.2.1-rc.2",
@@ -17,7 +17,12 @@
       "personal-assistant.memory",
       "personal-assistant.computer-broker"
     ],
-    "contributes": ["route", "resource", "command", "settings"],
+    "contributes": [
+      "route",
+      "resource",
+      "command",
+      "settings"
+    ],
     "entrypoints": {
       "host": ".",
       "client": "./client"

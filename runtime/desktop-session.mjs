@@ -165,12 +165,12 @@ export function createDesktopController({
       await writeFile(join(wmConfiguration, '.fluxbox', 'apps'), '');
       await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\nmenu.title.font: Noto Sans CJK SC-10:bold\nmenu.frame.font: Noto Sans CJK SC-10\nmenu.hilite.font: Noto Sans CJK SC-10:bold\nwindow.font: Noto Sans CJK SC-9\ntoolbar.clock.font: Noto Sans CJK SC-9\ntoolbar.workspace.font: Noto Sans CJK SC-9\ntoolbar.iconbar.focused.font: Noto Sans CJK SC-9\ntoolbar.iconbar.unfocused.font: Noto Sans CJK SC-9\n');
       await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "Noto Sans Mono CJK SC" -fs 12 -geometry 56x24+20+65}\n[end]\n');
-      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
+      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: true\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
     }
     windowManagerFailure = undefined;
-    const child = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit', '-no-toolbar'], { env: { ...environment, HOME: wmConfiguration }, stdio: 'ignore' });
+    const child = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit'], { env: { ...environment, HOME: wmConfiguration }, stdio: 'ignore' });
     wm = child;
     child.once?.('error', error => {
       if (wm !== child) return;
@@ -261,7 +261,7 @@ export function createDesktopController({
       await ensureDisplay();
       collectorFailure = undefined; latestFrame = undefined;
       let stderr = '';
-      const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'warning', '-nostdin', '-f', 'x11grab', '-draw_mouse', '1', '-video_size', `${width}x${height}`, '-framerate', String(DESKTOP_CAPTURE_FPS), '-i', `${display}.0+0,0`, '-an', '-vf', `setpts=N/(${DESKTOP_CAPTURE_FPS}*TB)`, '-c:v', 'mjpeg', '-pix_fmt', 'yuvj420p', '-filter_threads', '2', '-q:v', '8', '-threads', '2', '-fps_mode', 'passthrough', '-f', 'image2pipe', 'pipe:1'], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'warning', '-nostdin', '-f', 'x11grab', '-draw_mouse', '0', '-video_size', `${width}x${height}`, '-framerate', String(DESKTOP_CAPTURE_FPS), '-i', `${display}.0+0,0`, '-an', '-vf', `setpts=N/(${DESKTOP_CAPTURE_FPS}*TB)`, '-c:v', 'mjpeg', '-pix_fmt', 'yuvj420p', '-filter_threads', '2', '-q:v', '8', '-threads', '2', '-fps_mode', 'passthrough', '-f', 'image2pipe', 'pipe:1'], { env: environment, stdio: ['ignore', 'pipe', 'pipe'] });
       collector = child;
       const receive = createMjpegFrameParser({ onFrame: data => {
         if (collector !== child || disposed) return;

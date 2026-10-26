@@ -46,6 +46,7 @@ const results = [
     ['runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['runtime/cloud-session-channel.mjs', join(root, 'runtime', 'cloud-session-channel.mjs')],
     ['runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
+    ['runtime/desktop-permit.mjs', join(root, 'runtime', 'desktop-permit.mjs')],
     ['src', join(root, 'src')],
     // The cloud runtime is a real DSH host. Keep a self-contained plugin
     // package beside the stateful launcher so the DSH profile can resolve it
@@ -58,12 +59,14 @@ const results = [
     ['plugin/runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['plugin/runtime/cloud-session-channel.mjs', join(root, 'runtime', 'cloud-session-channel.mjs')],
     ['plugin/runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
+    ['plugin/runtime/desktop-permit.mjs', join(root, 'runtime', 'desktop-permit.mjs')],
     ['plugin/runtime/prepare-dsh-profile.mjs', join(root, 'runtime', 'prepare-dsh-profile.mjs')],
     ['plugin/runtime/check-manifest.mjs', join(root, 'runtime', 'check-manifest.mjs')],
   ]),
   await pack('computer', [
     ['bin/computer-agentd', join(root, 'scripts', 'computer-agentd-launcher.sh')],
     ['runtime/computer-agentd.mjs', join(root, 'runtime', 'computer-agentd.mjs')],
+    ['runtime/desktop-permit.mjs', join(root, 'runtime', 'desktop-permit.mjs')],
     ['runtime/cloud-browser.mjs', join(root, 'runtime', 'cloud-browser.mjs')],
     ['runtime/cloud-browser-cdp.mjs', join(root, 'runtime', 'cloud-browser-cdp.mjs')],
     ['runtime/cloud-execution.mjs', join(root, 'runtime', 'cloud-execution.mjs')],

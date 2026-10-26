@@ -118,7 +118,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       const ticket = await request('personal-assistant.desktop.ticket', { agentId: current.agentId, botId: DIRECTORY_BOT_ID, mode: 'read' }, signal);
       if (typeof WebSocketImpl !== 'function') throw fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 503);
       const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
-      const bots = await new Promise((resolve, reject) => {
+      const directory = await new Promise((resolve, reject) => {
         let socket, settled = false, connected = false;
         const finish = (error, rows) => {
           if (settled) return; settled = true;
@@ -153,7 +153,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
           try {
             if (typeof event.data !== 'string' || event.data.length > 64 * 1024) throw new Error('invalid directory');
             const value = JSON.parse(event.data);
-            if (value.type === 'bots') finish(null, publicBotDirectory(value.bots));
+            if (value.type === 'bots') finish(null, { bots: publicBotDirectory(value.bots), ...(Array.isArray(value.features) && value.features.includes('desktop-handoff/v1') ? { features: ['desktop-handoff/v1'] } : {}) });
             else if (value.type === 'error') {
               if (value.code === 'DESKTOP_MESSAGE_UNSUPPORTED') finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED', '当前云端版本尚不支持助理列表', 409));
               else {
@@ -164,7 +164,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
           } catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_INVALID', '助理目录格式不兼容，请更新云端助理后重试', 502)); }
         };
       });
-      return { bots, directoryAvailable: true };
+      return { ...directory, directoryAvailable: true };
     }
     if (!current.configured) throw fail('PERSONAL_ASSISTANT_GATEWAY_UNCONFIGURED', '个人助理尚未绑定云端实例', 409);
     if (payload.agentId && payload.agentId !== current.agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', '云端实例与 Host 绑定不一致', 403);

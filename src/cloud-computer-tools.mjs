@@ -128,7 +128,12 @@ export function createComputerToolset({
       action: name,
       args,
     });
-    return broker.action(request);
+    try { return await broker.action(request); }
+    catch (error) {
+      // 旧租约已被用户接管或撤销。只清缓存，不重放可能已经执行的动作。
+      if (Number(error?.status) === 409) activeLease = null;
+      throw error;
+    }
   }
 
   const definitions = [

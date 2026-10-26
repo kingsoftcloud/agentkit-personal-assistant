@@ -8,6 +8,7 @@ import {
   PersonalAssistantGatewayUnavailableError,
   PersonalAssistantPanel,
   PersonalAssistantPanelIcon,
+  setClientReactRuntime,
   PERSONAL_ASSISTANT_CLIENT_DEFAULTS,
   PERSONAL_ASSISTANT_COMPUTER_TAB,
   PERSONAL_ASSISTANT_PANEL_ID,
@@ -131,7 +132,7 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
     },
   };
   applyClient(ctx);
-  assert.deepEqual(clientInject, ['slots', 'connection', 'layout']);
+  assert.deepEqual(clientInject, ['slots', 'connection', 'sidebarRight']);
   assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist', 'settings.section']);
   assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
   assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
@@ -201,9 +202,18 @@ test('右侧栏云电脑标签页与设置页注册在插件作用域内，卸�
   ]);
   assert.equal(injected[3].definition.key, PERSONAL_ASSISTANT_COMPUTER_TAB);
   assert.equal(injected[4].component(), '云电脑');
-  // 页面内改为左右分栏（sidebarRight.openTab 在无会话页面会抛 no session surface）；
-  // 右栏标签页仍注册，供有会话的场景使用，卸载后全部随 effect 释放。
+  // 普通会话标签页仍注册；全局云电脑通过独立原生panel surface挂载。
   assert.equal(typeof injected[0].definition.inject().request, 'function');
   assert.deepEqual(opened, []);
-  assert.equal(effectDisposers.length, 4);
+  assert.equal(effectDisposers.length, 5);
+});
+
+
+test('个人助理侧栏图标是SVG，两条路径，不退回纯文本占位', () => {
+  setClientReactRuntime({ createElement: (type, props, ...children) => ({ type, props, children }) });
+  try {
+    const icon = PersonalAssistantPanelIcon({ size: 20 });
+    assert.equal(icon.type, 'svg'); assert.equal(icon.props.viewBox, '0 0 16 16'); assert.equal(icon.props.width, 20);
+    assert.equal(icon.children.length, 2); assert.ok(icon.children.every(child => child.type === 'path'));
+  } finally { setClientReactRuntime(undefined); }
 });

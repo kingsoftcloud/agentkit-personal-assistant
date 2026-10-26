@@ -208,7 +208,7 @@ test('temporary renewal failure preserves its status and closes with a retryable
 
 function panelHarness(t, options = {}) {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
-  const saved = Object.fromEntries(['document', 'window', 'WebSocket', 'createImageBitmap'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const saved = Object.fromEntries(['document', 'window', 'WebSocket', 'createImageBitmap', 'requestAnimationFrame', 'cancelAnimationFrame'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const document = new EventTarget(), window = new EventTarget(); document.hidden = false;
   const sockets = [], requests = [], hooks = [], effects = [], drawn = []; let cursor = 0, tree;
   class WebSocket {
@@ -219,17 +219,17 @@ function panelHarness(t, options = {}) {
     closed(code = 1006) { this.readyState = 3; this.onclose?.({ code }); }
     close(code = 1000) { this.closed(code); }
   }
-  Object.assign(globalThis, { document, window, WebSocket, createImageBitmap: async () => ({ close() {} }) });
+  Object.assign(globalThis, { document, window, WebSocket, requestAnimationFrame: callback => setTimeout(callback, 16), cancelAnimationFrame: clearTimeout, createImageBitmap: async () => ({ close() {} }) });
   const request = async (operation, payload) => {
     requests.push({ operation, payload });
     if (operation.endsWith('.configuration')) return { configured: options.configured !== false, agentId: 'ar-test' };
-    if (operation.endsWith('.bots.list')) { if (options.directoryError) throw options.directoryError; return { bots: options.bots || [{ botId: 'writer', displayName: '写作助理' }], directoryAvailable: true }; }
+    if (operation.endsWith('.bots.list')) { if (options.directoryError) throw options.directoryError; return { features: options.features || [], bots: options.bots || [{ botId: 'writer', displayName: '写作助理' }], directoryAvailable: true }; }
     return { ticket: 'short-lived-ticket', wsUrl: 'wss://gateway.invalid/desktop' };
   };
   const fakeReact = {
     createElement(type, props, ...children) {
       if (props?.ref && !props.ref.current) props.ref.current = {
-        blur() {}, focus() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 800 }),
+        blur() {}, focus() {}, contains: target => target?.insideDesktop === true, style: {}, setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 800 }),
         getContext: () => ({ fillRect() {}, drawImage(bitmap) { drawn.push(bitmap); } }),
       };
       return { type, props: props || {}, children: children.flat() };
@@ -239,7 +239,7 @@ function panelHarness(t, options = {}) {
     useEffect(effect, deps) { const index = cursor++; if (!hooks[index]) { hooks[index] = { deps }; effects.push(() => { hooks[index].cleanup = effect(); }); } },
   };
   setClientReactRuntime(fakeReact);
-  const render = () => { cursor = 0; tree = PersonalAssistantPanel({ request, initialBotId: 'writer', variant: options.variant }); for (const effect of effects.splice(0)) effect(); return tree; };
+  const render = () => { cursor = 0; tree = PersonalAssistantPanel({ request, initialBotId: 'writer', variant: options.variant, nativeFullscreen: options.nativeFullscreen }); for (const effect of effects.splice(0)) effect(); return tree; };
   const all = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(all)] : [];
   const text = node => typeof node === 'string' ? node : node?.children?.map(text).join('') || '';
   const visibleText = node => typeof node === 'string' ? node : node?.type === 'details' && !node.props.open ? visibleText(node.children[0]) : node?.children?.map(visibleText).join('') || '';
@@ -261,52 +261,37 @@ async function connectPanel(panel, mode = 'read') {
   return socket;
 }
 
-test('聊天旁的云电脑默认旁观，不占助理租约；显式申请控制才获取 control 票据', async t => {
-  const panel = panelHarness(t, { variant: 'computer' });
-  await flush();
-  assert.equal(panel.tickets().length, 1, 'opening the bound computer pane connects automatically');
-  assert.equal(panel.tickets().at(-1).payload.mode, 'read');
-  const viewer = panel.sockets.at(-1); viewer.open();
-  assert.equal(viewer.sent[0].mode, 'read');
-  viewer.message({ type: 'ready', sessionId: 'viewer', readOnly: true, display: { width: 1280, height: 800 } });
+test('原生云电脑自动旁观；首击等待控制确认再注入，点外释放不关闭通道', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'] }); await flush();
+  assert.equal(panel.tickets().at(-1).payload.mode, 'control', '签票本身不占租约');
+  const viewer = panel.sockets.at(-1); viewer.open(); assert.equal(viewer.sent[0].mode, 'observe');
+  viewer.message({ type: 'ready', sessionId: 'viewer', readOnly: true, controlAvailable: true, controlEpoch: 0, display: { width: 1280, height: 800 } });
   viewer.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); viewer.message(new ArrayBuffer(8)); await flush();
-  panel.click('接管'); await flush();
-  assert.equal(panel.tickets().at(-1).payload.mode, 'control');
+  const canvas = panel.nodes().find(node => node.type === 'canvas');
+  canvas.props.onPointerDown({ type: 'pointerdown', pointerId: 1, button: 0, clientX: 300, clientY: 200, preventDefault() {} });
+  canvas.props.onPointerUp({ type: 'pointerup', pointerId: 1, button: 0, clientX: 300, clientY: 200, preventDefault() {} });
+  assert.equal(viewer.sent.at(-1).type, 'control.acquire'); assert.equal(viewer.sent.some(v => v.type === 'input'), false);
+  viewer.message({ type: 'control', readOnly: false, controlAvailable: true, controlEpoch: 1 }); await flush();
+  assert.deepEqual(viewer.sent.filter(v => v.type === 'input').map(v => v.event), [
+    { type: 'button', action: 'down', button: 1, x: 300, y: 200 }, { type: 'button', action: 'up', button: 1, x: 300, y: 200 },
+  ]);
+  panel.document.dispatchEvent(new Event('pointerdown'));
+  assert.equal(viewer.sent.at(-1).type, 'control.release');
+  viewer.message({ type: 'control', readOnly: true, controlAvailable: true, controlEpoch: 2 });
+  assert.equal(panel.sockets.length, 1); assert.equal(viewer.readyState, 1);
+  assert.match(panel.text(), /点画面即可接管/u);
 });
 
-test('全屏时正文焦点的 Esc 在本地退出且不关闭桌面，不接管其它全屏元素；卸载移除监听', async t => {
-  const panel = panelHarness(t), socket = await connectPanel(panel, 'control');
-  const view = panel.nodes().find(node => node.type === 'div' && node.props.ref);
-  let exits = 0;
-  view.props.ref.current.requestFullscreen = async () => {
-    panel.document.fullscreenElement = view.props.ref.current;
-    panel.document.dispatchEvent(new Event('fullscreenchange'));
-  };
-  panel.document.exitFullscreen = async () => {
-    exits += 1; panel.document.fullscreenElement = null;
-    panel.document.dispatchEvent(new Event('fullscreenchange'));
-  };
-  const escape = type => {
-    const event = new Event(type, { cancelable: true });
-    Object.defineProperty(event, 'key', { value: 'Escape' });
-    panel.document.dispatchEvent(event); return event;
-  };
-  panel.click('全屏'); await flush();
-  const before = socket.sent.length;
-  assert.equal(escape('keydown').defaultPrevented, true);
-  assert.equal(escape('keyup').defaultPrevented, true);
-  await flush();
-  assert.equal(exits, 1);
-  assert.equal(panel.document.fullscreenElement, null);
-  assert.equal(socket.readyState, 1);
-  assert.equal(socket.sent.length, before, 'local fullscreen Escape must not reach the remote terminal');
-  panel.document.fullscreenElement = {};
-  assert.equal(escape('keydown').defaultPrevented, false);
-  assert.equal(exits, 1);
-  panel.unmount();
-  panel.document.fullscreenElement = view.props.ref.current;
-  assert.equal(escape('keydown').defaultPrevented, false);
-  assert.equal(exits, 1);
+test('原生全屏 Escape 交给宿主，不注入远端，也不自绘断开或全屏按钮', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab', nativeFullscreen: true }); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  socket.message({ type: 'ready', sessionId: 'viewer', readOnly: false, display: { width: 1280, height: 800 } });
+  socket.message({ type: 'frame', seq: 1 }); socket.message(new ArrayBuffer(8)); await flush();
+  const canvas = panel.nodes().find(node => node.type === 'canvas'), before = socket.sent.length;
+  let prevented = false;
+  canvas.props.onKeyDown({ type: 'keydown', key: 'Escape', preventDefault() { prevented = true; } });
+  assert.equal(prevented, false); assert.equal(socket.sent.length, before);
+  assert.equal(panel.nodes().some(node => node.type === 'button' && /全屏|断开/.test(node.children.join(''))), false);
 });
 
 test('panel stops reconnecting after idle session closure, including visibility changes, but explicit open works', async t => {
@@ -335,7 +320,7 @@ test('面板空闲保留通道且不自动取票，首个输入等待重新获�
   assert.equal(socket.sent.at(-1).type, 'resume');
   assert.equal(socket.sent.filter(v => v.type === 'input').length, 0, 'first input stays buffered before control is confirmed');
   socket.message({ type: 'ready', sessionId: 'desktop-1', readOnly: false, display: { width: 1280, height: 800 } }); await flush();
-  assert.deepEqual(socket.sent.at(-1), { type: 'input', event: { type: 'key', action: 'down', key: 'Tab' } });
+  assert.deepEqual(socket.sent.at(-1), { type: 'input', controlEpoch: 0, event: { type: 'key', action: 'down', key: 'Tab' } });
   assert.equal(panel.tickets().length, 1);
 });
 
@@ -362,7 +347,8 @@ test('空闲后的首段中文与 emoji 输入缓冲到 ready 后只发送一次
   field.props.onInput({ currentTarget: target }); await flush();
   assert.equal(socket.sent.filter(v => v.type === 'input').length, 0);
   socket.message({ type: 'ready', sessionId: 'desktop-1', readOnly: false, display: { width: 1280, height: 800 } }); await flush();
-  assert.deepEqual(socket.sent.filter(v => v.type === 'input'), [{ type: 'input', event: { type: 'text', text } }]);
+  t.mock.timers.tick(30); await flush();
+  assert.deepEqual(socket.sent.filter(v => v.type === 'input'), [{ type: 'input', controlEpoch: 0, event: { type: 'text', text } }]);
 });
 
 test('空闲前仍在解码的旧帧不能把面板改回控制态', async t => {
@@ -444,12 +430,12 @@ test('只有 ready 元数据没有 JPEG 时仍保留 12 秒截止，不无限等
   assert.equal(panel.tickets().length, 2);
 });
 
-test('等待首帧时手动断开会取消截止和重连，旧 ready 不能恢复控制', async t => {
+test('等待首帧时关闭原生标签会取消截止和重连，旧 ready 不能恢复控制', async t => {
   const panel = panelHarness(t);
   await flush(); panel.click('连接云电脑'); await flush();
   const socket = panel.sockets.at(-1); socket.open();
   t.mock.timers.tick(6000); await flush();
-  panel.click('断开连接'); await flush();
+  panel.unmount(); await flush();
   socket.message({ type: 'ready', sessionId: 'late', readOnly: false, display: { width: 1280, height: 800 } });
   t.mock.timers.tick(120_000); await flush();
   assert.equal(panel.tickets().length, 1);

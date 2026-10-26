@@ -112,7 +112,7 @@ test('目录授权只返回助理展示字段，不开桌面、不申请租约�
   assert.deepEqual(calls, []);
 });
 
-test('只读签名授权在空闲恢复时仍不能升级控制或申请租约', async t => {
+test('只读签名授权保持旁观且不能升级控制、发送输入或申请租约', async t => {
   const calls = [], server = createServer();
   attachDesktopWebSocket({ server, runtimeToken: 'local-private-token-at-least-24', assistantId: 'ar-test', env,
     botIdOf: value => value, taskIdOf: value => value,
@@ -123,9 +123,14 @@ test('只读签名授权在空闲恢复时仍不能升级控制或申请租约',
   const client = await connect(server.address().port, { 'X-AgentEngine-Desktop-Permit': permit() });
   t.after(() => { client.socket.destroy(); server.closeAllConnections(); server.close(); });
   client.send({ type: 'open', botId: 'observer', taskId: 't', mode: 'read' });
-  await client.next(v => v.type === 'idle');
+  await client.next(v => v.type === 'ready');
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.equal(calls.some(v => v.path.endsWith('/idle')), false, '有观察者不自动休眠');
   client.send({ type: 'resume', mode: 'control', activity: true });
   assert.equal((await client.next(v => v.code === 'DESKTOP_READ_ONLY')).status, 403);
+  client.send({ type: 'control.acquire', controlEpoch: 0 });
+  assert.equal((await client.next(v => v.code === 'DESKTOP_CONTROL_GRANT_REQUIRED')).status, 403);
+  client.send({ type: 'input', event: { type: 'text', text: 'blocked' } });
   assert.equal(calls.some(v => v.path.endsWith('/acquire')), false);
   assert.equal(calls.some(v => v.path.endsWith('/input')), false);
 });
@@ -159,4 +164,41 @@ test('会话 RPC 只接受具名 Bot control permit，拒绝目录/只读/换身
   assert.equal(response.value.executionTarget, 'cloud');
   assert.equal(calls.length, 1);
   assert.equal(brokerCalls.length, 0);
+});
+
+test('签名桌面通过同一WS接管和归还；旧控制入口被拒绝、冲突输入不会关闭旁观', async t => {
+  const calls = [], server = createServer();
+  let epoch = 0, controlling = false;
+  const changed = () => ({ sessionId: 'continuous', controlAvailable: true, readOnly: !controlling, controlEpoch: epoch, ...(controlling ? { lease: { leaseId: 'human-lease' } } : {}) });
+  attachDesktopWebSocket({ server, runtimeToken: 'local-private-token-at-least-24', assistantId: 'ar-test', env,
+    botIdOf: value => value, taskIdOf: value => value,
+    brokerDesktopRequest: async (path, body) => {
+      calls.push({ path, body });
+      if (path.endsWith('/session')) { assert.equal(body.mode, 'observe'); assert.equal(typeof body.controlPermit, 'string'); return { ...changed(), idleMode: 'retain-desktop', idleTimeoutMs: 600000 }; }
+      if (path.endsWith('/control/acquire')) { controlling = true; epoch++; return changed(); }
+      if (path.endsWith('/control/release')) { controlling = false; epoch++; return changed(); }
+      if (path.endsWith('/control/state')) return changed();
+      return {};
+    }, brokerDesktopFrameBinary: async () => ({ unchanged: true, seq: 1, nextFrameDelayMs: 1000 }),
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const client = await connect(server.address().port, { 'X-AgentEngine-Desktop-Permit': permit({ mode: 'control' }) });
+  t.after(() => { client.socket.destroy(); server.closeAllConnections(); server.close(); });
+  client.send({ type: 'open', botId: 'observer', taskId: 'human', mode: 'control' });
+  assert.equal((await client.next(v => v.code === 'DESKTOP_HANDOFF_REQUIRED')).status, 403);
+  assert.equal(calls.length, 0);
+  client.send({ type: 'open', botId: 'observer', taskId: 'human', mode: 'observe' });
+  assert.equal((await client.next(v => v.type === 'ready')).readOnly, true);
+  assert.equal(calls.some(v => v.path === '/broker/lease/acquire'), false);
+  client.send({ type: 'control.acquire', controlEpoch: 0 });
+  const active = await client.next(v => v.type === 'control' && v.controlEpoch === 1);
+  assert.equal(active.readOnly, false); assert.equal(active.lease, undefined, '租约凭据不回传浏览器');
+  client.send({ type: 'input', controlEpoch: 0, event: { type: 'text', text: 'stale' } });
+  assert.equal((await client.next(v => v.code === 'DESKTOP_CONTROL_EPOCH_CHANGED')).recoverable, true);
+  assert.equal(calls.some(v => v.path.endsWith('/input')), false);
+  client.send({ type: 'input', controlEpoch: 1, event: { type: 'button', action: 'down', x: 300, y: 200 } });
+  await client.next(v => v.type === 'input-accepted');
+  client.send({ type: 'control.release', controlEpoch: 1 });
+  assert.equal((await client.next(v => v.type === 'control' && v.controlEpoch === 2)).readOnly, true);
+  assert.equal(client.socket.destroyed, false); assert.equal(calls.some(v => v.path.endsWith('/close')), false);
 });

@@ -61,11 +61,12 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
   });
 }
 
-export const inject = Object.freeze(['slots', 'connection', 'layout']);
+export const inject = Object.freeze(['slots', 'connection', 'sidebarRight']);
 export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
 export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false, autoConnect: false });
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { mapDisplayPoint, normalizeDisplay } from './desktop-view.mjs';
+import { createDesktopControl } from './desktop-control.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -81,7 +82,7 @@ const failure = error => error?.code === 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILAB
 const directoryUnsupported = error => Number(error?.status) === 409 && ['PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED', 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE'].includes(error?.code);
 const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
 
-export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page' } = {}) {
+export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page', nativeFullscreen = false } = {}) {
   const R = clientReact || globalThis.React;
   if (!R) return '个人助理页面尚未就绪，请重新打开';
   const { createElement: h, useEffect, useRef, useState } = R;
@@ -96,8 +97,10 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const [readOnly, setReadOnly] = useState(true);
   const [attempt, setAttempt] = useState(0);
   const [fps, setFps] = useState(0);
-  const [full, setFull] = useState(false);
-  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null);
+  const [controlPhase, setControlPhase] = useState('observe');
+  const controlRef = useRef(null);
+  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null);
+  const fullscreenRef = useRef(nativeFullscreen); fullscreenRef.current = nativeFullscreen;
   const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false });
   state.current.botId = botId;
   const rpc = async (operation, payload = {}) => {
@@ -111,22 +114,31 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   };
   const releaseInputs = () => {
     const current = state.current;
-    for (const key of current.pressed) send({ type: 'input', event: { type: 'key', action: 'up', key } });
-    for (const button of current.buttons) send({ type: 'input', event: { type: 'button', action: 'up', button } });
+    for (const key of current.pressed) controlRef.current?.input({ type: 'key', action: 'up', key });
+    for (const button of current.buttons) controlRef.current?.input({ type: 'button', action: 'up', button });
     current.pressed.clear(); current.buttons.clear();
   };
   const releasePointer = () => {
-    for (const button of state.current.buttons) send({ type: 'input', event: { type: 'button', action: 'up', button } });
+    for (const button of state.current.buttons) controlRef.current?.input({ type: 'button', action: 'up', button });
     state.current.buttons.clear();
   };
+  if (!controlRef.current) controlRef.current = createDesktopControl({
+    send,
+    changed: value => {
+      const current = state.current; current.controlPhase = value.phase; current.readOnly = value.readOnly; current.controlEpoch = value.controlEpoch;
+      if (current.mounted) { setReadOnly(value.readOnly); setControlPhase(value.phase); }
+    },
+    failed: message => { if (state.current.mounted) setNotice(message); },
+  });
+  const releaseControl = () => { releaseInputs(); controlRef.current.release(); state.current.pressed.clear(); state.current.buttons.clear(); };
   const clearTimers = () => {
     clearTimeout(state.current.reconnect); clearTimeout(state.current.firstFrame);
     state.current.reconnect = null; state.current.firstFrame = null;
   };
   const close = (announce = true) => {
-    const current = state.current; current.reconnectAllowed = false; clearTimers(); releaseInputs(); current.generation += 1;
+    const current = state.current; current.reconnectAllowed = false; clearTimers(); releaseControl(); current.generation += 1;
     try { send({ type: 'close' }); current.socket?.close(1000, 'panel closed'); } catch {}
-    current.socket = null; current.session = null; current.pendingFrame = null; current.frameMetadata = null; current.readOnly = true; inputRef.current?.blur();
+    controlRef.current.reset({ readOnly: true }); current.lastDrawnFrame = null; current.socket = null; current.session = null; current.pendingFrame = null; current.frameMetadata = null; current.readOnly = true; inputRef.current?.blur();
     current.suspended = false; current.resuming = false; current.pendingInputs = []; current.frameEpoch++;
     if (announce && current.mounted) { setPhase(current.config?.configured ? 'idle' : 'unconfigured'); setReadOnly(true); }
   };
@@ -151,8 +163,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       return controlling;
     }
     if (!current.session || current.socket?.readyState !== 1) { setNotice('云电脑尚未连接，输入未发送'); return false; }
-    if (current.readOnly) { setNotice('当前为只读旁观，输入未发送'); return false; }
-    return send({ type: 'input', event });
+    return controlRef.current.input(event);
   };
   const drawLatest = async () => {
     const current = state.current;
@@ -165,6 +176,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         try {
           bitmap = await createImageBitmap(new Blob([job.bytes], { type: 'image/jpeg' }));
           if (!current.mounted || current.suspended || job.frameEpoch !== current.frameEpoch || job.generation !== current.generation || job.seq < current.receivedSeq || !canvasRef.current) continue;
+          current.lastDrawnFrame = job;
           const canvas = canvasRef.current, rect = canvas.getBoundingClientRect();
           const dpr = Math.max(1, globalThis.devicePixelRatio || 1);
           canvas.width = Math.max(1, Math.round(rect.width * dpr)); canvas.height = Math.max(1, Math.round(rect.height * dpr));
@@ -198,7 +210,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const generation = current.generation, socket = current.socket;
     current.firstFrame = setTimeout(() => { if (current.mounted && current.generation === generation && current.firstFrame !== null) socket.close(4000, 'resume frame timeout'); }, FIRST_FRAME_TIMEOUT_MS);
   };
-  const open = async (mode = 'control', reconnecting = false, bufferedInputs = []) => {
+  const open = async (mode = 'read', reconnecting = false, bufferedInputs = []) => {
     const current = state.current;
     const selected = String(current.botId || '').trim();
     if (!current.config?.configured) { setPhase('unconfigured'); return; }
@@ -208,11 +220,11 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const generation = ++current.generation;
     current.reconnectAllowed = true;
     if (!reconnecting) current.retries = 0;
-    current.mode = mode; current.taskId ||= `studio-desktop-${Date.now()}`;
+    current.mode = mode; current.taskId ||= `studio-desktop-${globalThis.crypto.randomUUID()}`;
     current.receivedSeq = -1; current.frameMetadata = null;
     setPhase(reconnecting ? 'reconnecting' : 'connecting'); setNotice('首次或休眠后连接可能需要数秒，请稍候。');
     try {
-      const ticket = await rpc('personal-assistant.desktop.ticket', { agentId: current.config.agentId, botId: selected, mode });
+      const ticket = await rpc('personal-assistant.desktop.ticket', { agentId: current.config.agentId, botId: selected, mode: mode === 'observe' ? 'control' : mode });
       if (!current.mounted || generation !== current.generation) return;
       const socket = new WebSocket(ticket.wsUrl, ['agentkit.personal-assistant.desktop.v1', `agentkit.desktop.ticket.${ticket.ticket}`]);
       socket.binaryType = 'arraybuffer'; current.socket = socket;
@@ -235,23 +247,26 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         if (value.type === 'ready') {
           current.suspended = false; current.resuming = false; current.receivedSeq = -1;
           current.session = value.sessionId; current.readOnly = Boolean(value.readOnly); current.display = normalizeDisplay(value.display);
-          current.mode = current.readOnly ? 'read' : mode;
+          current.mode = mode;
+          controlRef.current.reset(value);
           const inputs = current.pendingInputs; current.pendingInputs = [];
-          if (!current.readOnly) for (const event of inputs) send({ type: 'input', event });
+          if (!current.readOnly) for (const event of inputs) controlRef.current.input(event);
           else { current.pressed.clear(); current.buttons.clear(); }
           setReadOnly(current.readOnly); setNotice('云电脑已连接，正在准备桌面画面'); return;
         }
+        if (value.type === 'control') { controlRef.current.accept(value); setNotice(''); return; }
         if (value.type === 'idle') { markIdle(value); return; }
         if (value.type === 'frame') { if (!value.unchanged) current.frameMetadata = value; return; }
         if (value.type === 'closed') { if (value.retryable !== true) ended(value); return; }
         if (value.type === 'error') {
           setNotice(value.message || value.code || '云电脑请求失败');
+          if (current.handoffSupported && value.recoverable === true) { controlRef.current.reject(value); return; }
           if (value.recoverable === true && Number(value.status) === 409) {
             if (value.code === 'DESKTOP_SESSION_IDLE') markIdle();
             else { current.pendingInputs = []; current.readOnly = true; current.pressed.clear(); current.buttons.clear(); setReadOnly(true); setPhase('readonly'); }
             return;
           }
-          if (Number(value.status) === 409 && mode === 'control' && !current.session) { void open('read'); return; }
+          if (Number(value.status) === 409 && mode === 'control' && !current.session) { void open(state.current.handoffSupported ? 'observe' : 'read'); return; }
           if ([404, 409].includes(Number(value.status)) || value.code === 'DESKTOP_SESSION_NOT_FOUND') ended(value);
           else if (!current.session) { setPhase('error'); close(false); }
         }
@@ -280,10 +295,10 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       if (signal?.aborted || !state.current.mounted) return;
       if (result.directoryAvailable !== true) throw Object.assign(new Error('directory unavailable'), { code: 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', status: 409 });
       const available = publicBotDirectory(result.bots);
-      state.current.bots = available; setBots(available);
+      state.current.bots = available; state.current.handoffSupported = result.features?.includes('desktop-handoff/v1') === true; setBots(available);
       const selected = available.length ? resolveAssistantBotId(available, initialBotId || value.botId) : '';
       state.current.botId = selected; setBotId(selected); setPhase(available.length ? 'idle' : 'empty');
-      if (selected && ['computer', 'native-tab'].includes(variant)) void open('read');
+      if (selected && ['computer', 'native-tab'].includes(variant)) void open(state.current.handoffSupported ? 'observe' : 'read');
     } catch (error) {
       if (signal?.aborted || !state.current.mounted) return;
       if (Number.isInteger(error?.closeCode) && error.closeCode >= 1000 && error.closeCode <= 4999) setDirectoryCloseCode(error.closeCode);
@@ -297,28 +312,16 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     void refreshConnection(controller.signal);
     const interval = setInterval(() => { if (current.mounted) setFps(current.frames); current.frames = 0; }, 1000);
     const visibility = () => {
-      if (document.hidden) { releaseInputs(); send({ type: 'pause' }); }
+      if (document.hidden) { releaseControl(); send({ type: 'pause' }); }
       else if (current.socket?.readyState === 1) send({ type: 'resume' });
       else if (current.reconnectAllowed && current.config?.configured && current.session === null && current.socket) void open(current.mode, true);
     };
-    const blur = () => releaseInputs();
-    const fullscreen = () => setFull(Boolean(document.fullscreenElement));
-    let fullscreenEscapeHeld = false;
-    const fullscreenEscape = event => {
-      const ownFullscreen = document.fullscreenElement === viewRef.current;
-      if (event.key !== 'Escape' || (!ownFullscreen && !fullscreenEscapeHeld)) return;
-      // 全屏后焦点可能落在 body；在 document 捕获阶段处理，且不把 Esc 转发到云端。
-      event.preventDefault(); event.stopPropagation();
-      if (event.type === 'keyup') { fullscreenEscapeHeld = false; return; }
-      if (ownFullscreen && !fullscreenEscapeHeld) {
-        fullscreenEscapeHeld = true;
-        void document.exitFullscreen().catch(() => { if (current.mounted) setNotice('退出全屏失败，请点击退出桌面全屏重试'); });
-      }
-    };
-    document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('fullscreenchange', fullscreen);
-    const fullscreenKeyOptions = { capture: true };
-    document.addEventListener('keydown', fullscreenEscape, fullscreenKeyOptions); document.addEventListener('keyup', fullscreenEscape, fullscreenKeyOptions);
-    return () => { current.mounted = false; controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('fullscreenchange', fullscreen); document.removeEventListener('keydown', fullscreenEscape, fullscreenKeyOptions); document.removeEventListener('keyup', fullscreenEscape, fullscreenKeyOptions); };
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => { if (current.lastDrawnFrame) { current.pendingFrame = current.lastDrawnFrame; void drawLatest(); } }) : null;
+    if (canvasRef.current) observer?.observe(canvasRef.current);
+    const blur = () => releaseControl();
+    const outside = event => { if (!viewRef.current?.contains(event.target)) releaseControl(); };
+    document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('pointerdown', outside, true);
+    return () => { current.mounted = false; observer?.disconnect(); if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame); controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true); };
   }, [request]);
   const point = event => mapDisplayPoint({ clientX: event.clientX, clientY: event.clientY, rect: canvasRef.current.getBoundingClientRect(), display: state.current.display });
   const pointer = event => {
@@ -331,7 +334,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const modified = event.ctrlKey || event.metaKey || event.altKey;
     // 普通文本只走 input/compositionend，避免同一按键被发送两遍。
     if (event.key.length === 1 && !modified) return;
-    if (event.key === 'Escape' && document.fullscreenElement) return;
+    if (event.key === 'Escape' && fullscreenRef.current) return;
     event.preventDefault();
     const name = keyNames[event.key] || event.key;
     if (!/^[A-Za-z0-9_]+$/u.test(name)) return;
@@ -345,14 +348,19 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const emptyTitle = phase === 'unconfigured' ? '开通后，在这里连接你的个人助理' : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法连接云端助理' : '正在检查助理状态';
   const emptyDetail = phase === 'unconfigured' ? '开通完成后，即可在这里连接专属云电脑。' : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
   const stage = h('div', { ref: viewRef, style: { position: 'relative', flex: 1, minHeight: 240, background: active || phase === 'connecting' ? '#10151e' : 'transparent' } },
-    full ? h('button', { style: { ...buttonStyle, position: 'absolute', top: 12, right: 12, zIndex: 2 }, onClick: () => void document.exitFullscreen() }, '退出桌面全屏') : null,
     ['dormant', 'resuming'].includes(phase) ? h('div', { role: 'status', style: { position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none', display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,0.45)', color: '#fff' } }, phase === 'dormant' ? '已空闲，操作桌面即可恢复' : '正在恢复桌面…') : null,
-    h('canvas', { ref: canvasRef, 'aria-label': '云电脑桌面', tabIndex: active ? 0 : -1, onPointerDown: pointer, onPointerUp: pointer, onPointerCancel: releasePointer, onLostPointerCapture: releasePointer, onPointerMove: event => { if (Date.now() - state.current.lastMove < 34) return; state.current.lastMove = Date.now(); input({ type: 'pointermove', ...point(event) }); }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'crosshair' } }),
+    h('canvas', { ref: canvasRef, 'aria-label': '云电脑桌面', tabIndex: active ? 0 : -1, onPointerDown: pointer, onPointerUp: pointer, onPointerCancel: releasePointer, onLostPointerCapture: releasePointer, onPointerLeave: () => { if (cursorRef.current) cursorRef.current.style.visibility = 'hidden'; }, onPointerMove: event => {
+      const current = state.current, latest = event.nativeEvent?.getCoalescedEvents?.().at(-1) || event;
+      if (cursorRef.current) { const rect = canvasRef.current.getBoundingClientRect(); cursorRef.current.style.transform = `translate(${latest.clientX - rect.left}px, ${latest.clientY - rect.top}px)`; cursorRef.current.style.visibility = current.readOnly ? 'hidden' : 'visible'; }
+      current.lastPointer = point(latest);
+      if (!current.pointerFrame) current.pointerFrame = requestAnimationFrame(() => { current.pointerFrame = null; if (current.mounted && current.lastPointer && !current.readOnly) { const next = current.lastPointer; if (!current.sentPointer || next.x !== current.sentPointer.x || next.y !== current.sentPointer.y) { input({ type: 'pointermove', ...next }); current.sentPointer = next; } } });
+    }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'none' } }),
+    h('div', { ref: cursorRef, 'aria-hidden': true, style: { position: 'absolute', top: 0, left: 0, pointerEvents: 'none', visibility: 'hidden', zIndex: 2, width: 18, height: 22 } }, h('svg', { viewBox: '0 0 18 22', width: 18, height: 22 }, h('path', { d: 'M1 1v16l4-4 3 7 3-1-3-7h6z', fill: '#fff', stroke: '#162033', strokeWidth: 1.2 }))),
     !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', ...(phase === 'connecting' ? { color: '#e8edf5' } : {}) } },
       h('h2', { style: { margin: 0, fontSize: 20, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
       h('p', { style: { margin: 0, maxWidth: 380, lineHeight: 1.7, color: phase === 'connecting' ? '#b8c1d1' : 'var(--dsw-alias-label-secondary, #536174)' } }, selectable ? notice || '连接后即可使用云端桌面，关闭面板会释放本次控制。' : emptyDetail),
       !selectable && phase !== 'loading' ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '检查开通状态') : null) : null,
-    h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
+    h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !controlRef.current.snapshot.available && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
   const secondaryInk = 'var(--dsw-alias-label-secondary, #536174)';
   const ghostStyle = { ...buttonStyle, background: 'transparent', color: 'inherit', border: ui.border };
   const pillStyle = { ...buttonStyle, borderRadius: 999, padding: '7px 16px', border: 'none', fontWeight: 500, background: 'var(--dsw-alias-label-primary, #17202c)', color: 'var(--dsw-alias-bg-layer-1, #fff)' };
@@ -361,14 +369,14 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       variant !== 'native-tab' ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: ui.border } },
         h('strong', { style: { fontWeight: 500 } }, '云电脑'),
         h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, stateText),
-        active ? h('button', { style: ghostStyle, onClick: () => { close(); setNotice(''); } }, '断开') : null,
-        active ? h('button', { style: ghostStyle, onClick: () => { if (document.fullscreenElement) void document.exitFullscreen(); else void viewRef.current?.requestFullscreen(); } }, full ? '退出全屏' : '全屏') : null) : null,
-      readOnly && active ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
+        null) : null,
+      readOnly && active && !controlRef.current.snapshot.available ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
       stage,
-      h('div', { style: { position: 'absolute', zIndex: 2, top: 12, right: 12, display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', boxShadow: '0 2px 10px #0002' } },
-        !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open('read') }, phase === 'connecting' ? '正在启动…' : '重新连接') : null,
-        active && readOnly ? h('button', { style: pillStyle, onClick: () => { if (phase === 'dormant') void resumeIdle(); else void open('control'); } }, phase === 'dormant' ? '继续查看' : '接管') : null,
-        active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '你正在控制这台云电脑') : null,
+      h('div', { style: { position: 'absolute', zIndex: 3, bottom: 14, left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', boxShadow: '0 2px 10px #0002' } },
+        !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open(state.current.handoffSupported ? 'observe' : 'read') }, phase === 'connecting' ? '正在启动…' : '重新连接') : null,
+        active && readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12, whiteSpace: 'nowrap' } }, controlPhase === 'acquiring' ? '正在接管…' : controlPhase === 'releasing' ? '正在交还…' : '助理正在使用 · 点画面即可接管') : null,
+        active && readOnly && controlRef.current.snapshot.available ? h('button', { style: { ...pillStyle, padding: '3px 9px', fontSize: 11 }, onClick: () => controlRef.current.acquire() }, '接管') : null,
+        active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '您拥有控制权 · 点画面外释放') : null,
         active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null),
       h('details', { style: { position: 'absolute', bottom: 6, right: 8, color: secondaryInk, fontSize: 11, zIndex: 2 } }, h('summary', null, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
   }
@@ -377,10 +385,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       h('strong', { style: { fontWeight: 500, marginRight: 8 } }, '个人助理'),
       selectable && ['idle', 'closed', 'error'].includes(phase) ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '刷新助理列表') : null,
       typeof openInSidebar === 'function' ? h('button', { style: buttonStyle, onClick: openInSidebar }, '放到右侧栏') : null,
-      selectable ? h('button', { style: buttonStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => phase === 'dormant' ? resumeIdle() : void open('control') }, phase === 'dormant' ? '恢复画面' : readOnly && phase === 'readonly' ? '申请控制' : active ? '重新连接' : '连接云电脑') : null,
+      selectable ? h('button', { style: buttonStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => phase === 'dormant' ? resumeIdle() : void open(state.current.handoffSupported ? 'observe' : 'control') }, phase === 'dormant' ? '恢复画面' : readOnly && phase === 'readonly' ? '申请控制' : active ? '重新连接' : '连接云电脑') : null,
       selectable ? h('button', { style: buttonStyle, disabled: phase === 'connecting', onClick: () => void open('read') }, '只读旁观') : null,
-      active || phase === 'connecting' ? h('button', { style: buttonStyle, onClick: () => { close(); setNotice(''); } }, '断开连接') : null,
-      active ? h('button', { style: buttonStyle, onClick: () => { if (document.fullscreenElement) void document.exitFullscreen(); else void viewRef.current?.requestFullscreen(); } }, full ? '退出全屏' : '全屏') : null,
       active ? h('span', { role: 'status', 'aria-live': 'polite', style: { marginLeft: 'auto', color: 'var(--dsw-alias-label-secondary, #536174)' } }, stateText) : null),
     phase === 'readonly' ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '当前为只读旁观，鼠标和键盘输入不会发送；可申请控制') : null,
     active && notice ? h('div', { role: 'status', style: { padding: '8px 12px' } }, notice) : null,
@@ -422,9 +428,9 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
     if (operation !== 'personal-assistant.bots.list' && payload.botId && payload.botId !== scope.botId) throw new Error('云端助理不一致');
     return request(operation, { ...payload, ...scope });
   }, [request, scope?.agentId, scope?.botId]);
-  useEffect(() => { if (scope && nativeWorkbench) nativeWorkbench.bind(scope, scopedRequest); }, [nativeWorkbench, scopedRequest, scope?.agentId, scope?.botId]);
+  useEffect(() => { if (scope && nativeWorkbench?.available) nativeWorkbench.bind(scope, scopedRequest); else if (scope) setError(nativeWorkbench?.unavailableReason || '当前宿主需要更新原生侧栏组件'); }, [nativeWorkbench, scopedRequest, scope?.agentId, scope?.botId]);
   if (!scope) return h('div', { role: 'status', style: { padding: 24 } }, error || '正在连接云端个人助理…', error ? h('button', { onClick: () => retry(value => value + 1) }, '重新连接') : null);
-  if (!nativeWorkbench) return h('div', { role: 'alert', style: { padding: 24 } }, '当前宿主尚未提供原生云电脑侧栏，请更新 Studio 后重新打开。');
+  if (!nativeWorkbench?.available) return h('div', { role: 'alert', style: { padding: 24 } }, '当前宿主尚未提供原生云电脑侧栏，请更新 Studio 后重新打开。');
   return h('div', {
     key: `${scope.agentId}:${scope.botId}`, 'data-personal-assistant-home': 'true',
     'data-agent-id': scope.agentId, 'data-bot-id': scope.botId,
@@ -510,7 +516,17 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       h('span', { style: settingsStyle.note }, '检查会读取开通状态并拉取一次助理列表，不会启动云电脑')));
 }
 
-export function PersonalAssistantPanelIcon() { return '助'; }
+export function PersonalAssistantPanelIcon({ size } = {}) {
+  const R = clientReact;
+  const edge = Number(size) > 0 ? Number(size) : 16;
+  if (!R?.createElement) return '助';
+  return R.createElement('svg', {
+    width: edge, height: edge, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4,
+    strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true', focusable: 'false', style: { display: 'block' },
+  },
+  R.createElement('path', { d: 'M3.4 3.2h9.2a1.3 1.3 0 0 1 1.3 1.3H7.7l-2.9 2.3v-2.3H3.4a1.3 1.3 0 0 1-1.3-1.3V4.5a1.3 1.3 0 0 1 1.3-1.3z' }),
+  R.createElement('path', { d: 'M8.1 5.6l.62 1.46 1.46.62-1.46.62L8.1 9.76l-.62-1.46-1.46-.62 1.46-.62z' }));
+}
 export function PersonalAssistantComputerTabTitle() { return '云电脑'; }
 export function apply(ctx) {
   if (!ctx?.slots?.inject || !ctx.slots.register) throw new TypeError('Personal Assistant client requires the public DSH slots service');
@@ -531,7 +547,7 @@ export function apply(ctx) {
       return undefined;
     }
   };
-  const nativeWorkbench = createAssistantWorkbench({ layout: ctx.layout, slots: ctx.slots });
+  const nativeWorkbench = createAssistantWorkbench({ sidebarRight: ctx.sidebarRight, slots: ctx.slots });
   if (nativeWorkbench) {
     nativeWorkbench.render = props => AssistantNativeRightbar({ ...props, React: clientReact || globalThis.React, workbench: nativeWorkbench, Panel: PersonalAssistantPanel });
     scope(() => () => nativeWorkbench.dispose(), 'personal-assistant: native workbench');
@@ -547,8 +563,7 @@ export function apply(ctx) {
     name: 'settings.section', id: `${PERSONAL_ASSISTANT_PANEL_ID}-settings`, order: 196, label: '个人助理',
     inject: () => ({ request }),
   }, PersonalAssistantSettings)), 'personal-assistant: settings section');
-  // 右侧栏标签页在「有会话」的场景下由 dsh 自己挂载；个人助理是独立页面，
-  // sidebarRight.openTab 会报 no session surface is mounted，所以页面内改用左右分栏。
+  // 普通会话标签页仍可注册；全局个人助理页面使用原生 panel surface，不创建本地会话。
   const registerComputerTab = () => {
     if (typeof ctx.inject !== 'function') return;
     scope(() => ctx.inject(['sidebarRightTabs'], (sub) => {

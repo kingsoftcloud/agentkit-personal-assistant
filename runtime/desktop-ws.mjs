@@ -1,5 +1,6 @@
 /** Minimal authenticated WebSocket bridge for the Studio desktop view. */
-import { createHash, createPublicKey, timingSafeEqual, verify } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { verifyDesktopPermit, desktopUnauthorized as unauthorized } from './desktop-permit.mjs';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from '../src/client/bot-directory.mjs';
 
 const PROTOCOL = 'agentkit.personal-assistant.desktop.v1';
@@ -31,45 +32,7 @@ export function createDesktopSocketWriter(socket) {
     dispose() { socket.off('drain', drain); },
   };
 }
-const unauthorized = message => Object.assign(new Error(message), { status: 401, code: 'DESKTOP_UNAUTHORIZED' });
-const permitKeys = new Map();
-
-async function desktopJwks(env) {
-  if (env.AGENTKIT_DESKTOP_JWKS_JSON) return JSON.parse(env.AGENTKIT_DESKTOP_JWKS_JSON);
-  const source = String(env.AGENTKIT_DESKTOP_JWKS_URL || '');
-  if (!source) throw unauthorized('desktop verification keys are not configured');
-  const url = new URL(source);
-  if (url.username || url.password || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && env.AGENTKIT_DESKTOP_ALLOW_HTTP_JWKS === '1'))) throw unauthorized('desktop JWKS URL is not trusted');
-  const cached = permitKeys.get(source);
-  if (cached && cached.expires > Date.now()) return cached.value;
-  const response = await fetch(url, { signal: AbortSignal.timeout(3000), redirect: 'error' });
-  if (!response.ok) throw unauthorized('desktop verification keys unavailable');
-  const raw = await response.text();
-  if (raw.length > 64 * 1024) throw unauthorized('desktop verification keys exceed limit');
-  const value = JSON.parse(raw);
-  permitKeys.set(source, { value, expires: Date.now() + 60_000 });
-  return value;
-}
-
-/** 验证既有 Server workload 密钥签发的 JWS；不信任 caller 自带身份头。 */
-export async function verifyDesktopPermit(token, { assistantId, env = process.env, now = () => Date.now() } = {}) {
-  try {
-    if (typeof token !== 'string' || token.length > 16 * 1024) throw unauthorized('desktop permit is missing');
-    const segments = token.split('.');
-    if (segments.length !== 3 || segments.some(value => !/^[A-Za-z0-9_-]+$/u.test(value))) throw unauthorized('desktop permit is malformed');
-    const header = JSON.parse(Buffer.from(segments[0], 'base64url').toString('utf8'));
-    const claims = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8'));
-    if (header.alg !== 'EdDSA' || header.typ !== 'agentkit-desktop+jwt' || !header.kid) throw unauthorized('desktop permit algorithm is invalid');
-    const jwks = await desktopJwks(env);
-    const key = jwks?.keys?.find(value => value.kid === header.kid && value.kty === 'OKP' && value.crv === 'Ed25519');
-    if (!key || !verify(null, Buffer.from(`${segments[0]}.${segments[1]}`, 'ascii'), createPublicKey({ key, format: 'jwk' }), Buffer.from(segments[2], 'base64url'))) throw unauthorized('desktop permit signature is invalid');
-    const seconds = Math.floor(now() / 1000);
-    if (claims.iss !== 'agentengine-server' || claims.aud !== 'agentkit-personal-assistant-desktop' || claims.scope !== 'desktop' || claims.agentId !== assistantId || !claims.botId || !claims.jti || !['read', 'control'].includes(claims.mode)) throw unauthorized('desktop permit binding is invalid');
-    if (!Number.isSafeInteger(claims.iat) || !Number.isSafeInteger(claims.exp) || claims.iat > seconds || claims.exp <= seconds || claims.exp - claims.iat > 60) throw unauthorized('desktop permit expired');
-    return Object.freeze(claims);
-  } catch (error) { throw error?.status === 401 ? error : unauthorized('desktop permit could not be verified'); }
-}
-
+export { verifyDesktopPermit } from './desktop-permit.mjs';
 const loopback = address => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
 const equalToken = (left, right) => {
   const first = Buffer.from(left), second = Buffer.from(right);
@@ -124,8 +87,8 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       state.sessionId = null; state.autoLease = false; state.leaseId = null;
       // 独立发起清理，避免一个失联的 close 请求挡住租约释放。
       await Promise.allSettled([
-        ...(sessionId ? [Promise.resolve().then(() => brokerDesktopRequest('/broker/desktop/close', { sessionId }))] : []),
-        ...(leaseId ? [Promise.resolve().then(() => brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId }))] : []),
+        ...(sessionId ? [Promise.resolve().then(() => brokerDesktopRequest('/broker/desktop/close', { sessionId, botId: state.botId, taskId: state.taskId }))] : []),
+        ...(leaseId && !state.handoff ? [Promise.resolve().then(() => brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId }))] : []),
       ]);
     };
     const close = async ({ event, closeCode = 1000 } = {}) => {
@@ -146,7 +109,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     };
     const armIdle = () => {
       clearTimeout(state.idleTimer);
-      if (!state.suspendSupported || state.closed || state.idle) return;
+      if (!state.suspendSupported || state.closed || state.idle || state.requestedMode === 'read' || state.handoff) return;
       state.idleTimer = setTimeout(() => {
         state.pending = state.pending.then(() => suspend(false)).catch(error => fail(error, 'DESKTOP_IDLE_FAILED'));
       }, Math.max(0, state.idleTimeoutMs - (Date.now() - state.lastInputAt)));
@@ -158,13 +121,34 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
       const leaseId = state.leaseId, epoch = state.epoch;
       state.renewTimer = setInterval(() => {
         if (state.closed || state.idle || state.epoch !== epoch) return;
+        if (state.handoff && Date.now() - state.lastInputAt >= state.idleTimeoutMs) {
+          state.pending = state.pending.then(async () => {
+            if (!state.leaseId || state.closed) return;
+            const changed = await brokerDesktopRequest('/broker/desktop/control/release', { sessionId: state.sessionId, botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, controlEpoch: state.controlEpoch });
+            applyControl(changed);
+          }).catch(error => fail(error, 'DESKTOP_CONTROL_RELEASE_FAILED'));
+          return;
+        }
         void brokerDesktopRequest('/broker/lease/renew', { botId: state.botId, taskId: state.taskId, leaseId, ttlMs: 120000 }).catch(async error => {
           if (state.closed || state.idle || state.epoch !== epoch) return;
+          if (state.handoff && Number(error?.status) === 409) {
+            try { await syncControl(); } catch (syncError) { await fail(syncError, 'DESKTOP_CONTROL_SYNC_FAILED'); }
+            return;
+          }
           await fail(error, 'COMPUTER_LEASE_RENEW_FAILED');
           if (!state.closed) await close({ event: { reason: 'broker-unavailable', code: error?.code || 'COMPUTER_LEASE_RENEW_FAILED', status: error?.status || 503, retryable: true }, closeCode: 1011 });
         });
       }, 30_000);
       state.renewTimer.unref?.();
+    };
+    const applyControl = changed => {
+      state.controlEpoch = changed.controlEpoch; state.leaseId = changed.readOnly ? null : changed.lease?.leaseId || state.leaseId;
+      state.autoLease = !changed.readOnly; state.epoch++; state.lastInputAt = Date.now(); startRenewal();
+      send({ type: 'control', ...changed, lease: undefined, protocol: PROTOCOL });
+    };
+    const syncControl = async () => {
+      const changed = await brokerDesktopRequest('/broker/desktop/control/state', { sessionId: state.sessionId, botId: state.botId, taskId: state.taskId });
+      if (!state.closed) applyControl(changed);
     };
     const suspend = async fromBroker => {
       if (state.closed || state.idle || !state.sessionId || !state.suspendSupported) return;
@@ -182,7 +166,8 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     };
     const activate = opened => {
       state.idle = false; state.epoch++; state.lastInputAt = Date.now(); state.lastFrameSeq = -1;
-      state.suspendSupported = opened.idleMode === 'suspend'; state.idleTimeoutMs = Math.max(1000, Number(opened.idleTimeoutMs) || 60000);
+      state.controlEpoch = opened.controlEpoch ?? 0;
+      state.suspendSupported = opened.idleMode === 'suspend'; state.idleTimeoutMs = Math.max(1000, Number(opened.idleTimeoutMs) || 600000);
       startRenewal(); armIdle();
       send({ type: 'ready', ...opened, protocol: PROTOCOL }); void poll();
     };
@@ -246,33 +231,48 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         if (body.type === 'bots.list') {
           if (claims && (claims.mode !== 'read' || claims.botId !== DIRECTORY_BOT_ID)) throw Object.assign(new Error('助理目录需要独立只读授权'), { code: 'DESKTOP_DIRECTORY_SCOPE_REQUIRED', status: 403 });
           if (state.sessionId || typeof listBots !== 'function') throw Object.assign(new Error('助理目录暂不可用'), { code: 'DESKTOP_DIRECTORY_UNAVAILABLE', status: 503 });
-          send({ type: 'bots', bots: publicBotDirectory(await listBots()) });
+          send({ type: 'bots', bots: publicBotDirectory(await listBots()), features: ['desktop-handoff/v1'] });
           return close();
         }
         if (body.type === 'open') {
           if (claims?.botId === DIRECTORY_BOT_ID) throw Object.assign(new Error('目录授权不能打开桌面'), { code: 'DESKTOP_DIRECTORY_READ_ONLY', status: 403 });
           if (state.sessionId) throw Object.assign(new Error('desktop session already open'), { code: 'DESKTOP_SESSION_ALREADY_OPEN', status: 409 });
           if (claims && body.botId !== claims.botId) throw Object.assign(new Error('desktop Bot does not match permit'), { code: 'DESKTOP_BOT_MISMATCH', status: 403 });
-          if (claims?.mode === 'read' && (body.mode === 'control' || body.leaseId)) throw Object.assign(new Error('desktop permit is read-only'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+          if (claims?.mode === 'control' && body.mode !== 'observe') throw Object.assign(new Error('请更新客户端，通过旁观会话接管云电脑'), { code: 'DESKTOP_HANDOFF_REQUIRED', status: 403 });
+          if (claims?.mode === 'read' && (['control', 'observe'].includes(body.mode) || body.leaseId)) throw Object.assign(new Error('desktop permit is read-only'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+          if (body.mode === 'observe' && (!claims || claims.mode !== 'control')) throw Object.assign(new Error('无签名控制授权不能启用桌面接管'), { code: 'DESKTOP_CONTROL_GRANT_REQUIRED', status: 403 });
           if (claims && body.leaseId && body.leaseId !== claims.leaseId) throw Object.assign(new Error('desktop lease does not match permit'), { code: 'DESKTOP_LEASE_MISMATCH', status: 403 });
           state.botId = botIdOf(body.botId); state.taskId = taskIdOf(body.taskId); state.leaseId = body.leaseId || null;
-          state.externalLeaseId = state.leaseId; state.requestedMode = (claims ? claims.mode : body.mode) === 'control' ? 'control' : 'read';
+          state.handoff = body.mode === 'observe';
+          state.externalLeaseId = state.leaseId; state.requestedMode = state.handoff ? 'observe' : (claims ? claims.mode : body.mode) === 'control' ? 'control' : 'read';
           brokerStarted = true;
-          if ((claims ? claims.mode : body.mode) === 'control' && !state.leaseId) {
+          if (!state.handoff && (claims ? claims.mode : body.mode) === 'control' && !state.leaseId) {
             const acquired = await brokerDesktopRequest('/broker/lease/acquire', { botId: state.botId, taskId: state.taskId, idempotencyKey: `desktop-ws:${state.botId}:${state.taskId}:${Date.now()}`, ttlMs: 120000 });
             state.leaseId = acquired.lease?.leaseId || null; state.autoLease = true;
             if (state.closed) return releaseResources();
           }
-          const opened = await brokerDesktopRequest('/broker/desktop/session', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId || undefined, releaseLeaseOnIdle: state.autoLease });
+          const opened = await brokerDesktopRequest('/broker/desktop/session', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId || undefined, releaseLeaseOnIdle: state.autoLease,
+            ...(state.handoff ? { mode: 'observe', controlPermit: String(request.headers['x-agentengine-desktop-permit'] || '') } : {}) });
           state.sessionId = opened.sessionId;
           if (state.closed) return releaseResources();
           activate(opened); return;
         }
+        if (body.type === 'control.acquire' || body.type === 'control.release') {
+          if (!state.sessionId || !state.handoff || claims?.mode !== 'control' || claims.botId === DIRECTORY_BOT_ID) throw Object.assign(new Error('当前授权只允许旁观'), { code: 'DESKTOP_CONTROL_GRANT_REQUIRED', status: 403 });
+          if (!Number.isSafeInteger(body.controlEpoch) || body.controlEpoch !== state.controlEpoch) throw Object.assign(new Error('控制权状态已更新，请重新操作'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
+          const sessionId = state.sessionId;
+          const changed = await brokerDesktopRequest(`/broker/desktop/control/${body.type === 'control.acquire' ? 'acquire' : 'release'}`, { sessionId, botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, controlEpoch: body.controlEpoch });
+          if (state.closed) { await brokerDesktopRequest('/broker/desktop/close', { sessionId, botId: state.botId, taskId: state.taskId }); return; }
+          applyControl(changed);
+          return;
+        }
         if (body.type === 'input') {
+          if (claims?.mode === 'read') throw Object.assign(new Error('只读授权不能发送输入'), { code: 'DESKTOP_READ_ONLY', status: 403 });
           if (!state.sessionId) throw Object.assign(new Error('desktop session is not open'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
           if (state.idle) { send({ type: 'error', status: 409, code: 'DESKTOP_SESSION_IDLE', recoverable: true, message: '桌面已空闲，请先恢复连接' }); return; }
+          if (state.handoff && (!state.leaseId || body.controlEpoch !== state.controlEpoch)) throw Object.assign(new Error('输入未持有当前控制权'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
           brokerStarted = true;
-          const accepted = await brokerDesktopRequest('/broker/desktop/input', { sessionId: state.sessionId, botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, event: body.event });
+          const accepted = await brokerDesktopRequest('/broker/desktop/input', { sessionId: state.sessionId, botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, controlEpoch: state.controlEpoch, event: body.event });
           if (state.closed) return;
           state.lastInputAt = Date.now(); armIdle();
           if (state.timer) clearTimeout(state.timer);
@@ -282,6 +282,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         if (body.type === 'close') return close();
         if (body.type === 'pause') { state.paused = true; if (state.timer) clearTimeout(state.timer); return; }
         if (body.type === 'resume') {
+          if (claims?.mode === 'read' && body.mode === 'control') throw Object.assign(new Error('desktop permit is read-only'), { code: 'DESKTOP_READ_ONLY', status: 403 });
           state.paused = false;
           if (!state.idle) { void poll(); return; }
           if (body.activity !== true) return;
@@ -306,6 +307,11 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
         }
         send({ type: 'error', code: 'DESKTOP_MESSAGE_UNSUPPORTED' });
       } catch (error) {
+        if (state.handoff && (String(body.type).startsWith('control.') || body.type === 'input')) {
+          if (Number(error.status) === 409) { try { await syncControl(); } catch {} }
+          send({ type: 'error', status: error.status || 400, code: error.code || 'DESKTOP_CONTROL_FAILED', recoverable: true, readOnly: !state.leaseId, controlEpoch: state.controlEpoch, message: error.message || '控制权暂不可用，仍可继续旁观' });
+          return;
+        }
         if (body.type === 'resume' && state.idle && state.autoLease && state.leaseId) {
           try {
             await brokerDesktopRequest('/broker/lease/release', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId });
