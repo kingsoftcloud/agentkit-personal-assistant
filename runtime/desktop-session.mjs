@@ -450,7 +450,7 @@ export function createDesktopController({
     await ensureDisplay();
     await exec('xdotool', args, { env: environment, maxBuffer: 32 * 1024, timeout: 2000 });
   };
-  const keyNames = Object.freeze({ ctrl: 'Control_L', Control: 'Control_L', Alt: 'Alt_L', alt: 'Alt_L', Shift: 'Shift_L', shift: 'Shift_L', Meta: 'Super_L', meta: 'Super_L', Enter: 'Return', Escape: 'Escape', Esc: 'Escape', ' ': 'space', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Backspace: 'BackSpace' });
+  const keyNames = Object.freeze({ Ctrl: 'Control_L', Cmd: 'Super_L', Command: 'Super_L', Option: 'Alt_L', ctrl: 'Control_L', Control: 'Control_L', Alt: 'Alt_L', alt: 'Alt_L', Shift: 'Shift_L', shift: 'Shift_L', Meta: 'Super_L', meta: 'Super_L', Enter: 'Return', Escape: 'Escape', Esc: 'Escape', ' ': 'space', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Backspace: 'BackSpace' });
   const parsedKey = value => {
     const source = safeText(value, 'event.key', 64);
     const parts = source === ' ' ? [' '] : source.split('+');

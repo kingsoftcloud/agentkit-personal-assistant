@@ -142,7 +142,21 @@ async function action(body) {
       assertAgentLease(body);
       return { image: { data: frame.data, mediaType: 'image/jpeg', width: frame.width, height: frame.height, bytes: frame.bytes } };
     }
-    if (body.action === 'desktop.input') return desktop.input({ sessionId: session.sessionId, controlEpoch: session.controlEpoch, event: args.event });
+    if (body.action === 'desktop.input') {
+      const events = args.events ?? [args.event];
+      if (!Array.isArray(events) || events.length < 1 || events.length > 32) throw Object.assign(new Error('invalid desktop input batch'), { status: 400 });
+      try {
+        for (const event of events) {
+          assertAgentLease(body);
+          await desktop.input({ sessionId: session.sessionId, controlEpoch: session.controlEpoch, event });
+        }
+        return { accepted: true, events: events.length };
+      } catch (error) {
+        // 同一手势始终绑定最初租约。接管/错误时关闭旧会话，释放按键，不跨新租约续发剩余事件。
+        desktop.closeSession(session.sessionId); agentDesktopSessions.delete(lease.leaseId);
+        throw error;
+      }
+    }
     if (body.action === 'desktop.windows') return { windows: await desktop.windows() };
     if (body.action === 'desktop.focus') return desktop.focusWindow(args.windowId, () => assertAgentLease(body));
     if (body.action === 'desktop.launch') {

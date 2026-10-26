@@ -51,15 +51,14 @@ test('日程工具固定 Bot 归属，拒绝未声明时区，并调用真实调
   assert.equal(received.runAt, Date.parse('2026-10-27T04:00:00Z'));
 });
 
-test('拖拽中途失败仍释放按钮，非法坐标不发送输入', async () => {
-  const events = [];
-  const tool = createDesktopTool({ action: async (_name, { event }) => {
-    events.push(event);
-    if (event.type === 'pointermove' && event.x === 200) throw new Error('interrupted');
-    return { accepted: true };
-  } });
+test('拖拽作为一个租约绑定批次提交，非法坐标不发送输入', async () => {
+  const batches = [];
+  const tool = createDesktopTool({ action: async (_name, value) => { batches.push(value.events); return { accepted: true }; } });
   await assert.rejects(tool.execute({ action: 'click', x: 1280, y: 0 }), /coordinates/);
-  assert.equal(events.length, 0);
-  await assert.rejects(tool.execute({ action: 'drag', x: 100, y: 100, toX: 200, toY: 200 }), /interrupted/);
-  assert.deepEqual(events.at(-1), { type: 'button', button: 1, action: 'up' });
+  await assert.rejects(tool.execute({ action: 'drag', x: 100, y: 100, toX: 1280, toY: 0 }), /coordinates/);
+  assert.equal(batches.length, 0);
+  await tool.execute({ action: 'drag', x: 100, y: 100, toX: 200, toY: 200 });
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].length, 4);
+  assert.deepEqual(batches[0].at(-1), { type: 'button', button: 1, action: 'up' });
 });

@@ -49,20 +49,14 @@ export function createDesktopTool({ action, agent } = {}) {
         if (!Number.isInteger(args.deltaY) || args.deltaY < -20 || args.deltaY > 20) throw new TypeError('invalid scroll delta');
         await send({ type: 'pointermove', ...point(args) }); result = await send({ type: 'wheel', deltaY: args.deltaY });
       } else {
-        const start = point(args);
-        await send({ type: 'pointermove', ...start });
-        if (args.action === 'drag') {
-          const end = point(args, 'toX', 'toY');
-          await send({ type: 'button', button: 1, action: 'down', ...start });
-          // 接管时 Broker 会关闭旧会话并释放按键；最后一条 up 也必须通过当前租约。
-          try { result = await send({ type: 'pointermove', ...end }); }
-          finally { await send({ type: 'button', button: 1, action: 'up' }); }
-        } else if (args.action === 'double_click') result = await send({ type: 'button', button: 1, action: 'double', ...start });
+        const start = point(args), events = [{ type: 'pointermove', ...start }];
+        if (args.action === 'drag') events.push({ type: 'button', button: 1, action: 'down', ...start }, { type: 'pointermove', ...point(args, 'toX', 'toY') }, { type: 'button', button: 1, action: 'up' });
+        else if (args.action === 'double_click') events.push({ type: 'button', button: 1, action: 'double', ...start });
         else {
           const button = args.action === 'right_click' ? 3 : 1;
-          await send({ type: 'button', button, action: 'down', ...start });
-          result = await send({ type: 'button', button, action: 'up' });
+          events.push({ type: 'button', button, action: 'down', ...start }, { type: 'button', button, action: 'up' });
         }
+        result = await action('desktop.input', { events }, execution);
       }
       return { result: JSON.stringify(result) };
     },

@@ -85,6 +85,8 @@ export function createRuntime(ctx, config = {}) {
       const toolset = createComputerToolset({ broker: computerBroker, agent, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId, botId, taskId: `dsh:${agent.id}` });
       const registration = registerComputerTools({ agent, toolset });
       agent.ctx.effect?.(() => () => { for (const dispose of registration.disposers) dispose(); void toolset.dispose(); }, 'personal-assistant.computer-tools');
+      // 回合结束即交还；不同会话/定时任务不应等待上一回合的 TTL 才能使用同一电脑。
+      return () => toolset.release();
     },
   });
   const createBotComputerToolset = ({ botId, ...options } = {}) => createComputerToolset({

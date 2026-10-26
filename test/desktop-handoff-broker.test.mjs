@@ -13,7 +13,7 @@ function permit(mode = 'control', botId = 'bot') {
   const body = Buffer.from(JSON.stringify({ iss: 'agentengine-server', aud: 'agentkit-personal-assistant-desktop', scope: 'desktop', agentId: 'a', botId, mode, iat: now, exp: now + 60, jti: randomUUID() })).toString('base64url');
   return `${header}.${body}.${sign(null, Buffer.from(`${header}.${body}`), privateKey).toString('base64url')}`;
 }
-async function fixture(t, { browserFactory } = {}) {
+async function fixture(t, { browserFactory, onInput } = {}) {
   const sessions = new Map(), inputs = [];
   const view = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controlEpoch: session.controlEpoch, idleMode: 'retain-desktop' });
   const service = createComputerAgentServer({ env, browserFactory: browserFactory || (() => ({ available: true, openDesktopWindow: async () => ({}), dispose: async () => {} })), desktopFactory: () => ({
@@ -21,7 +21,7 @@ async function fixture(t, { browserFactory } = {}) {
     openSession: async value => { const session = { ...value, sessionId: randomUUID(), controlEpoch: 0 }; sessions.set(session.sessionId, session); return view(session); },
     getSession: id => sessions.get(id),
     setSessionControl: async ({ sessionId, controllable, leaseId, taskId }) => { const session = sessions.get(sessionId); Object.assign(session, { controllable, leaseId, taskId, controlEpoch: session.controlEpoch + 1 }); return view(session); },
-    input: async value => { inputs.push(value); return { accepted: true }; },
+    input: async value => { inputs.push(value); await onInput?.(value); return { accepted: true }; },
     closeSessionsForLease: leaseId => { for (const [id, session] of sessions) if (session.leaseId === leaseId) sessions.delete(id); },
     closeSession: id => sessions.delete(id),
     stats: () => ({ sessions: sessions.size }), dispose: async () => {},
@@ -57,6 +57,21 @@ test('Agent 桌面输入绑定同一租约，人接管后旧 Agent 输入在服�
   const human = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value;
   assert.equal((await post('desktop/control/acquire', { sessionId: human.sessionId, controlEpoch: 0 })).status, 200);
   assert.equal((await post('action', input)).value.error, 'COMPUTER_USER_CONTROLLED');
+  assert.equal(inputs.length, 1);
+});
+
+test('一个拖拽批次被人接管后，剩余事件不能借新租约继续发送', async t => {
+  let entered, proceed;
+  const reached = new Promise(resolve => { entered = resolve; });
+  const wait = new Promise(resolve => { proceed = resolve; });
+  const { post, inputs } = await fixture(t, { onInput: async () => { entered(); await wait; } });
+  const leaseId = (await post('lease/acquire', { taskId: 'agent-task' })).value.lease.leaseId;
+  const pending = post('action', { taskId: 'agent-task', leaseId, action: 'desktop.input', args: { events: [{ type: 'pointermove', x: 10, y: 10 }, { type: 'button', button: 1, action: 'down' }] } });
+  await reached;
+  const human = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value;
+  assert.equal((await post('desktop/control/acquire', { sessionId: human.sessionId, controlEpoch: 0 })).status, 200);
+  proceed();
+  assert.equal((await pending).value.error, 'COMPUTER_USER_CONTROLLED');
   assert.equal(inputs.length, 1);
 });
 
