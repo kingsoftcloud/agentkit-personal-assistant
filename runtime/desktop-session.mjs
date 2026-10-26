@@ -206,7 +206,7 @@ export function createDesktopController({
         'toolbar.clock.font: Noto Sans CJK SC-9', 'toolbar.workspace.font: Noto Sans CJK SC-9',
         'toolbar.iconbar.focused.font: Noto Sans CJK SC-9', 'toolbar.iconbar.unfocused.font: Noto Sans CJK SC-9', '',
       ].join('\n'));
-      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "Noto Sans Mono CJK SC" -fs 12 -geometry 56x24+20+65}\n[end]\n');
+      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12 -geometry 56x24+20+65}\n[end]\n');
       const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#dce5f0'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: true\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
@@ -227,10 +227,10 @@ export function createDesktopController({
   };
   const spawnTerminal = () => {
     if (!terminal || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
-    // Use the image's fontconfig fonts; xterm's legacy bitmap font is absent
-    // from the deliberately small desktop image and cannot render Unicode.
-    // Noto CJK 的单元格比 DejaVu 更宽；56列在1280px桌面内保留可见的窗口边界。
-    terminalProcess = trackStartupProcess('xterm', spawn('xterm', ['-display', display, '-u8', '-fa', 'Noto Sans Mono CJK SC', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '56x24+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] }));
+    // Latin 使用等宽 DejaVu 主字体；中文和 emoji 由 fontconfig 使用已安装的
+    // Noto 后备字体。不要把 CJK 字体作为 -fa，或用 -fd 锁定所有宽字符，
+    // 否则分别会拉宽英文单元格、破坏彩色 emoji 后备。56 列为多窗口留出空间。
+    terminalProcess = trackStartupProcess('xterm', spawn('xterm', ['-display', display, '-u8', '-fa', 'DejaVu Sans Mono', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '56x24+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] }));
     terminalProcess.once?.('exit', () => { terminalProcess = undefined; });
   };
   const waitDisplay = async () => {

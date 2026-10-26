@@ -96,7 +96,7 @@ try {
 
   // 独立验收终端复用现有 DISPLAY，不触碰用户正在运行的 shell/程序。
   const title = `PA_E2E_${randomUUID()}`;
-  fixtureTerminal = spawn('xterm', ['-display', process.env.DISPLAY || ':99', '-u8', '-fa', 'Noto Sans Mono CJK SC', '-fs', '12', '-geometry', '56x24+30+80', '-title', title,
+  fixtureTerminal = spawn('xterm', ['-display', process.env.DISPLAY || ':99', '-u8', '-fa', 'DejaVu Sans Mono', '-fs', '12', '-geometry', '56x24+30+80', '-title', title,
     '-xrm', 'XTerm*VT100.translations: #override\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-e', 'bash', '--noprofile', '--norc'], {
     cwd: files, env: { ...process.env, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', PS1: 'pa-e2e> ', HISTFILE: '/dev/null' }, stdio: 'ignore',
   });

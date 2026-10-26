@@ -144,7 +144,9 @@ test('窗口管理器逐字复制系统默认绑定，并使用独立 HOME 而�
     assert.match(style, /^window.label.focus.textColor: #23334d$/m);
     assert.match(style, /^window.focus.borderColor: #8da9d0$/m);
     assert.match(style, /^toolbar.color: #f8fbff$/m);
-    assert.match(await readFile(join(home, 'menu'), 'utf8'), /\[begin\] \(云电脑\)\n\[exec\] \(终端\)/);
+    const menu = await readFile(join(home, 'menu'), 'utf8');
+    assert.match(menu, /\[begin\] \(云电脑\)\n\[exec\] \(终端\)/);
+    assert.ok(menu.includes('-fa "DejaVu Sans Mono"'), '菜单终端使用紧凑 Latin 主字体并保留 Unicode 后备');
     for (const name of ['menu.title.font', 'menu.frame.font', 'menu.hilite.font', 'window.font', 'toolbar.clock.font', 'toolbar.workspace.font']) {
       assert.match(style, new RegExp(`${name}: Noto Sans CJK SC-`));
     }
@@ -300,7 +302,8 @@ test('旁观三分钟不休眠、关闭观察后十二分钟再开仍复用 X11 
     await controller.openSession({ identity: {} });
     for (const file of ['Xvfb', 'fluxbox', 'xterm']) assert.equal(children.filter(child => child.file === file).length, 1);
     const terminal = children.find(child => child.file === 'xterm');
-    assert.ok(terminal.args.includes('Noto Sans Mono CJK SC'));
+    assert.ok(terminal.args.includes('DejaVu Sans Mono'));
+    assert.equal(terminal.args.includes('-fd'), false, '不能把所有宽字符锁定在 CJK 字体而破坏 emoji 后备');
     assert.ok(terminal.args.includes('56x24+20+65'));
     assert.ok(terminal.args.some(value => value.includes('Shift <Key>Insert')));
     assert.equal(terminal.options.env.LANG, 'C.UTF-8');
