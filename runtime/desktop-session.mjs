@@ -164,7 +164,7 @@ export function createDesktopController({
       await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), bindings);
       await writeFile(join(wmConfiguration, '.fluxbox', 'apps'), '');
       await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\nmenu.title.font: Noto Sans CJK SC-10:bold\nmenu.frame.font: Noto Sans CJK SC-10\nmenu.hilite.font: Noto Sans CJK SC-10:bold\nwindow.font: Noto Sans CJK SC-9\ntoolbar.clock.font: Noto Sans CJK SC-9\ntoolbar.workspace.font: Noto Sans CJK SC-9\ntoolbar.iconbar.focused.font: Noto Sans CJK SC-9\ntoolbar.iconbar.unfocused.font: Noto Sans CJK SC-9\n');
-      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "Noto Sans Mono CJK SC" -fs 12}\n[end]\n');
+      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "Noto Sans Mono CJK SC" -fs 12 -geometry 56x24+20+65}\n[end]\n');
       const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
@@ -187,7 +187,8 @@ export function createDesktopController({
     if (!terminal || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
     // Use the image's fontconfig fonts; xterm's legacy bitmap font is absent
     // from the deliberately small desktop image and cannot render Unicode.
-    terminalProcess = spawn('xterm', ['-display', display, '-u8', '-fa', 'Noto Sans Mono CJK SC', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '76x27+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
+    // Noto CJK 的单元格比 DejaVu 更宽；56列在1280px桌面内保留可见的窗口边界。
+    terminalProcess = spawn('xterm', ['-display', display, '-u8', '-fa', 'Noto Sans Mono CJK SC', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '56x24+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
     terminalProcess.once?.('exit', () => { terminalProcess = undefined; });
   };
   const waitDisplay = async () => {

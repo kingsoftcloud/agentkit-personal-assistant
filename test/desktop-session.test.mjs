@@ -251,6 +251,7 @@ test('旁观三分钟不休眠、关闭观察后十二分钟再开仍复用 X11 
     for (const file of ['Xvfb', 'fluxbox', 'xterm']) assert.equal(children.filter(child => child.file === file).length, 1);
     const terminal = children.find(child => child.file === 'xterm');
     assert.ok(terminal.args.includes('Noto Sans Mono CJK SC'));
+    assert.ok(terminal.args.includes('56x24+20+65'));
     assert.ok(terminal.args.some(value => value.includes('Shift <Key>Insert')));
     assert.equal(terminal.options.env.LANG, 'C.UTF-8');
     assert.equal(terminal.options.env.LC_ALL, 'C.UTF-8');
