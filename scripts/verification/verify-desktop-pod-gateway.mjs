@@ -147,8 +147,6 @@ try {
   record('同一 WS 连续十次接管/释放成功，画面连接保留', { cycles });
   await execFile('import', ['-display', process.env.DISPLAY || ':99', '-window', 'root', join(evidence, 'terminal-input.png')]);
   await reader.close(); await secondary.close();
-  const retained = (await guiProcesses()).filter(value => value.binary !== 'ffmpeg');
-  await writeFile(join(evidence, 'processes-before.json'), JSON.stringify(retained.map(({ pid, binary }) => ({ pid, binary })), null, 2));
   console.log(JSON.stringify({ waiting: '真实网关旁观保活', milliseconds: observerMs }));
   const previousFrameCount = primary.frames.length, observerStarted = Date.now(); await sleep(observerMs);
   assert.equal(primary.closed, false); assert.ok(primary.frames.length > previousFrameCount || observerMs === 0);
@@ -156,6 +154,8 @@ try {
   const idleFps = idleFrames.length > 1 ? (idleFrames.length - 1) * 1000 / (idleFrames.at(-1).at - idleFrames[0].at) : null;
   if (observerMs >= 30000) { assert.ok(idleFps !== null && idleFps <= 1, `idle fps ${idleFps} exceeds 1`); }
   record('保持真实网关观察会话期间不休眠', { elapsedMs: observerMs, idleFps });
+  const retained = (await guiProcesses()).filter(value => value.binary !== 'ffmpeg');
+  await writeFile(join(evidence, 'processes-before.json'), JSON.stringify(retained.map(({ pid, binary }) => ({ pid, binary })), null, 2));
   await primary.close();
   const stopCaptureBegan = Date.now();
   await waitFor(async () => !(await guiProcesses()).some(value => value.binary === 'ffmpeg' && value.argv.includes('x11grab')), '其他观察者仍在，不能冒充无观察者阶段', 30000);
