@@ -3,6 +3,11 @@
 本轮是独立插件的实现及候选验证。目标预发实例为 `ar-20261025215911-7ef6c6f5`，
 没有为本轮测试重启该 Pod。下面把真实 Pod 的只读证据、本地真实 DSH 证据和待部署项分开记录。
 
+**2026-10-26 更新：** 下文保留 10 月 25 日的实现与受控 provider 记录。
+0.1.11 已在本方预发实例完成双 Bot 真实模型回合、Pod 重建、原 PVC 恢复及待执行日程续跑；
+也已通过隔离本地 profile 的真实插件管理器完成启用、禁用、卸载并对账云端数据。
+最新证据见[预发重建与本地卸载验收](./预发重建与本地卸载验收-20261026.md)。
+
 ## 提示词、记忆与工具边界
 
 云端从原始挂载 manifest 校验 SHA-256、协议、运行时三元组后读取平台 `prompt`，
@@ -83,17 +88,19 @@ namespace 也不同。因此 GUI shell 看不到 runtime 的所有 Bot 私有 JS
 `pvc-mounts-current-pod.json` 和 `pvc-namespace-isolation.json`。
 首次只做继承限制时 `subagent` 残留导致强断言失败，此记录保留在模型请求序列中，修复后再通过。
 
-## 预发部署后仍需做的生命周期检查
+## 10 月 25 日的待验清单与后续结果
 
 共享电脑租约可复用新 Pod 已有 `startup-fix-20261025/pod-computer-probes.jsonl` 的
 双 Bot acquire 409、release 后 acquire 证据，不在 GUI 测试中抢占控制权。
 
-下一次统一制品部署前，由主任务通知后再写入独立 canary：两个 Bot 同名记忆键、各自会话、
-一条未来任务及其输入。经正式 API Update/重建后核对原记录、DSH 原会话继续回合以及任务结果。
-目前本轮没有直接重启预发 Pod，也不把本地 volume 重启等同于预发 PVC 验收。
+上述清单已在 10 月 26 日由 0.1.11 实例 `ar-20261026071544-e9b4f704` 验证：
+两个 Bot 使用同名记忆键及同名日程 ID，分别完成真实回合；通过 Kubernetes 正常删除本方 Pod，
+由原 StatefulSet 重建，保留原 Agent 与 PVC。重建后原会话、消息、记忆仍在，两个 pending 日程
+均在原会话中完成新的真实 DSH 回合。没有新建替代 Agent，也没有强删 finalizer。
 
 本地插件禁用/卸载应只移除本地面板、连接和插件代码，不调用云端 Agent 删除接口；
 云端数据保留通过另一条已认证 API 对照 canary 验证。云端执行进程停用则应先停止调度与回合，
 保留 PVC 后重启读取相同记录。删除云端 Agent/PVC 是另一种生命周期操作，不能混作插件卸载。
-真实 Studio 禁用/卸载和上述预发重建仍待主任务安排；本轮单测已覆盖 runtime close 停止计时器、
-同一状态目录恢复记录及待执行任务。
+隔离 profile 中的真实 DSH PluginManager 已完成 setBundleEnabled(true/false) 与 removeBundle，
+卸载后 dump-config 合成通过，云端五类状态文件摘要不变。此项证明管理器和数据生命周期；
+不替代在用户 Studio 窗口中逐项点击插件中心的 UI 验收，也未修改用户当前 profile/App。
