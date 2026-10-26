@@ -139,6 +139,12 @@ test('窗口管理器逐字复制系统默认绑定，并使用独立 HOME 而�
     assert.ok(config.includes(`session.keyFile: ${join(home, '.fluxbox', 'keys')}`));
     assert.ok(config.includes('session.screen0.clickRaises: true'));
     const style = await readFile(join(home, 'style'), 'utf8');
+    assert.ok(config.includes("fbsetroot -solid '#dce5f0'"));
+    assert.match(style, /^background.color: #dce5f0$/m);
+    assert.match(style, /^window.label.focus.textColor: #23334d$/m);
+    assert.match(style, /^window.focus.borderColor: #8da9d0$/m);
+    assert.match(style, /^toolbar.color: #f8fbff$/m);
+    assert.match(await readFile(join(home, 'menu'), 'utf8'), /\[begin\] \(云电脑\)\n\[exec\] \(终端\)/);
     for (const name of ['menu.title.font', 'menu.frame.font', 'menu.hilite.font', 'window.font', 'toolbar.clock.font', 'toolbar.workspace.font']) {
       assert.match(style, new RegExp(`${name}: Noto Sans CJK SC-`));
     }

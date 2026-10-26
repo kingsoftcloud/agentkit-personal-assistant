@@ -172,9 +172,42 @@ export function createDesktopController({
       await mkdir(join(wmConfiguration, '.fluxbox'));
       await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), bindings);
       await writeFile(join(wmConfiguration, '.fluxbox', 'apps'), '');
-      await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\nmenu.title.font: Noto Sans CJK SC-10:bold\nmenu.frame.font: Noto Sans CJK SC-10\nmenu.hilite.font: Noto Sans CJK SC-10:bold\nwindow.font: Noto Sans CJK SC-9\ntoolbar.clock.font: Noto Sans CJK SC-9\ntoolbar.workspace.font: Noto Sans CJK SC-9\ntoolbar.iconbar.focused.font: Noto Sans CJK SC-9\ntoolbar.iconbar.unfocused.font: Noto Sans CJK SC-9\n');
+      // 真实桌面采用浅蓝灰背景与平面窗口装饰；菜单仍使用系统 Noto 中文字体。
+      await writeFile(join(wmConfiguration, 'style'), [
+        'background: solid', 'background.color: #dce5f0',
+        'window.title.height: 28', 'window.bevelWidth: 3',
+        'window.title.focus: flat solid', 'window.title.focus.color: #f6f9fd',
+        'window.label.focus: parentrelative', 'window.label.focus.textColor: #23334d',
+        'window.title.unfocus: flat solid', 'window.title.unfocus.color: #eaf0f7',
+        'window.label.unfocus: parentrelative', 'window.label.unfocus.textColor: #66758b',
+        'window.focus.borderColor: #8da9d0', 'window.unfocus.borderColor: #c1cddd',
+        'window.borderWidth: 1', 'window.handleWidth: 3',
+        'window.button.focus: parentrelative', 'window.button.focus.picColor: #506882',
+        'window.button.unfocus: parentrelative', 'window.button.unfocus.picColor: #8a99ad',
+        'window.button.pressed: flat solid', 'window.button.pressed.color: #cbdcf2',
+        'window.handle.focus: flat solid', 'window.handle.focus.color: #d5e1f1',
+        'window.handle.unfocus: flat solid', 'window.handle.unfocus.color: #e4ebf4',
+        'window.grip.focus: parentrelative', 'window.grip.unfocus: parentrelative',
+        'menu.title: flat solid', 'menu.title.color: #f0f5fc', 'menu.title.textColor: #23334d',
+        'menu.frame: flat solid', 'menu.frame.color: #ffffff', 'menu.frame.textColor: #33435a',
+        'menu.hilite: flat solid', 'menu.hilite.color: #dce8f9', 'menu.hilite.textColor: #1e3658',
+        'menu.borderColor: #c5d2e3', 'menu.borderWidth: 1', 'menu.bevelWidth: 6',
+        'toolbar: flat solid', 'toolbar.color: #f8fbff', 'toolbar.height: 32',
+        'toolbar.borderColor: #c5d2e3', 'toolbar.borderWidth: 1', 'toolbar.bevelWidth: 4',
+        'toolbar.clock: parentrelative', 'toolbar.clock.textColor: #40516b',
+        'toolbar.workspace: parentrelative', 'toolbar.workspace.textColor: #40516b',
+        'toolbar.button: parentrelative', 'toolbar.button.picColor: #506882',
+        'toolbar.button.pressed: flat solid', 'toolbar.button.pressed.color: #dce8f9',
+        'toolbar.iconbar.focused: flat solid', 'toolbar.iconbar.focused.color: #dfebfa',
+        'toolbar.iconbar.focused.textColor: #23334d',
+        'toolbar.iconbar.unfocused: parentrelative', 'toolbar.iconbar.unfocused.textColor: #66758b',
+        'menu.title.font: Noto Sans CJK SC-10:bold', 'menu.frame.font: Noto Sans CJK SC-10',
+        'menu.hilite.font: Noto Sans CJK SC-10:bold', 'window.font: Noto Sans CJK SC-9',
+        'toolbar.clock.font: Noto Sans CJK SC-9', 'toolbar.workspace.font: Noto Sans CJK SC-9',
+        'toolbar.iconbar.focused.font: Noto Sans CJK SC-9', 'toolbar.iconbar.unfocused.font: Noto Sans CJK SC-9', '',
+      ].join('\n'));
       await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "Noto Sans Mono CJK SC" -fs 12 -geometry 56x24+20+65}\n[end]\n');
-      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: true\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
+      const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#dce5f0'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: true\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
     }
