@@ -104,3 +104,23 @@ test('已声明的浏览器按键和下载动作必须实际到达 Broker', asyn
     assert.deepEqual(mock.actions.map(value => value.action), ['press', 'download']);
   } finally { await toolset.dispose(); }
 });
+
+test('缓存租约被人接管后，新动作等待交还再执行，不向旧租约发送输入', async () => {
+  const { createComputerToolset } = await import('../src/cloud-computer-tools.mjs');
+  let controlled = false, calls = 0, blocked;
+  const observed = new Promise(resolve => { blocked = resolve; });
+  const toolset = createComputerToolset({ assistantId: 'a', botId: 'b', computerId: 'c', broker: {
+    acquireLease: async request => {
+      if (controlled) { blocked(); throw Object.assign(new Error('human'), { code: 'COMPUTER_USER_CONTROLLED', status: 409 }); }
+      return { lease: { ...request, leaseId: `lease-${calls}`, expiresAt: Date.now() + 60000 } };
+    },
+    releaseLease: async () => ({ released: true }), action: async () => { calls++; return { accepted: true }; },
+  } });
+  await toolset.execute('cloud_browser_press', { key: 'Enter' });
+  controlled = true;
+  const pending = toolset.execute('cloud_browser_press', { key: 'Tab' });
+  await observed; assert.equal(calls, 1);
+  controlled = false;
+  await pending; assert.equal(calls, 2);
+  await toolset.dispose();
+});

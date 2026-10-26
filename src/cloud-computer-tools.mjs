@@ -105,8 +105,8 @@ export function createComputerToolset({
   async function ensureLease(requestedTaskId = initialTaskId, signal) {
     if (disposed) throw new Error('COMPUTER_TOOLSET_DISPOSED');
     const activeTaskId = taskIdOf(requestedTaskId);
-    if (activeLease && activeLease.taskId === activeTaskId && activeLease.expiresAt > now()) return activeLease;
-    if (activeLease) await release().catch(() => {});
+    // 即使本地缓存未过期，也向 Broker 幂等确认一次；用户可能已经接管了旧租约。
+    if (activeLease && (activeLease.taskId !== activeTaskId || activeLease.expiresAt <= now())) await release().catch(() => {});
     const idempotencyKey = `${identity.assistantId}:${identity.botId}:${identity.computerId}:${activeTaskId}`;
     const deadline = Date.now() + 120000;
     let response;
@@ -116,6 +116,7 @@ export function createComputerToolset({
       try { response = await broker.acquireLease(createLeaseRequest({ ...identity, taskId: activeTaskId, idempotencyKey, ttlMs: leaseTtlMs })); break; }
       catch (error) {
         if (error?.code !== 'COMPUTER_USER_CONTROLLED' || Date.now() >= deadline) throw error;
+        activeLease = null;
         // 只等待取得新租约，不重放已经开始或结果未知的输入。
         await sleep(500, undefined, { signal });
       }
