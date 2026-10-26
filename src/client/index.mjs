@@ -394,7 +394,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       readOnly && active ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
       stage,
       h('div', { style: { display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, padding: '10px 12px 14px', flexWrap: 'wrap' } },
-        !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open('control') }, phase === 'connecting' ? '正在启动…' : '连接云电脑') : null,
+        !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open('read') }, phase === 'connecting' ? '正在启动…' : '连接云电脑') : null,
         active && readOnly ? h('button', { style: pillStyle, onClick: () => { if (phase === 'dormant') void resumeIdle(); else void open('control'); } }, phase === 'dormant' ? '继续查看' : '申请控制权') : null,
         active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '你正在控制这台云电脑') : null,
         active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null),

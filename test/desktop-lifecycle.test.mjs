@@ -239,7 +239,7 @@ function panelHarness(t, options = {}) {
     useEffect(effect, deps) { const index = cursor++; if (!hooks[index]) { hooks[index] = { deps }; effects.push(() => { hooks[index].cleanup = effect(); }); } },
   };
   setClientReactRuntime(fakeReact);
-  const render = () => { cursor = 0; tree = PersonalAssistantPanel({ request, initialBotId: 'writer' }); for (const effect of effects.splice(0)) effect(); return tree; };
+  const render = () => { cursor = 0; tree = PersonalAssistantPanel({ request, initialBotId: 'writer', variant: options.variant }); for (const effect of effects.splice(0)) effect(); return tree; };
   const all = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(all)] : [];
   const text = node => typeof node === 'string' ? node : node?.children?.map(text).join('') || '';
   const visibleText = node => typeof node === 'string' ? node : node?.type === 'details' && !node.props.open ? visibleText(node.children[0]) : node?.children?.map(visibleText).join('') || '';
@@ -260,6 +260,18 @@ async function connectPanel(panel, mode = 'read') {
   socket.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); socket.message(new ArrayBuffer(8)); await flush();
   return socket;
 }
+
+test('聊天旁的云电脑默认旁观，不占助理租约；显式申请控制才获取 control 票据', async t => {
+  const panel = panelHarness(t, { variant: 'computer' });
+  await flush(); panel.click('连接云电脑'); await flush();
+  assert.equal(panel.tickets().at(-1).payload.mode, 'read');
+  const viewer = panel.sockets.at(-1); viewer.open();
+  assert.equal(viewer.sent[0].mode, 'read');
+  viewer.message({ type: 'ready', sessionId: 'viewer', readOnly: true, display: { width: 1280, height: 800 } });
+  viewer.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); viewer.message(new ArrayBuffer(8)); await flush();
+  panel.click('申请控制权'); await flush();
+  assert.equal(panel.tickets().at(-1).payload.mode, 'control');
+});
 
 test('全屏时正文焦点的 Esc 在本地退出且不关闭桌面，不接管其它全屏元素；卸载移除监听', async t => {
   const panel = panelHarness(t), socket = await connectPanel(panel, 'control');
