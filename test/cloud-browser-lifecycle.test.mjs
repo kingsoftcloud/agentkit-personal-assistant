@@ -14,11 +14,14 @@ async function fixture(t, options = {}) {
       closed: false,
       async send(method, params) {
         commands.push({ method, params });
+        await options.onSend?.(method, params);
         if (method === 'Target.createTarget') { page.url = params.url; return { targetId: `target-${transports.length}` }; }
         if (method === 'Target.attachToTarget') return { sessionId: `page-${transports.length}` };
         if (method === 'Page.navigate') { page.url = params.url; return {}; }
         if (method === 'Runtime.evaluate') return { result: { value: params.expression === 'document.readyState' ? 'complete'
-          : params.expression.includes('performance.getEntries') ? [] : { ...page, text: 'visible browser', links: [] } } };
+          : params.expression.includes('performance.getEntries') ? []
+            : params.expression.includes('getBoundingClientRect') ? { found: true, left: 20, top: 30, width: 40, height: 50 }
+              : { ...page, text: 'visible browser', links: [] } } };
         return {};
       },
     }, async dispose() { this.disposed = true; this.connection.closed = true; } };
@@ -101,4 +104,92 @@ test('已被人类接管的旧调用不能先重建浏览器再被权限钩子�
   await assert.rejects(browser.snapshot(), { status: 409 });
   assert.equal(transports.length, 1, '旧 agent 不能在新控制者工作时重建已断开的浏览器');
   assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 1);
+});
+
+for (const blockingMethod of ['Target.closeTarget', 'Browser.close']) {
+  test(`工具关闭停在 ${blockingMethod} ACK 时接管，不能继续关闭/kill 用户浏览器`, async t => {
+    let humanControlled = false, reached, proceed;
+    const barrier = new Promise(resolve => { proceed = resolve; });
+    const blocked = new Promise(resolve => { reached = resolve; });
+    const { browser, transports, commands } = await fixture(t, {
+      beforeCommand: async () => { if (humanControlled) throw Object.assign(new Error('用户控制中'), { status: 409, code: 'COMPUTER_USER_CONTROLLED' }); },
+      onSend: async method => { if (method === blockingMethod && !humanControlled) { reached(); await barrier; } },
+    });
+    await browser.open('https://example.com/?keep=browser');
+    const closing = browser.close();
+    const refused = assert.rejects(closing, { status: 409, code: 'COMPUTER_USER_CONTROLLED' });
+    try {
+      await blocked;
+      humanControlled = true;
+      await browser.releaseInput();
+      proceed(); await refused;
+      assert.equal(transports[0].disposed, false, '工具取消后不能 orphan/kill 仍活着的 transport');
+      assert.equal(commands.filter(command => command.method === 'Browser.close').length, blockingMethod === 'Browser.close' ? 1 : 0);
+      humanControlled = false;
+      assert.equal((await browser.snapshot()).url, 'https://example.com/?keep=browser', '被拒绝的关闭不能清空 URL 或 transport 引用');
+    } finally { proceed(); }
+  });
+}
+
+for (const kind of ['mouse', 'key']) {
+  test(`CDP ${kind} down ACK 未返回时接管，先完成清理 up 再让人类输入`, async t => {
+    let humanControlled = false, reached, proceed;
+    const barrier = new Promise(resolve => { proceed = resolve; });
+    const blocked = new Promise(resolve => { reached = resolve; });
+    const { browser, commands } = await fixture(t, {
+      beforeCommand: async () => { if (humanControlled) throw Object.assign(new Error('用户控制中'), { status: 409, code: 'COMPUTER_USER_CONTROLLED' }); },
+      onSend: async (method, params) => {
+        if (params.type === (kind === 'mouse' ? 'mousePressed' : 'rawKeyDown')) { reached(); await barrier; }
+      },
+    });
+    await browser.open('https://example.com/');
+    const operation = kind === 'mouse' ? browser.click({ selector: '#target' }) : browser.press({ key: 'Enter' });
+    const refused = assert.rejects(operation, { status: 409, code: 'COMPUTER_USER_CONTROLLED' });
+    try {
+      await blocked; humanControlled = true;
+      const cleaned = await browser.releaseInput();
+      assert.equal(kind === 'mouse' ? cleaned.releasedButtons : cleaned.releasedKeys, 1);
+      const types = commands.filter(command => command.method.startsWith('Input.dispatch')).map(command => command.params.type);
+      assert.deepEqual(types, kind === 'mouse' ? ['mousePressed', 'mouseReleased'] : ['rawKeyDown', 'keyUp']);
+      proceed(); await refused;
+      assert.equal(commands.filter(command => command.params.type === (kind === 'mouse' ? 'mouseReleased' : 'keyUp')).length, 1,
+        '旧回合不得在清理后再发一个 up 抬起人类的新手势');
+    } finally { proceed(); }
+  });
+}
+
+test('CDP 清理 up 失败不忘记 held 状态，显式重试成功后才允许交接', async t => {
+  let failRelease = true, reached, proceed;
+  const barrier = new Promise(resolve => { proceed = resolve; });
+  const blocked = new Promise(resolve => { reached = resolve; });
+  const { browser } = await fixture(t, { onSend: async (_method, params) => {
+    if (params.type === 'mousePressed') { reached(); await barrier; }
+    if (params.type === 'mouseReleased' && failRelease) throw new Error('fixture cleanup failed');
+  } });
+  await browser.open('https://example.com/');
+  const clicking = browser.click({ selector: '#target' });
+  const refused = assert.rejects(clicking, { status: 409 });
+  try {
+    await blocked;
+    await assert.rejects(browser.releaseInput(), { code: 'ASSISTANT_BROWSER_INPUT_RELEASE_FAILED', status: 503 });
+    failRelease = false;
+    assert.equal((await browser.releaseInput()).releasedButtons, 1);
+    proceed(); await refused;
+  } finally { proceed(); }
+});
+
+test('已通过异步权限钩子但尚未真正发送的旧命令仍会被本地代次封住', async t => {
+  let checks = 0, reached, proceed;
+  const barrier = new Promise(resolve => { proceed = resolve; });
+  const blocked = new Promise(resolve => { reached = resolve; });
+  const { browser, commands } = await fixture(t, { beforeCommand: async command => {
+    if (command.method === 'Input.insertText' && ++checks === 2) { reached(); await barrier; }
+  } });
+  await browser.open('https://example.com/');
+  const typing = browser.type({ text: 'stale' });
+  const refused = assert.rejects(typing, { status: 409 });
+  try {
+    await blocked; await browser.releaseInput(); proceed(); await refused;
+    assert.equal(commands.some(command => command.method === 'Input.insertText'), false);
+  } finally { proceed(); }
 });

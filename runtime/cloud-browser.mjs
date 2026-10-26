@@ -303,6 +303,59 @@ export function createCloudBrowser({
   const commandMs = Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0 ? commandTimeoutMs : CDP_COMMAND_TIMEOUT_MS;
 
   let transport = null, targetId = null, pageSession = null, launching = null, disposed = false, idleTimer = null, lastUrl = null;
+  let inputGeneration = 0, releasingInput;
+  const heldMouseButtons = new Map(), heldKeys = new Map();
+  const controlChanged = () => Object.assign(new Error('云电脑控制权已变化，旧操作已停止'), { code: 'COMPUTER_USER_CONTROLLED', status: 409 });
+  const checkGeneration = generation => { if (generation !== inputGeneration) throw controlChanged(); };
+  const checkCommand = async (method, params, scope, generation) => {
+    await beforeCommand?.({ method, params, scope });
+    checkGeneration(generation);
+  };
+  const forgetInput = current => {
+    for (const [key, held] of heldMouseButtons) if (held.current === current) heldMouseButtons.delete(key);
+    for (const [key, held] of heldKeys) if (held.current === current) heldKeys.delete(key);
+  };
+
+  async function sendPageCommand(current, method, params, sessionId) {
+    const button = String(params.button || 'left'), key = String(params.code || params.key || '');
+    let record, release;
+    if (method === 'Input.dispatchMouseEvent' && params.type === 'mousePressed') {
+      // send 的 ACK 可以很晚才到；在真正发出前保守记录，接管清理不能等 ACK。
+      record = { current, sessionId, params: { ...params } };
+      heldMouseButtons.set(button, record);
+    } else if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') release = { map: heldMouseButtons, key: button, record: heldMouseButtons.get(button) };
+    if (method === 'Input.dispatchKeyEvent' && ['keyDown', 'rawKeyDown'].includes(params.type)) {
+      record = { current, sessionId, params: { ...params } };
+      heldKeys.set(key, record);
+    } else if (method === 'Input.dispatchKeyEvent' && params.type === 'keyUp') release = { map: heldKeys, key, record: heldKeys.get(key) };
+    const result = await current.connection.send(method, params, { sessionId, timeoutMs: commandMs });
+    if (release && release.map.get(release.key) === release.record) release.map.delete(release.key);
+    return result;
+  }
+
+  async function releaseInput() {
+    if (releasingInput) return releasingInput;
+    inputGeneration += 1;
+    // 在原 CDP 通道发送 up：同一 WS 保证 down/up 的发送顺序，不等待迟到的 down ACK。
+    // broker 必须等本方法完成才授予人类控制权，避免清理 up 抬起人类的新手势。
+    releasingInput = (async () => {
+      let buttons = 0, keys = 0;
+      for (const [button, held] of [...heldMouseButtons]) {
+        try { await held.current.connection.send('Input.dispatchMouseEvent', { ...held.params, type: 'mouseReleased', buttons: 0 }, { sessionId: held.sessionId, timeoutMs: commandMs }); }
+        catch (cause) { throw Object.assign(new Error(`无法释放云浏览器鼠标按键: ${cause.message}`), { code: 'ASSISTANT_BROWSER_INPUT_RELEASE_FAILED', status: 503, cause }); }
+        if (heldMouseButtons.get(button) === held) heldMouseButtons.delete(button);
+        buttons += 1;
+      }
+      for (const [key, held] of [...heldKeys]) {
+        try { await held.current.connection.send('Input.dispatchKeyEvent', { ...held.params, type: 'keyUp' }, { sessionId: held.sessionId, timeoutMs: commandMs }); }
+        catch (cause) { throw Object.assign(new Error(`无法释放云浏览器键盘按键: ${cause.message}`), { code: 'ASSISTANT_BROWSER_INPUT_RELEASE_FAILED', status: 503, cause }); }
+        if (heldKeys.get(key) === held) heldKeys.delete(key);
+        keys += 1;
+      }
+      return { releasedButtons: buttons, releasedKeys: keys, generation: inputGeneration };
+    })();
+    try { return await releasingInput; } finally { releasingInput = undefined; }
+  }
 
   const throwIfAborted = signal => { if (signal?.aborted) throw fail('云端浏览器操作已取消', 'ASSISTANT_BROWSER_ABORTED'); };
   function ensureUsable() {
@@ -324,15 +377,21 @@ export function createCloudBrowser({
   function clearIdle() { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } }
 
   async function pageCommand(method, params = {}) {
-    await beforeCommand?.({ method, params, scope: 'page' });
+    const generation = inputGeneration;
+    await checkCommand(method, params, 'page', generation);
+    checkGeneration(generation);
     const current = await ensureBrowser();
-    await beforeCommand?.({ method, params, scope: 'page' });
-    return await current.connection.send(method, params, { sessionId: pageSession, timeoutMs: commandMs });
+    await checkCommand(method, params, 'page', generation);
+    checkGeneration(generation);
+    return await sendPageCommand(current, method, params, pageSession);
   }
   async function browserCommand(method, params = {}) {
-    await beforeCommand?.({ method, params, scope: 'browser' });
+    const generation = inputGeneration;
+    await checkCommand(method, params, 'browser', generation);
+    checkGeneration(generation);
     const current = await ensureBrowser();
-    await beforeCommand?.({ method, params, scope: 'browser' });
+    await checkCommand(method, params, 'browser', generation);
+    checkGeneration(generation);
     return await current.connection.send(method, params, { timeoutMs: commandMs });
   }
 
@@ -340,8 +399,9 @@ export function createCloudBrowser({
     ensureUsable();
     if (transport?.connection.closed) {
       const previous = transport;
-      transport = null; targetId = null; pageSession = null;
-      await previous.dispose().catch(() => {});
+      await previous.dispose();
+      forgetInput(previous);
+      if (transport === previous) { transport = null; targetId = null; pageSession = null; }
     }
     if (transport) { touch(); return transport; }
     if (!launching) launching = launch();
@@ -381,17 +441,25 @@ export function createCloudBrowser({
     }
   }
 
-  async function closeBrowser() {
-    clearIdle();
+  async function closeBrowser({ trusted = false } = {}) {
     const current = transport;
     const closingTarget = targetId;
-    transport = null; targetId = null; pageSession = null; lastUrl = null;
-    if (!current) return;
+    const generation = inputGeneration;
+    const authorize = (method, params = {}) => trusted ? Promise.resolve() : checkCommand(method, params, 'browser', generation);
+    if (!current) { clearIdle(); lastUrl = null; return; }
     if (closingTarget) {
+      await authorize('Target.closeTarget', { targetId: closingTarget });
+      if (!trusted) checkGeneration(generation);
       try { await current.connection.send('Target.closeTarget', { targetId: closingTarget }, { timeoutMs: 3000 }); } catch {}
     }
+    await authorize('Browser.close');
+    if (!trusted) checkGeneration(generation);
     try { await current.connection.send('Browser.close', {}, { timeoutMs: 3000 }); } catch {}
-    await current.dispose().catch(() => {});
+    await authorize('Browser.dispose');
+    if (!trusted) checkGeneration(generation);
+    await current.dispose();
+    forgetInput(current);
+    if (transport === current) { clearIdle(); transport = null; targetId = null; pageSession = null; lastUrl = null; }
   }
 
   async function evaluate(expression) {
@@ -468,6 +536,7 @@ export function createCloudBrowser({
 
   async function click(args) {
     requirePage();
+    const generation = inputGeneration;
     const selector = selectorArgument(args?.selector);
     const geometry = await evaluate(clickExpression(selector));
     if (!geometry || geometry.found !== true) throw fail('选择器没有匹配的页面元素', 'ASSISTANT_BROWSER_SELECTOR_NOT_FOUND');
@@ -477,7 +546,9 @@ export function createCloudBrowser({
     const y = Math.round(Number(geometry.top) + height / 2);
     if (!Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 100_000 || Math.abs(y) > 100_000) throw fail('元素坐标超出可点击范围', 'ASSISTANT_BROWSER_SELECTOR_NOT_VISIBLE');
     const point = { x, y, button: 'left', clickCount: 1 };
+    checkGeneration(generation);
     await pageCommand('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, buttons: 1 });
+    checkGeneration(generation);
     await pageCommand('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, buttons: 0 });
     touch();
     return { selector, x, y };
@@ -485,6 +556,7 @@ export function createCloudBrowser({
 
   async function type(args) {
     requirePage();
+    const generation = inputGeneration;
     const text = boundedString(args?.text, MAX_TYPE_BYTES, '输入文本');
     if (!text) throw fail('输入文本不能为空', 'ASSISTANT_BROWSER_INVALID_ARGUMENT');
     let selector = null;
@@ -492,6 +564,7 @@ export function createCloudBrowser({
       selector = selectorArgument(args.selector);
       if (await evaluate(focusExpression(selector)) !== true) throw fail('选择器没有可聚焦的页面元素', 'ASSISTANT_BROWSER_SELECTOR_NOT_FOUND');
     }
+    checkGeneration(generation);
     await pageCommand('Input.insertText', { text });
     touch();
     return { selector: selector ?? '', typed: Buffer.byteLength(text, 'utf8') };
@@ -499,11 +572,13 @@ export function createCloudBrowser({
 
   async function press(args) {
     requirePage();
+    const generation = inputGeneration;
     const keyName = boundedString(args?.key, 64, '按键名', { required: true });
     const key = KEY_ALLOWLIST[keyName];
     if (!key) throw fail('按键不在允许列表内', 'ASSISTANT_BROWSER_KEY_REFUSED');
     const params = { key: key.key, code: key.code, windowsVirtualKeyCode: key.windowsVirtualKeyCode, nativeVirtualKeyCode: key.windowsVirtualKeyCode };
     await pageCommand('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...params });
+    checkGeneration(generation);
     await pageCommand('Input.dispatchKeyEvent', { type: 'keyUp', ...params });
     touch();
     return { key: keyName };
@@ -695,12 +770,13 @@ function browserOutput(properties, required, render) {
     screenshot,
     download,
     close,
+    releaseInput,
     async dispose() {
       if (disposed) return;
       disposed = true;
       // 关闭与冷启动并发时，等待启动结束再回收，避免迟到的 Chromium 泄漏。
       if (launching) await launching.catch(() => {});
-      await closeBrowser();
+      await closeBrowser({ trusted: true });
     },
   };
 }
