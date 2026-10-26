@@ -20,8 +20,9 @@ export const DESKTOP_ACTIVE_INTERVAL_MS = 80;
 export const DESKTOP_IDLE_INTERVAL_MS = 1000;
 export const DESKTOP_CAPTURE_FPS = 15;
 export const DESKTOP_ACTIVITY_WINDOW_MS = 10_000;
-export const DESKTOP_IDLE_TIMEOUT_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_TIMEOUT_MS || 60_000);
+export const DESKTOP_IDLE_TIMEOUT_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_TIMEOUT_MS || 10 * 60_000);
 export const DESKTOP_IDLE_RETENTION_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_RETENTION_MS || 15 * 60_000);
+export const DESKTOP_TEXT_COALESCE_MS = 30;
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Math.round(Number(value))));
 const inputError = (message, code = 'DESKTOP_INPUT_INVALID', status = 400) => Object.assign(new Error(message), { code, status });
@@ -116,10 +117,19 @@ export function createDesktopController({
   const keyPresses = new Map();
   let inputQueue = Promise.resolve();
   let inputOwner;
+  let pendingText;
   const enqueueInput = operation => {
     const pending = inputQueue.then(operation);
     inputQueue = pending.catch(() => {});
     return pending;
+  };
+  // 只合并相邻文本；按键、指针、控制权切换都是屏障，不能跨屏障重排。
+  const flushPendingText = () => {
+    const batch = pendingText;
+    if (!batch) return;
+    pendingText = undefined;
+    clearTimeout(batch.timer);
+    batch.flush();
   };
 
   const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' });
@@ -153,8 +163,8 @@ export function createDesktopController({
       await mkdir(join(wmConfiguration, '.fluxbox'));
       await writeFile(join(wmConfiguration, '.fluxbox', 'keys'), bindings);
       await writeFile(join(wmConfiguration, '.fluxbox', 'apps'), '');
-      await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\n');
-      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "DejaVu Sans Mono" -fs 12}\n[end]\n');
+      await writeFile(join(wmConfiguration, 'style'), 'background: solid\nbackground.color: #182233\nwindow.title.height: 24\nwindow.focus.title.color: #34445f\nwindow.label.focus.textColor: #ffffff\nmenu.title.font: Noto Sans CJK SC-10:bold\nmenu.frame.font: Noto Sans CJK SC-10\nmenu.hilite.font: Noto Sans CJK SC-10:bold\nwindow.font: Noto Sans CJK SC-9\ntoolbar.clock.font: Noto Sans CJK SC-9\ntoolbar.workspace.font: Noto Sans CJK SC-9\ntoolbar.iconbar.focused.font: Noto Sans CJK SC-9\ntoolbar.iconbar.unfocused.font: Noto Sans CJK SC-9\n');
+      await writeFile(join(wmConfiguration, 'menu'), '[begin] (云电脑)\n[exec] (终端) {/usr/bin/xterm -u8 -fa "Noto Sans Mono CJK SC" -fs 12}\n[end]\n');
       const config = `session.configVersion: 13\nsession.styleFile: ${join(wmConfiguration, 'style')}\nsession.menuFile: ${join(wmConfiguration, 'menu')}\nsession.keyFile: ${join(wmConfiguration, '.fluxbox', 'keys')}\nsession.screen0.rootCommand: /usr/bin/fbsetroot -solid '#182233'\nsession.screen0.workspaces: 1\nsession.screen0.workspaceNames: 云电脑\nsession.screen0.toolbar.visible: false\nsession.screen0.focusModel: ClickFocus\nsession.screen0.clickRaises: true\nsession.screen0.focusNewWindows: true\n`;
       await writeFile(join(wmConfiguration, '.fluxbox', 'init'), config);
       await writeFile(join(wmConfiguration, 'init'), config);
@@ -177,7 +187,7 @@ export function createDesktopController({
     if (!terminal || (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed)) return;
     // Use the image's fontconfig fonts; xterm's legacy bitmap font is absent
     // from the deliberately small desktop image and cannot render Unicode.
-    terminalProcess = spawn('xterm', ['-display', display, '-u8', '-fa', 'DejaVu Sans Mono', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '76x27+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
+    terminalProcess = spawn('xterm', ['-display', display, '-u8', '-fa', 'Noto Sans Mono CJK SC', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '76x27+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
     terminalProcess.once?.('exit', () => { terminalProcess = undefined; });
   };
   const waitDisplay = async () => {
@@ -377,6 +387,12 @@ export function createDesktopController({
     }
     if (type === 'text') {
       const text = safeText(event.text, 'event.text', 16 * 1024);
+      if (text.length <= 64 && /^[\x20-\x7e]+$/u.test(text)) {
+        // 只有没有物理按住的键/鼠标时才清修饰键，避免 Shift+点击/拖动被破坏。
+        const clearModifiers = pressedKeys.size === 0 && pressedButtons.size === 0 ? ['--clearmodifiers'] : [];
+        try { return await runXdotool(['type', ...clearModifiers, '--delay', '0', '--', text]); }
+        catch (error) { throw Object.assign(new Error(`desktop text input failed: ${error.message}`), { code: 'DESKTOP_TEXT_INPUT_FAILED', cause: error }); }
+      }
       return pasteText(text);
     }
     if (type === 'key') {
@@ -386,12 +402,12 @@ export function createDesktopController({
   };
   const touchActivity = () => { lastActivityAt = now(); for (const session of sessions.values()) session.lastInputAt = now(); };
   const encodeFrame = (bytes, session, frameSequence) => ({ sessionId: session.sessionId, seq: frameSequence ?? ++sequence, format: 'jpeg', width, height, bytes: bytes.length, data: bytes });
-  const describe = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controllable: session.controllable, display: { width, height }, idleMode: 'suspend', idle: Boolean(session.idle), idleTimeoutMs, idleRetentionMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS });
+  const describe = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controllable: session.controllable, controlEpoch: session.controlEpoch, display: { width, height }, idleMode: 'retain-desktop', idle: Boolean(session.idle), idleTimeoutMs, idleRetentionMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS });
   const openSession = async ({ identity, botId = null, controllable = false, leaseId = null, taskId = null, releaseLeaseOnIdle = false } = {}) => {
     await ensureDisplay();
     lastActivityAt = now();
     const sessionId = randomUUID();
-    const session = { sessionId, identity: Object.freeze({ ...identity }), botId, taskId, controllable: Boolean(controllable), leaseId, releaseLeaseOnIdle: Boolean(releaseLeaseOnIdle), idle: false, createdAt: now(), lastInputAt: now(), lastFrameAt: 0, lastFrame: null };
+    const session = { sessionId, identity: Object.freeze({ ...identity }), botId, taskId, controllable: Boolean(controllable), leaseId, releaseLeaseOnIdle: Boolean(releaseLeaseOnIdle), controlEpoch: 0, idle: false, createdAt: now(), lastInputAt: now(), lastFrameAt: 0, lastFrame: null };
     sessions.set(sessionId, session);
     return describe(session);
   };
@@ -403,7 +419,8 @@ export function createDesktopController({
     if (session.idleTransition) await session.idleTransition;
     if (session.idle) return describe(session);
     const owner = { sessionId: session.sessionId, botId: session.botId, taskId: session.taskId, leaseId: session.leaseId, releaseLeaseOnIdle: session.releaseLeaseOnIdle };
-    session.idle = true; session.idleAt = now(); session.controllable = false; session.leaseId = null; session.lastFrame = null;
+    session.idle = true; session.idleAt = now(); session.controllable = false; session.leaseId = null; session.lastFrame = null; session.controlEpoch += 1;
+    flushPendingText();
     session.idleTransition = (async () => {
       if (inputOwner === session.sessionId) await enqueueInput(releasePressedInput);
       // 输入已释放后才能让其他 Bot 获得租约；不能先删租约再释放修饰键。
@@ -421,6 +438,7 @@ export function createDesktopController({
     await ensureDisplay();
     if (getSession(sessionId) !== session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
     session.idle = false; session.idleAt = null; session.controllable = Boolean(controllable); session.leaseId = leaseId;
+    session.controlEpoch += 1;
     session.releaseLeaseOnIdle = Boolean(releaseLeaseOnIdle); session.lastInputAt = now(); session.lastFrameAt = 0; lastActivityAt = now();
     return describe(session);
   };
@@ -446,22 +464,62 @@ export function createDesktopController({
     return output;
   };
   const frame = async options => { const result = await frameBinary(options); return { ...result, data: result.data?.toString('base64') }; };
-  const input = async ({ sessionId, event } = {}) => {
+  const input = async ({ sessionId, event, controlEpoch } = {}) => {
     const session = getSession(sessionId);
     if (!session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
     if (session.idle) throw idleError();
     if (!session.controllable || !session.leaseId) throw Object.assign(new Error('desktop session is read-only'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
     const inputLease = session.leaseId;
-    return enqueueInput(async () => {
+    const inputEpoch = controlEpoch ?? session.controlEpoch;
+    const validateControl = () => {
       if (!getSession(sessionId)) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
-      if (session.idle || !session.controllable || session.leaseId !== inputLease) throw Object.assign(new Error('desktop control lease changed'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+      if (session.idle || !session.controllable || session.leaseId !== inputLease || session.controlEpoch !== inputEpoch) throw Object.assign(new Error('desktop control lease changed'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+    };
+    validateControl();
+    const execute = async inputEvent => {
+      validateControl();
       touchActivity(); inputOwner = sessionId;
-      await injectInput(event);
+      await injectInput(inputEvent);
       return { accepted: true, sessionId, at: now() };
+    };
+    if (event?.type === 'text') {
+      const text = safeText(event.text, 'event.text', 16 * 1024);
+      if (pendingText?.sessionId === sessionId && pendingText.leaseId === inputLease && pendingText.epoch === inputEpoch && pendingText.text.length + text.length <= 16 * 1024) {
+        pendingText.text += text;
+        return pendingText.result;
+      }
+      flushPendingText();
+      let flush;
+      const ready = new Promise(resolve => { flush = resolve; });
+      const batch = { sessionId, leaseId: inputLease, epoch: inputEpoch, text, flush };
+      pendingText = batch;
+      batch.timer = setTimeout(() => { if (pendingText === batch) flushPendingText(); }, DESKTOP_TEXT_COALESCE_MS);
+      batch.result = enqueueInput(async () => { await ready; return execute({ type: 'text', text: batch.text }); });
+      return batch.result;
+    }
+    flushPendingText();
+    return enqueueInput(() => execute(event));
+  };
+  const setSessionControl = async ({ sessionId, controllable = false, leaseId = null, taskId, controlEpoch } = {}) => {
+    const session = getSession(sessionId);
+    if (!session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+    if (controlEpoch !== undefined && controlEpoch !== session.controlEpoch) throw Object.assign(new Error('desktop control lease changed'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+    // 先封住旧代次，再等待已开始的输入结束并清键；旧排队事件不得借新租约执行。
+    const epoch = ++session.controlEpoch;
+    session.controllable = false; session.leaseId = null;
+    flushPendingText();
+    return enqueueInput(async () => {
+      if (inputOwner === sessionId) await releasePressedInput();
+      if (getSession(sessionId) !== session) throw Object.assign(new Error('desktop session not found'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+      if (session.controlEpoch !== epoch) throw Object.assign(new Error('desktop control lease changed'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+      session.controllable = Boolean(controllable && leaseId); session.leaseId = session.controllable ? leaseId : null;
+      if (taskId !== undefined) session.taskId = taskId;
+      return describe(session);
     });
   };
   const closeSession = sessionId => {
     const id = String(sessionId || ''), removed = sessions.delete(id);
+    if (pendingText?.sessionId === id) flushPendingText();
     if (inputOwner === id) void enqueueInput(releasePressedInput);
     if (removed && ![...sessions.values()].some(value => !value.idle)) void stopCollector();
     if (removed && sessions.size === 0) lastActivityAt = now();
@@ -471,9 +529,10 @@ export function createDesktopController({
   const reap = () => {
     for (const [id, session] of sessions) {
       if (session.idle && now() - session.idleAt >= idleRetentionMs) closeSession(id);
-      else if (!session.idle && now() - session.lastInputAt >= idleTimeoutMs) void suspendSession(id).catch(() => closeSession(id));
+      // 活跃会话本身就是观察者；没有输入也不能收回用户正在看的桌面。
     }
-    if (sessions.size === 0 && now() - lastActivityAt >= idleTimeoutMs) void stopDisplay();
+    // 没有观察者时仅停采集；X/WM/应用保持到 Pod 退出，恢复后还是原窗口。
+    if (sessions.size === 0) void stopCollector();
   };
   const stopDisplay = () => {
     if (displayStopping) return displayStopping;
@@ -491,9 +550,9 @@ export function createDesktopController({
     void stopping.finally(() => { if (displayStopping === stopping) displayStopping = undefined; }).catch(() => {});
     return stopping;
   };
-  const dispose = () => { disposed = true; sessions.clear(); clearInterval(reaper); return stopDisplay(); };
+  const dispose = () => { disposed = true; sessions.clear(); flushPendingText(); clearInterval(reaper); return inputQueue.then(stopDisplay); };
   const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
-  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, dispose, stats, injectInput, captureFrame });
+  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, dispose, stats, injectInput, captureFrame });
 }

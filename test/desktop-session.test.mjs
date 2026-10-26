@@ -94,6 +94,12 @@ test('窗口管理器逐字复制系统默认绑定，并使用独立 HOME 而�
     const config = await readFile(join(home, 'init'), 'utf8');
     assert.ok(config.includes(`session.keyFile: ${join(home, '.fluxbox', 'keys')}`));
     assert.ok(config.includes('session.screen0.clickRaises: true'));
+    const style = await readFile(join(home, 'style'), 'utf8');
+    for (const name of ['menu.title.font', 'menu.frame.font', 'menu.hilite.font', 'window.font', 'toolbar.clock.font', 'toolbar.workspace.font']) {
+      assert.match(style, new RegExp(`${name}: Noto Sans CJK SC-`));
+    }
+    assert.equal(launched.options.env.LANG, 'C.UTF-8');
+    assert.equal(launched.options.env.LC_ALL, 'C.UTF-8');
     controller.closeSession(first.sessionId);
     await controller.openSession({ identity: {} });
     assert.equal(reads, 1, '同一桌面启动期间不重复准备窗口管理器');
@@ -184,7 +190,7 @@ test('desktop frame idle response is bounded and has no disk path', async () => 
   controller.dispose();
 });
 
-test('空闲保留窗口和会话、停止采集并释放桌面自动租约，恢复须绑定新租约', async t => {
+test('明确休眠保留窗口和会话、停止采集并释放桌面自动租约，恢复须绑定新租约', async t => {
   t.mock.timers.enable({ apis: ['setInterval'] });
   let clock = 1000; const processes = [], released = [];
   const controller = createDesktopController({ now: () => clock, idleTimeoutMs: 1000,
@@ -195,7 +201,7 @@ test('空闲保留窗口和会话、停止采集并释放桌面自动租约，�
   try {
     const opened = await controller.openSession({ identity: { userId: 'u' }, botId: 'writer', taskId: 't', controllable: true, leaseId: 'old', releaseLeaseOnIdle: true });
     await controller.frameBinary({ sessionId: opened.sessionId });
-    clock += 1001; t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+    await controller.suspendSession(opened.sessionId);
     const idle = controller.getSession(opened.sessionId);
     assert.ok(idle, 'idle is not session deletion'); assert.equal(idle.idle, true); assert.equal(idle.controllable, false); assert.equal(idle.leaseId, null);
     assert.equal(controller.stats().xserverRunning, true); assert.equal(processes.find(x => x.file === 'fluxbox').p.killed, false);
@@ -216,11 +222,111 @@ test('空闲记录保留期到期后删除，已过期会话不能恢复', async
   const controller = createDesktopController({ now: () => clock, idleTimeoutMs: 1000, idleRetentionMs: 2000, spawn: fakeProcess, exec: async () => ({ stdout: '' }) });
   try {
     const opened = await controller.openSession({ identity: {}, botId: 'writer', taskId: 't' });
-    clock += 1001; t.mock.timers.tick(1000); await new Promise(resolve => setImmediate(resolve));
+    await controller.suspendSession(opened.sessionId);
     assert.equal(controller.getSession(opened.sessionId).idle, true);
     clock += 2001; t.mock.timers.tick(2000); await new Promise(resolve => setImmediate(resolve));
     assert.equal(controller.getSession(opened.sessionId), undefined);
     await assert.rejects(controller.resumeSession({ sessionId: opened.sessionId }), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+  } finally { await controller.dispose(); }
+});
+
+test('旁观三分钟不休眠、关闭观察后十二分钟再开仍复用 X11 和原窗口', async t => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  let clock = 1000; const children = [], idle = [];
+  const controller = createDesktopController({ now: () => clock, idleTimeoutMs: 60_000,
+    spawn(file, args, options) { const child = fakeProcess(); children.push({ file, args, options, child }); return child; },
+    exec: async () => ({ stdout: '' }), capture: async () => Buffer.from('same-desktop'), onIdle: owner => idle.push(owner),
+  });
+  try {
+    const observer = await controller.openSession({ identity: {} });
+    assert.equal(observer.idleMode, 'retain-desktop');
+    clock += 3 * 60_000; t.mock.timers.tick(3 * 60_000); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(controller.getSession(observer.sessionId).idle, false);
+    assert.deepEqual(idle, []);
+    assert.equal((await controller.frameBinary({ sessionId: observer.sessionId })).data.toString(), 'same-desktop');
+    controller.closeSession(observer.sessionId);
+    clock += 12 * 60_000; t.mock.timers.tick(12 * 60_000); await new Promise(resolve => setImmediate(resolve));
+    assert.ok(children.every(({ child }) => !child.killed), '没有观察者只能停采集，不能销毁窗口');
+    await controller.openSession({ identity: {} });
+    for (const file of ['Xvfb', 'fluxbox', 'xterm']) assert.equal(children.filter(child => child.file === file).length, 1);
+    const terminal = children.find(child => child.file === 'xterm');
+    assert.ok(terminal.args.includes('Noto Sans Mono CJK SC'));
+    assert.ok(terminal.args.some(value => value.includes('Shift <Key>Insert')));
+    assert.equal(terminal.options.env.LANG, 'C.UTF-8');
+    assert.equal(terminal.options.env.LC_ALL, 'C.UTF-8');
+  } finally { await controller.dispose(); }
+});
+
+test('相邻短英文合并直打，按键是屏障，文本错误仍返回调用方', async () => {
+  const calls = [];
+  let rejected = false;
+  const controller = createDesktopController({ spawn: fakeProcess,
+    exec: async (file, args) => { calls.push([file, ...args]); if (file === 'xdotool' && args[0] === 'type' && rejected) throw new Error('fixture typing failure'); return { stdout: '' }; },
+  });
+  try {
+    const opened = await controller.openSession({ identity: {}, controllable: true, leaseId: 'lease' });
+    const input = event => controller.input({ sessionId: opened.sessionId, event });
+    await Promise.all([input({ type: 'text', text: 'hello' }), input({ type: 'text', text: ' world' }),
+      input({ type: 'key', key: 'Enter' }), input({ type: 'text', text: 'next' })]);
+    assert.deepEqual(calls.filter(call => call[0] === 'xdotool'), [
+      ['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', 'hello world'],
+      ['xdotool', 'keydown', 'Return'], ['xdotool', 'keyup', 'Return'],
+      ['xdotool', 'type', '--clearmodifiers', '--delay', '0', '--', 'next'],
+    ]);
+    rejected = true;
+    await assert.rejects(input({ type: 'text', text: 'fail' }), { code: 'DESKTOP_TEXT_INPUT_FAILED' });
+  } finally { await controller.dispose(); }
+});
+
+test('快速 100 ASCII 与 50 中文文本分别一次粘贴，剪贴板 owner 不重叠', async () => {
+  const ascii = '0123456789'.repeat(10), chinese = '你好云电脑'.repeat(10), pasted = [];
+  let clipboard, text, owners = 0, maximumOwners = 0;
+  const controller = createDesktopController({
+    spawn(file) {
+      if (file !== 'xclip') return fakeProcess();
+      clipboard = fakeProcess(); clipboard.stderr = new EventEmitter(); clipboard.stdin = new EventEmitter();
+      clipboard.stdin.end = value => { text = value; owners++; maximumOwners = Math.max(maximumOwners, owners); };
+      const kill = clipboard.kill;
+      clipboard.kill = () => { if (clipboard.exitCode === null) owners--; kill(); clipboard.emit('close', 0); };
+      return clipboard;
+    },
+    exec: async (file, args) => {
+      if (file === 'xclip') { clipboard.stderr.emit('data', Buffer.from('Waiting for selection request number 2\n')); return { stdout: text }; }
+      if (file === 'xdotool' && args[0] === 'keydown' && args.includes('v')) { pasted.push(text); clipboard.stderr.emit('data', Buffer.from('Waiting for selection request number 3\n')); }
+      return { stdout: '' };
+    },
+  });
+  try {
+    const opened = await controller.openSession({ identity: {}, controllable: true, leaseId: 'lease' });
+    for (const expected of [ascii, chinese]) await Promise.all([...expected].map(text => controller.input({ sessionId: opened.sessionId, event: { type: 'text', text } })));
+    assert.deepEqual(pasted, [ascii, chinese]);
+    assert.equal(maximumOwners, 1); assert.equal(owners, 0);
+  } finally { await controller.dispose(); }
+});
+
+test('持有 Shift 或鼠标拖拽期间直打不清修饰键，切换控制权清理按住状态', async () => {
+  const calls = [];
+  const controller = createDesktopController({ spawn: fakeProcess, exec: async (file, args) => { calls.push([file, ...args]); return { stdout: '' }; } });
+  try {
+    const opened = await controller.openSession({ identity: {}, controllable: true, leaseId: 'old' });
+    const input = event => controller.input({ sessionId: opened.sessionId, event });
+    await input({ type: 'key', key: 'Shift', action: 'down' });
+    await input({ type: 'button', button: 1, action: 'down' });
+    await input({ type: 'text', text: 'hello' });
+    assert.deepEqual(calls.find(call => call[1] === 'type'), ['xdotool', 'type', '--delay', '0', '--', 'hello']);
+    const pending = input({ type: 'text', text: 'obsolete' });
+    const refused = assert.rejects(pending, { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+    const observer = await controller.setSessionControl({ sessionId: opened.sessionId });
+    await refused;
+    assert.equal(observer.readOnly, true); assert.equal(observer.controlEpoch, 1);
+    assert.ok(calls.some(call => call[1] === 'mouseup' && call[2] === '1'));
+    assert.ok(calls.some(call => call[1] === 'keyup' && call[2] === 'Shift_L'));
+    assert.equal(calls.some(call => call.includes('obsolete')), false);
+    const control = await controller.setSessionControl({ sessionId: opened.sessionId, controllable: true, leaseId: 'new' });
+    assert.equal(control.controlEpoch, 2);
+    await assert.rejects(controller.input({ sessionId: opened.sessionId, controlEpoch: 0, event: { type: 'button', button: 1 } }), { status: 409 });
+    assert.equal((await controller.input({ sessionId: opened.sessionId, controlEpoch: 2, event: { type: 'button', button: 1 } })).accepted, true);
+    assert.equal(controller.stats().sessions, 1);
   } finally { await controller.dispose(); }
 });
 

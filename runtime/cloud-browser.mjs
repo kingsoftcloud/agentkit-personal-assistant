@@ -289,6 +289,7 @@ export function createCloudBrowser({
   WebSocketImpl = globalThis.WebSocket, now = Date.now, idleTimeoutMs = IDLE_TIMEOUT_MS,
   listDownloads: listDownloadsHook, statFile: statFileHook, removeFile: removeFileHook,
   kill, launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, commandTimeoutMs = CDP_COMMAND_TIMEOUT_MS,
+  beforeCommand = null, transportFactory = startCdpTransport,
 } = {}) {
   const root = checkedWorkspace(workspace);
   const resolution = resolveCloudBrowser({ env });
@@ -315,6 +316,9 @@ export function createCloudBrowser({
   }
   function touch() {
     if (idleTimer) clearTimeout(idleTimer);
+    // 可见桌面的浏览器属于用户的持久窗口集合；读画面不是浏览器工具调用，
+    // 不能因为十分钟没有 CDP 命令就关闭用户仍在看的窗口并丢掉导航。
+    if (desktopMode) { idleTimer = null; return; }
     idleTimer = setTimeout(() => { idleTimer = null; void closeBrowser().catch(() => {}); }, idleMs);
     idleTimer.unref?.();
   }
@@ -322,15 +326,22 @@ export function createCloudBrowser({
 
   async function pageCommand(method, params = {}) {
     const current = await ensureBrowser();
+    await beforeCommand?.({ method, params, scope: 'page' });
     return await current.connection.send(method, params, { sessionId: pageSession, timeoutMs: commandMs });
   }
   async function browserCommand(method, params = {}) {
     const current = await ensureBrowser();
+    await beforeCommand?.({ method, params, scope: 'browser' });
     return await current.connection.send(method, params, { timeoutMs: commandMs });
   }
 
   async function ensureBrowser() {
     ensureUsable();
+    if (transport?.connection.closed) {
+      const previous = transport;
+      transport = null; targetId = null; pageSession = null;
+      await previous.dispose().catch(() => {});
+    }
     if (transport) { touch(); return transport; }
     if (!launching) launching = launch();
     try { await launching; }
@@ -343,12 +354,14 @@ export function createCloudBrowser({
   async function launch() {
     let started;
     try {
-      started = await startCdpTransport({
+      started = await transportFactory({
         chromium: resolution.chromium, proxy: resolution.proxy, spawn, WebSocketImpl,
         kill, launchTimeoutMs, commandTimeoutMs: commandMs,
         env,
       });
-      const created = await started.connection.send('Target.createTarget', { url: 'about:blank' }, { timeoutMs: commandMs });
+      // 异常重建只恢复已通过 URL 策略的最后页面；不静默切回 about:blank。
+      const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : 'about:blank';
+      const created = await started.connection.send('Target.createTarget', { url: restoreUrl }, { timeoutMs: commandMs });
       if (!created?.targetId) throw fail('Chromium 没有创建页面目标', 'ASSISTANT_BROWSER_LAUNCH_FAILED');
       targetId = created.targetId;
       const attached = await started.connection.send('Target.attachToTarget', { targetId, flatten: true }, { timeoutMs: commandMs });
