@@ -208,9 +208,10 @@ test('temporary renewal failure preserves its status and closes with a retryable
 
 function panelHarness(t, options = {}) {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
-  const saved = Object.fromEntries(['document', 'window', 'WebSocket', 'createImageBitmap', 'requestAnimationFrame', 'cancelAnimationFrame'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+  const saved = Object.fromEntries(['document', 'window', 'WebSocket', 'createImageBitmap', 'requestAnimationFrame', 'cancelAnimationFrame', 'ResizeObserver'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const document = new EventTarget(), window = new EventTarget(); document.hidden = false;
-  const sockets = [], requests = [], hooks = [], effects = [], drawn = []; let cursor = 0, tree;
+  const sockets = [], requests = [], hooks = [], effects = [], drawn = [], drawRects = [], observers = []; let cursor = 0, tree;
+  let displayRect = options.rect || { left: 0, top: 0, width: 1280, height: 800 };
   class WebSocket {
     constructor() { this.readyState = 0; this.sent = []; sockets.push(this); }
     send(value) { this.sent.push(JSON.parse(value)); }
@@ -219,7 +220,8 @@ function panelHarness(t, options = {}) {
     closed(code = 1006) { this.readyState = 3; this.onclose?.({ code }); }
     close(code = 1000) { this.closed(code); }
   }
-  Object.assign(globalThis, { document, window, WebSocket, requestAnimationFrame: callback => setTimeout(callback, 16), cancelAnimationFrame: clearTimeout, createImageBitmap: async () => ({ close() {} }) });
+  class ResizeObserver { constructor(callback) { this.callback = callback; observers.push(this); } observe() {} disconnect() {} }
+  Object.assign(globalThis, { document, window, WebSocket, ResizeObserver, requestAnimationFrame: callback => setTimeout(callback, 16), cancelAnimationFrame: clearTimeout, createImageBitmap: async () => ({ close() {} }) });
   const request = async (operation, payload) => {
     requests.push({ operation, payload });
     if (operation.endsWith('.configuration')) return { configured: options.configured !== false, agentId: 'ar-test' };
@@ -229,8 +231,8 @@ function panelHarness(t, options = {}) {
   const fakeReact = {
     createElement(type, props, ...children) {
       if (props?.ref && !props.ref.current) props.ref.current = {
-        blur() {}, focus() {}, contains: target => target?.insideDesktop === true, style: {}, setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1280, height: 800 }),
-        getContext: () => ({ fillRect() {}, drawImage(bitmap) { drawn.push(bitmap); } }),
+        blur() {}, focus() {}, contains: target => target?.insideDesktop === true, style: {}, setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {}, getBoundingClientRect: () => displayRect,
+        getContext: () => ({ clearRect() {}, drawImage(bitmap, ...rect) { drawn.push(bitmap); drawRects.push(rect); } }),
       };
       return { type, props: props || {}, children: children.flat() };
     },
@@ -251,7 +253,8 @@ function panelHarness(t, options = {}) {
     for (const [key, descriptor] of Object.entries(saved)) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
   });
   const unmount = () => { for (const hook of hooks) if (typeof hook?.cleanup === 'function') { hook.cleanup(); hook.cleanup = undefined; } };
-  return { sockets, requests, document, drawn, click, render, unmount, nodes: () => all(render()), text: () => text(render()), visibleText: () => visibleText(render()), tickets: () => requests.filter(value => value.operation.endsWith('.ticket')) };
+  const resize = rect => { displayRect = rect; for (const observer of observers) observer.callback(); };
+  return { sockets, requests, document, drawn, drawRects, resize, click, render, unmount, nodes: () => all(render()), text: () => text(render()), visibleText: () => visibleText(render()), tickets: () => requests.filter(value => value.operation.endsWith('.ticket')) };
 }
 async function connectPanel(panel, mode = 'read') {
   await flush(); panel.click(mode === 'read' ? '只读旁观' : '连接云电脑'); await flush();
@@ -292,6 +295,57 @@ test('原生全屏 Escape 交给宿主，不注入远端，也不自绘断开或
   canvas.props.onKeyDown({ type: 'keydown', key: 'Escape', preventDefault() { prevented = true; } });
   assert.equal(prevented, false); assert.equal(socket.sent.length, before);
   assert.equal(panel.nodes().some(node => node.type === 'button' && /全屏|断开/.test(node.children.join(''))), false);
+});
+
+test('原生桌面以等比圆角卡片占满可用宽度，控制胶囊在卡片下方正常流', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab' }); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  socket.message({ type: 'ready', sessionId: 'viewer', readOnly: true, display: { width: 1280, height: 800 } });
+  socket.message({ type: 'frame', seq: 1 }); socket.message(new ArrayBuffer(8)); await flush();
+  const nodes = panel.nodes(), root = nodes.find(node => node.props['data-personal-assistant-computer']);
+  const layout = nodes.find(node => node.props['data-personal-assistant-desktop-layout']);
+  const stack = nodes.find(node => node.props['data-personal-assistant-desktop-stack']);
+  const card = nodes.find(node => node.props['data-personal-assistant-desktop-card']);
+  const capsule = nodes.find(node => node.props['data-personal-assistant-control-capsule']);
+  assert.match(root.props.style.background, /--dsw-alias-bg-base/);
+  assert.equal(layout.props.style.overflow, 'auto', '矮栏滚动，不压缩或裁切完整桌面');
+  assert.equal(stack.props.style.width, '100%'); assert.equal(stack.props.style.maxWidth, 1280);
+  assert.equal(card.props.style.aspectRatio, '1280 / 800'); assert.equal(card.props.style.width, '100%');
+  assert.equal(card.props.style.height, undefined); assert.equal(card.props.style.minHeight, undefined);
+  assert.ok(card.props.style.borderRadius > 0); assert.equal(card.props.style.padding, undefined);
+  assert.equal(stack.children[0], card); assert.equal(stack.children[1], capsule);
+  assert.equal(capsule.props.style.position, undefined); assert.equal(capsule.props.style.transform, undefined);
+  assert.ok(nodes.some(node => node.props.role === 'alert' && /只读旁观/.test(node.children.join(''))));
+  assert.equal(nodes.filter(node => node.type === 'canvas').length, 1);
+  assert.equal(nodes.some(node => node.props.style?.position === 'fixed'), false);
+});
+
+test('窄卡片首击与原生全屏缩放仍按实际显示rect映射，ResizeObserver重画完整帧', async t => {
+  const narrow = { left: 916, top: 240, width: 488, height: 305 };
+  const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'], rect: narrow }); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  socket.message({ type: 'ready', sessionId: 'viewer', readOnly: true, controlAvailable: true, controlEpoch: 0, display: { width: 1280, height: 800 } });
+  socket.message({ type: 'frame', seq: 1 }); socket.message(new ArrayBuffer(8)); await flush();
+  const canvas = panel.nodes().find(node => node.type === 'canvas');
+  const first = { type: 'pointerdown', pointerId: 1, button: 0, clientX: narrow.left + 320 * narrow.width / 1280, clientY: narrow.top + 240 * narrow.height / 800, preventDefault() {} };
+  canvas.props.onPointerDown(first); canvas.props.onPointerUp({ ...first, type: 'pointerup' });
+  assert.equal(socket.sent.at(-1).type, 'control.acquire'); assert.equal(socket.sent.some(value => value.type === 'input'), false);
+  socket.message({ type: 'control', readOnly: false, controlAvailable: true, controlEpoch: 1 });
+  assert.deepEqual(socket.sent.filter(value => value.type === 'input').map(value => value.event), [
+    { type: 'button', action: 'down', button: 1, x: 320, y: 240 }, { type: 'button', action: 'up', button: 1, x: 320, y: 240 },
+  ]);
+  const fullscreen = { left: 160, top: 92, width: 1280, height: 800 };
+  panel.resize(fullscreen); await flush();
+  assert.deepEqual(panel.drawRects.at(-1), [0, 0, 1280, 800], '缩放后重用已收帧，不把画面拉伸到侧栏高度');
+  for (let i = 1; i <= 10; i++) {
+    const x = i * 100, y = (i % 7 + 1) * 100;
+    canvas.props.onPointerDown({ ...first, clientX: fullscreen.left + x, clientY: fullscreen.top + y });
+    canvas.props.onPointerUp({ ...first, type: 'pointerup', clientX: fullscreen.left + x, clientY: fullscreen.top + y });
+    const event = socket.sent.at(-1).event;
+    assert.ok(Math.abs(event.x - x) <= 2 && Math.abs(event.y - y) <= 2);
+  }
+  panel.document.dispatchEvent(new Event('pointerdown'));
+  assert.equal(socket.sent.at(-1).type, 'control.release', '卡片外的留白仍释放控制');
 });
 
 test('rAF 合并的旧移动在新按下前发送，不能迟到后拖回旧坐标', async t => {

@@ -195,7 +195,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
           const context = canvas.getContext('2d'), display = current.display;
           const scale = Math.min(canvas.width / display.width, canvas.height / display.height);
           const width = display.width * scale, height = display.height * scale;
-          context.fillStyle = '#10151e'; context.fillRect(0, 0, canvas.width, canvas.height);
+          context.clearRect(0, 0, canvas.width, canvas.height);
           context.drawImage(bitmap, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
           const waitingForFirstFrame = current.firstFrame !== null;
           current.frames += 1; clearTimeout(current.firstFrame); current.firstFrame = null; current.retries = 0;
@@ -360,38 +360,43 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const selectable = bots.length > 0;
   const emptyTitle = phase === 'unconfigured' ? '开通后，在这里连接你的个人助理' : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法连接云端助理' : '正在检查助理状态';
   const emptyDetail = phase === 'unconfigured' ? '开通完成后，即可在这里连接专属云电脑。' : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
-  const stage = h('div', { ref: viewRef, style: { position: 'relative', flex: 1, minHeight: 240, background: active || phase === 'connecting' ? '#10151e' : 'transparent' } },
-    ['dormant', 'resuming'].includes(phase) ? h('div', { role: 'status', style: { position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none', display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,0.45)', color: '#fff' } }, phase === 'dormant' ? '已空闲，操作桌面即可恢复' : '正在恢复桌面…') : null,
+  const computerVariant = variant === 'computer' || variant === 'native-tab';
+  const stage = h('div', { ref: viewRef, 'data-personal-assistant-desktop-card': computerVariant ? 'true' : undefined, style: {
+    position: 'relative', background: 'var(--dsw-alias-bg-layer-2, #f1f3f6)',
+    ...(computerVariant ? { width: '100%', aspectRatio: `${state.current.display.width} / ${state.current.display.height}`, flex: 'none', minWidth: 0, borderRadius: 14, overflow: 'hidden', boxShadow: '0 0 0 1px var(--dsw-alias-border-default, #d8dee8), 0 8px 28px #1018280d' } : { flex: 1, minHeight: 240 }),
+  } },
+    ['dormant', 'resuming'].includes(phase) ? h('div', { role: 'status', style: { position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none', display: 'grid', placeItems: 'center', padding: 16, textAlign: 'center', background: 'color-mix(in srgb, var(--dsw-alias-bg-layer-1, #fff) 82%, transparent)', color: 'var(--dsw-alias-label-primary, #17202c)' } }, phase === 'dormant' ? '已空闲，操作桌面即可恢复' : '正在恢复桌面…') : null,
     h('canvas', { ref: canvasRef, 'aria-label': '云电脑桌面', tabIndex: active ? 0 : -1, onPointerDown: pointer, onPointerUp: pointer, onPointerCancel: releasePointer, onLostPointerCapture: releasePointer, onPointerLeave: () => { if (cursorRef.current) cursorRef.current.style.visibility = 'hidden'; }, onPointerMove: event => {
       const current = state.current, latest = event.nativeEvent?.getCoalescedEvents?.().at(-1) || event;
       if (cursorRef.current) { const rect = canvasRef.current.getBoundingClientRect(); cursorRef.current.style.transform = `translate(${latest.clientX - rect.left}px, ${latest.clientY - rect.top}px)`; cursorRef.current.style.visibility = current.readOnly ? 'hidden' : 'visible'; }
       current.lastPointer = point(latest);
       if (!current.pointerFrame) current.pointerFrame = requestAnimationFrame(() => { if (current.mounted) flushPointer(); });
-    }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'none' } }),
+    }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { ...(computerVariant ? { position: 'absolute', inset: 0 } : {}), width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'none' } }),
     h('div', { ref: cursorRef, 'aria-hidden': true, style: { position: 'absolute', top: 0, left: 0, pointerEvents: 'none', visibility: 'hidden', zIndex: 2, width: 18, height: 22 } }, h('svg', { viewBox: '0 0 18 22', width: 18, height: 22 }, h('path', { d: 'M1 1v16l4-4 3 7 3-1-3-7h6z', fill: '#fff', stroke: '#162033', strokeWidth: 1.2 }))),
-    !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', ...(phase === 'connecting' ? { color: '#e8edf5' } : {}) } },
-      h('h2', { style: { margin: 0, fontSize: 20, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
-      h('p', { style: { margin: 0, maxWidth: 380, lineHeight: 1.7, color: phase === 'connecting' ? '#b8c1d1' : 'var(--dsw-alias-label-secondary, #536174)' } }, selectable ? notice || '连接后即可使用云端桌面，关闭面板会释放本次控制。' : emptyDetail),
+    !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, padding: 16, textAlign: 'center' } },
+      h('h2', { style: { margin: 0, fontSize: 18, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
+      h('p', { style: { margin: 0, maxWidth: 380, lineHeight: 1.7, color: 'var(--dsw-alias-label-secondary, #536174)' } }, selectable ? notice || '连接后即可使用云端桌面，关闭面板会释放本次控制。' : emptyDetail),
       !selectable && phase !== 'loading' ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '检查开通状态') : null) : null,
     h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !controlRef.current.snapshot.available && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
   const secondaryInk = 'var(--dsw-alias-label-secondary, #536174)';
   const ghostStyle = { ...buttonStyle, background: 'transparent', color: 'inherit', border: ui.border };
   const pillStyle = { ...buttonStyle, borderRadius: 999, padding: '7px 16px', border: 'none', fontWeight: 500, background: 'var(--dsw-alias-label-primary, #17202c)', color: 'var(--dsw-alias-bg-layer-1, #fff)' };
-  if (variant === 'computer' || variant === 'native-tab') {
-    return h('section', { 'data-personal-assistant-computer': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-layer-1, #fff)', color: 'inherit', fontSize: 13 } },
+  if (computerVariant) {
+    return h('section', { 'data-personal-assistant-computer': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-base, #fff)', color: 'inherit', fontSize: 13 } },
       variant !== 'native-tab' ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: ui.border } },
         h('strong', { style: { fontWeight: 500 } }, '云电脑'),
         h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, stateText),
         null) : null,
       readOnly && active && !controlRef.current.snapshot.available ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
-      stage,
-      h('div', { style: { position: 'absolute', zIndex: 3, bottom: 14, left: '50%', transform: 'translateX(-50%)', display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', boxShadow: '0 2px 10px #0002' } },
+      h('div', { 'data-personal-assistant-desktop-layout': 'true', style: { flex: 1, minHeight: 0, minWidth: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '20px 16px 12px', boxSizing: 'border-box' } },
+      h('div', { 'data-personal-assistant-desktop-stack': 'true', style: { width: '100%', maxWidth: 1280, margin: 'auto 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, flex: 'none' } }, stage,
+      active || selectable ? h('div', { 'data-personal-assistant-control-capsule': 'true', role: 'status', 'aria-live': 'polite', style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 6, width: 'fit-content', maxWidth: '100%', boxSizing: 'border-box', padding: '7px 12px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', border: ui.border, boxShadow: '0 1px 4px #10182808', lineHeight: 1.5 } },
         !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open(state.current.handoffSupported ? 'observe' : 'read') }, phase === 'connecting' ? '正在启动…' : '重新连接') : null,
-        active && readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12, whiteSpace: 'nowrap' } }, controlPhase === 'acquiring' ? '正在接管…' : controlPhase === 'releasing' ? '正在交还…' : '助理正在使用 · 点画面即可接管') : null,
+        active && readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, controlPhase === 'acquiring' ? '正在接管…' : controlPhase === 'releasing' ? '正在交还…' : '助理正在使用 · 点画面即可接管') : null,
         active && readOnly && controlRef.current.snapshot.available ? h('button', { style: { ...pillStyle, padding: '3px 9px', fontSize: 11 }, onClick: () => controlRef.current.acquire() }, '接管') : null,
         active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '您拥有控制权 · 点画面外释放') : null,
-        active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null),
-      h('details', { style: { position: 'absolute', bottom: 6, right: 8, color: secondaryInk, fontSize: 11, zIndex: 2 } }, h('summary', null, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
+        active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null) : null),
+      h('details', { style: { alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } }, h('summary', { style: { cursor: 'pointer' } }, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`))));
   }
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },
     h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 12, borderBottom: ui.border } },
