@@ -327,8 +327,22 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
     };
     const blur = () => releaseInputs();
     const fullscreen = () => setFull(Boolean(document.fullscreenElement));
+    let fullscreenEscapeHeld = false;
+    const fullscreenEscape = event => {
+      const ownFullscreen = document.fullscreenElement === viewRef.current;
+      if (event.key !== 'Escape' || (!ownFullscreen && !fullscreenEscapeHeld)) return;
+      // 全屏后焦点可能落在 body；在 document 捕获阶段处理，且不把 Esc 转发到云端。
+      event.preventDefault(); event.stopPropagation();
+      if (event.type === 'keyup') { fullscreenEscapeHeld = false; return; }
+      if (ownFullscreen && !fullscreenEscapeHeld) {
+        fullscreenEscapeHeld = true;
+        void document.exitFullscreen().catch(() => { if (current.mounted) setNotice('退出全屏失败，请点击退出桌面全屏重试'); });
+      }
+    };
     document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('fullscreenchange', fullscreen);
-    return () => { current.mounted = false; controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('fullscreenchange', fullscreen); };
+    const fullscreenKeyOptions = { capture: true };
+    document.addEventListener('keydown', fullscreenEscape, fullscreenKeyOptions); document.addEventListener('keyup', fullscreenEscape, fullscreenKeyOptions);
+    return () => { current.mounted = false; controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('fullscreenchange', fullscreen); document.removeEventListener('keydown', fullscreenEscape, fullscreenKeyOptions); document.removeEventListener('keyup', fullscreenEscape, fullscreenKeyOptions); };
   }, [request]);
   const point = event => mapDisplayPoint({ clientX: event.clientX, clientY: event.clientY, rect: canvasRef.current.getBoundingClientRect(), display: state.current.display });
   const pointer = event => {
@@ -367,6 +381,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '' } = {}) {
     phase === 'readonly' ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '当前为只读旁观，鼠标和键盘输入不会发送；可申请控制') : null,
     active && notice ? h('div', { role: 'status', style: { padding: '8px 12px' } }, notice) : null,
     h('div', { ref: viewRef, style: { position: 'relative', flex: 1, minHeight: 240, background: active || phase === 'connecting' ? '#10151e' : 'transparent' } },
+      full ? h('button', { style: { ...buttonStyle, position: 'absolute', top: 12, right: 12, zIndex: 2 }, onClick: () => void document.exitFullscreen() }, '退出桌面全屏') : null,
       ['dormant', 'resuming'].includes(phase) ? h('div', { role: 'status', style: { position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none', display: 'grid', placeItems: 'center', background: 'rgba(0,0,0,0.45)', color: '#fff' } }, phase === 'dormant' ? '已空闲，操作桌面即可恢复' : '正在恢复桌面…') : null,
       h('canvas', { ref: canvasRef, 'aria-label': '云电脑桌面', tabIndex: active ? 0 : -1, onPointerDown: pointer, onPointerUp: pointer, onPointerCancel: releasePointer, onLostPointerCapture: releasePointer, onPointerMove: event => { if (Date.now() - state.current.lastMove < 34) return; state.current.lastMove = Date.now(); input({ type: 'pointermove', ...point(event) }); }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'crosshair' } }),
       !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, textAlign: 'center', ...(phase === 'connecting' ? { color: '#e8edf5' } : {}) } },

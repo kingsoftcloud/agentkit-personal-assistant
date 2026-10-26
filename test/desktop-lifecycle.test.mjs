@@ -250,7 +250,8 @@ function panelHarness(t, options = {}) {
     setClientReactRuntime(undefined);
     for (const [key, descriptor] of Object.entries(saved)) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key]; }
   });
-  return { sockets, requests, document, drawn, click, render, nodes: () => all(render()), text: () => text(render()), visibleText: () => visibleText(render()), tickets: () => requests.filter(value => value.operation.endsWith('.ticket')) };
+  const unmount = () => { for (const hook of hooks) if (typeof hook?.cleanup === 'function') { hook.cleanup(); hook.cleanup = undefined; } };
+  return { sockets, requests, document, drawn, click, render, unmount, nodes: () => all(render()), text: () => text(render()), visibleText: () => visibleText(render()), tickets: () => requests.filter(value => value.operation.endsWith('.ticket')) };
 }
 async function connectPanel(panel, mode = 'read') {
   await flush(); panel.click(mode === 'read' ? '只读旁观' : '连接云电脑'); await flush();
@@ -259,6 +260,41 @@ async function connectPanel(panel, mode = 'read') {
   socket.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); socket.message(new ArrayBuffer(8)); await flush();
   return socket;
 }
+
+test('全屏时正文焦点的 Esc 在本地退出且不关闭桌面，不接管其它全屏元素；卸载移除监听', async t => {
+  const panel = panelHarness(t), socket = await connectPanel(panel, 'control');
+  const view = panel.nodes().find(node => node.type === 'div' && node.props.ref);
+  let exits = 0;
+  view.props.ref.current.requestFullscreen = async () => {
+    panel.document.fullscreenElement = view.props.ref.current;
+    panel.document.dispatchEvent(new Event('fullscreenchange'));
+  };
+  panel.document.exitFullscreen = async () => {
+    exits += 1; panel.document.fullscreenElement = null;
+    panel.document.dispatchEvent(new Event('fullscreenchange'));
+  };
+  const escape = type => {
+    const event = new Event(type, { cancelable: true });
+    Object.defineProperty(event, 'key', { value: 'Escape' });
+    panel.document.dispatchEvent(event); return event;
+  };
+  panel.click('全屏'); await flush();
+  const before = socket.sent.length;
+  assert.equal(escape('keydown').defaultPrevented, true);
+  assert.equal(escape('keyup').defaultPrevented, true);
+  await flush();
+  assert.equal(exits, 1);
+  assert.equal(panel.document.fullscreenElement, null);
+  assert.equal(socket.readyState, 1);
+  assert.equal(socket.sent.length, before, 'local fullscreen Escape must not reach the remote terminal');
+  panel.document.fullscreenElement = {};
+  assert.equal(escape('keydown').defaultPrevented, false);
+  assert.equal(exits, 1);
+  panel.unmount();
+  panel.document.fullscreenElement = view.props.ref.current;
+  assert.equal(escape('keydown').defaultPrevented, false);
+  assert.equal(exits, 1);
+});
 
 test('panel stops reconnecting after idle session closure, including visibility changes, but explicit open works', async t => {
   const panel = panelHarness(t), socket = await connectPanel(panel);
