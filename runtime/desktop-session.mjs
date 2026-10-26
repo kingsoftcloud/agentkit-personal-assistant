@@ -104,6 +104,7 @@ export function createDesktopController({
   let collectorStopping;
   let displayStopping;
   let wmConfiguration;
+  const processDiagnostics = new Map();
   let latestFrame;
   let capturedFrames = 0, droppedFrames = 0;
   let collectorFailure;
@@ -133,6 +134,14 @@ export function createDesktopController({
   };
 
   const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' });
+  const trackStartupProcess = (name, child) => {
+    const diagnostic = { stderr: '', exitCode: null, signal: null };
+    processDiagnostics.set(name, diagnostic);
+    child.stderr?.on('data', chunk => { diagnostic.stderr = (diagnostic.stderr + chunk.toString('utf8')).slice(-2048); });
+    child.once?.('exit', (code, signal) => { diagnostic.exitCode = code; diagnostic.signal = signal || null; });
+    child.once?.('error', error => { diagnostic.error = { code: error.code, message: String(error.message).slice(0, 500) }; });
+    return child;
+  };
   const stopProcess = child => new Promise(resolve => {
     if (!child || child.exitCode !== null) return resolve();
     let timer;
@@ -143,7 +152,7 @@ export function createDesktopController({
   });
   const spawnDisplay = () => {
     if (xvfb && xvfb.exitCode === null && !xvfb.killed) return;
-    xvfb = spawn('Xvfb', [display, '-screen', '0', `${width}x${height}x24`, '-nolisten', 'tcp', '-ac'], { env: environment, stdio: 'ignore' });
+    xvfb = trackStartupProcess('Xvfb', spawn('Xvfb', [display, '-screen', '0', `${width}x${height}x24`, '-nolisten', 'tcp', '-ac'], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] }));
     xvfb.once?.('exit', () => { xvfb = undefined; displayReady = undefined; });
   };
   const spawnWindowManager = async () => {
@@ -170,7 +179,7 @@ export function createDesktopController({
       await writeFile(join(wmConfiguration, 'init'), config);
     }
     windowManagerFailure = undefined;
-    const child = spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit'], { env: { ...environment, HOME: wmConfiguration }, stdio: 'ignore' });
+    const child = trackStartupProcess('fluxbox', spawn('fluxbox', ['-display', display, '-rc', join(wmConfiguration, 'init'), '-no-slit'], { env: { ...environment, HOME: wmConfiguration }, stdio: ['ignore', 'ignore', 'pipe'] }));
     wm = child;
     child.once?.('error', error => {
       if (wm !== child) return;
@@ -188,11 +197,13 @@ export function createDesktopController({
     // Use the image's fontconfig fonts; xterm's legacy bitmap font is absent
     // from the deliberately small desktop image and cannot render Unicode.
     // Noto CJK 的单元格比 DejaVu 更宽；56列在1280px桌面内保留可见的窗口边界。
-    terminalProcess = spawn('xterm', ['-display', display, '-u8', '-fa', 'Noto Sans Mono CJK SC', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '56x24+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: 'ignore' });
+    terminalProcess = trackStartupProcess('xterm', spawn('xterm', ['-display', display, '-u8', '-fa', 'Noto Sans Mono CJK SC', '-fs', '12', '-xrm', 'XTerm*VT100.translations: #override\\nShift <Key>Insert: insert-selection(PRIMARY,CLIPBOARD)\\nCtrl Shift <Key>V: insert-selection(CLIPBOARD)', '-geometry', '56x24+20+65', '-title', 'AgentKit Cloud Desktop'], { env: environment, stdio: ['ignore', 'ignore', 'pipe'] }));
     terminalProcess.once?.('exit', () => { terminalProcess = undefined; });
   };
   const waitDisplay = async () => {
     if (displayReady) return displayReady;
+    const began = performance.now();
+    let lastProbe;
     displayReady = (async () => {
       // 启动本身计入活动，避免首个清理周期把尚未就绪的桌面当成长期空闲。
       lastActivityAt = now();
@@ -221,6 +232,7 @@ export function createDesktopController({
             env: environment, maxBuffer: 4096, timeout: Math.max(1, Math.min(500, Math.ceil(wmDeadline - performance.now()))),
           });
           const output = String(result.stdout);
+          lastProbe = { stdout: output.slice(-2048), stderr: String(result.stderr || '').slice(-2048) };
           const hasWindow = name => {
             const value = output.match(new RegExp(`^${name}\\(WINDOW\\): window id # (0x[0-9a-f]+)\\s*$`, 'im'))?.[1];
             return value !== undefined && BigInt(value) !== 0n;
@@ -228,14 +240,22 @@ export function createDesktopController({
           wmReady = hasWindow('_NET_SUPPORTING_WM_CHECK') && (!terminal || hasWindow('_NET_ACTIVE_WINDOW'));
           if (windowManagerFailure) throw windowManagerFailure;
           if (wmReady) break;
-        } catch (error) { probeError = error; }
+        } catch (error) {
+          probeError = error;
+          lastProbe = { code: error.code, signal: error.signal || null, killed: Boolean(error.killed), message: String(error.message).slice(0, 500), stdout: String(error.stdout || '').slice(-2048), stderr: String(error.stderr || '').slice(-2048) };
+        }
         if (windowManagerFailure) throw windowManagerFailure;
         await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(50, wmDeadline - performance.now()))));
       }
       if (!wmReady) throw Object.assign(new Error(`Fluxbox on ${display} did not publish a ready desktop within ${windowManagerReadyTimeoutMs}ms`), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE', status: 503, cause: probeError });
       return true;
     })();
-    try { await displayReady; } catch (error) { displayReady = undefined; await stopDisplay(); throw error; }
+    try { await displayReady; } catch (error) {
+      // 只保存启动工具的有限诊断，不采集 env、命令行、终端内容或画面。
+      // 必须先快照再清理，否则 SIGTERM/断开 X11 会覆盖真正的失败原因。
+      error.desktopDiagnostics = { elapsedMs: Math.round(performance.now() - began), lastProbe, processes: Object.fromEntries([...processDiagnostics].map(([name, value]) => [name, { ...value }])) };
+      displayReady = undefined; await stopDisplay(); throw error;
+    }
     return displayReady;
   };
   const ensureDisplay = async () => {

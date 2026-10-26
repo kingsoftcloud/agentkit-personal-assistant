@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { once } from 'node:events';
-import { createComputerAgentServer } from '../runtime/computer-agentd.mjs';
+import { createComputerAgentServer, runComputerAgentDaemon } from '../runtime/computer-agentd.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('ed25519');
 const env = { USER_ID: 'u', ASSISTANT_ID: 'a', COMPUTER_ID: 'c', COMPUTER_HOST: '127.0.0.1', COMPUTER_PORT: '0',
@@ -99,4 +99,35 @@ test('computer readiness stays 503 until the real desktop warmup completes witho
   await new Promise(resolve => setImmediate(resolve));
   const health = await fetch(`${endpoint}/health`); assert.equal(health.status, 200);
   assert.equal((await health.json()).desktopReady, true); assert.equal(browserStarts, 1); assert.equal(disposed, false);
+});
+
+test('预热失败清理桌面和浏览器、关闭 HTTP 后以非零退出，不在进程内静默重试', async () => {
+  const events = [], logs = [];
+  const failure = Object.assign(new Error('fixture WM failed'), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE',
+    desktopDiagnostics: { elapsedMs: 5000, lastProbe: { stdout: 'not found' } }, secret: 'MUST_NOT_LOG' });
+  let starts = 0, exitCode;
+  const service = createComputerAgentServer({ env: { ...env, AGENTKIT_DESKTOP_MODE: '1' }, logger: { info() {}, error: line => logs.push(JSON.parse(line)) },
+    desktopFactory: () => ({ ensureDisplay: async () => { events.push('desktop-ready'); }, dispose: async () => events.push('desktop-dispose') }),
+    browserFactory: () => ({ available: true, openDesktopWindow: async () => { starts++; throw failure; }, dispose: async () => events.push('browser-dispose') }),
+  });
+  const daemon = runComputerAgentDaemon({ service, exit: code => { exitCode = code; events.push('exit'); }, onSignal: () => {} });
+  await assert.rejects(service.whenReady, { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE' });
+  await daemon.stopped;
+  assert.equal(starts, 1); assert.equal(exitCode, 1); assert.equal(service.server.listening, false);
+  assert.deepEqual(events, ['desktop-ready', 'browser-dispose', 'desktop-dispose', 'exit']);
+  assert.equal(logs[0].event, 'desktop-startup-failed'); assert.equal(logs[0].diagnostics.lastProbe.stdout, 'not found');
+  assert.equal(JSON.stringify(logs).includes('MUST_NOT_LOG'), false);
+});
+
+test('预热成功不会请求退出，显式停止时只清理一次', async () => {
+  let exits = 0, disposals = 0;
+  const service = createComputerAgentServer({ env: { ...env, AGENTKIT_DESKTOP_MODE: '1' }, logger: { info() {}, error() {} },
+    desktopFactory: () => ({ ensureDisplay: async () => {}, dispose: async () => { disposals++; } }),
+    browserFactory: () => ({ available: true, openDesktopWindow: async () => {}, dispose: async () => {} }),
+  });
+  const daemon = runComputerAgentDaemon({ service, exit: code => { assert.equal(code, 0); exits++; }, onSignal: () => {} });
+  await service.whenReady;
+  assert.equal(exits, 0); assert.equal(service.server.listening, true);
+  await Promise.all([daemon.stop(0), daemon.stop(0)]);
+  assert.equal(exits, 1); assert.equal(disposals, 1);
 });

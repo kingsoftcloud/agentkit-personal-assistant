@@ -53,6 +53,50 @@ test('WM 存在但活动窗口为空时超时失败，清理桌面后允许重�
   } finally { await controller.dispose(); }
 });
 
+test('桌面启动失败保留有上限的子进程诊断及最后探针输出', async () => {
+  const children = [];
+  const controller = createDesktopControllerWithWmProbe({
+    windowManagerReadyTimeoutMs: 40,
+    readWindowBindings: async () => Buffer.from('OnDesktop Mouse1 :HideMenus\n'),
+    spawn(file) {
+      const child = fakeProcess(); child.stderr = new EventEmitter(); children.push(child);
+      if (file === 'fluxbox') queueMicrotask(() => child.stderr.emit('data', Buffer.from('x'.repeat(6000) + ' WM_LAST_ERROR')));
+      return child;
+    },
+    exec: async file => ({ stdout: file === 'xprop' ? '_NET_SUPPORTING_WM_CHECK:  not found.\n_NET_ACTIVE_WINDOW:  no such atom on any window.\n' : '', stderr: '' }),
+  });
+  try {
+    await assert.rejects(controller.ensureDisplay(), error => {
+      assert.equal(error.code, 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE');
+      assert.ok(error.desktopDiagnostics.elapsedMs >= 40);
+      assert.match(error.desktopDiagnostics.lastProbe.stdout, /no such atom/);
+      assert.equal(error.desktopDiagnostics.processes.fluxbox.stderr.length, 2048);
+      assert.ok(error.desktopDiagnostics.processes.fluxbox.stderr.endsWith(' WM_LAST_ERROR'));
+      return true;
+    });
+    assert.ok(children.every(child => child.killed), '失败诊断必须在清理前取快照，仍然清理所有桌面进程');
+  } finally { await controller.dispose(); }
+});
+
+test('WM 探针执行失败的 EACCES 原因不能被空属性超时掩盖', async () => {
+  const controller = createDesktopControllerWithWmProbe({
+    windowManagerReadyTimeoutMs: 40,
+    readWindowBindings: async () => Buffer.from('OnDesktop Mouse1 :HideMenus\n'),
+    spawn: () => fakeProcess(),
+    exec: async file => {
+      if (file === 'xprop') throw Object.assign(new Error('spawn xprop EACCES'), { code: 'EACCES', stderr: 'probe denied' });
+      return { stdout: '' };
+    },
+  });
+  try {
+    await assert.rejects(controller.ensureDisplay(), error => {
+      assert.equal(error.desktopDiagnostics.lastProbe.code, 'EACCES');
+      assert.equal(error.desktopDiagnostics.lastProbe.stderr, 'probe denied');
+      return true;
+    });
+  } finally { await controller.dispose(); }
+});
+
 for (const mode of ['exit', 'error']) {
   test(`Fluxbox 启动${mode === 'exit' ? '退出' : '报错'}必须失败，不能继续返回桌面 ready`, async () => {
     const children = [];

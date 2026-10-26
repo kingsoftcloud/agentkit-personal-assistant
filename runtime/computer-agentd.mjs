@@ -7,7 +7,7 @@ import { createCloudBrowser } from './cloud-browser.mjs';
 import { createCloudExecutor } from './cloud-execution.mjs';
 import { createDesktopController } from './desktop-session.mjs';
 
-export function createComputerAgentServer({ env = process.env, desktopFactory = createDesktopController, browserFactory = createCloudBrowser, executorFactory = createCloudExecutor } = {}) {
+export function createComputerAgentServer({ env = process.env, desktopFactory = createDesktopController, browserFactory = createCloudBrowser, executorFactory = createCloudExecutor, logger = console } = {}) {
 const host = env.COMPUTER_HOST || '127.0.0.1';
 const port = Number(env.COMPUTER_PORT || 8787);
 const workspace = env.AGENTKIT_WORKSPACE_DIR || '/workspace';
@@ -16,6 +16,10 @@ const leases = new Map();
 const controlGrants = new Map(), usedControlPermits = new Map();
 const actionContext = new AsyncLocalStorage();
 let starting = env.AGENTKIT_DESKTOP_MODE === '1', startupFailure, warmup, warmupMs = 0, closing = false;
+let resolveReady, rejectReady, closePromise;
+const whenReady = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+// 库调用方可以只查询 health；主入口仍消费拒绝并明确退出，避免未处理拒绝。
+void whenReady.catch(() => {});
 let browser;
 let desktopBrowserOpening;
 let executor;
@@ -281,25 +285,58 @@ const server = createServer(async (request, response) => {
 });
 const leaseReaper = setInterval(expireLeases, 1000);
 leaseReaper.unref();
-const close = async () => { closing = true; clearInterval(leaseReaper); await warmup; await browser?.dispose?.(); executor?.dispose?.(); await desktop.dispose(); await new Promise(resolve => server.close(resolve)); };
-return { server, listen: () => server.listen(port, host, () => {
-  if (!starting) return;
+const close = () => {
+  if (closePromise) return closePromise;
+  closing = true; clearInterval(leaseReaper);
+  closePromise = (async () => {
+    await warmup;
+    const failures = [];
+    for (const cleanup of [() => browser?.dispose?.(), () => executor?.dispose?.(), () => desktop.dispose()]) {
+      try { await cleanup(); } catch (error) { failures.push(error); }
+    }
+    await new Promise(resolve => server.close(resolve));
+    if (failures.length) throw new AggregateError(failures, 'computer shutdown cleanup failed');
+  })();
+  return closePromise;
+};
+return { server, whenReady, listen: () => server.listen(port, host, () => {
+  if (!starting) { resolveReady({ desktopReady: true, warmupMs: 0 }); return; }
   const began = Date.now();
   warmup = (async () => {
     try {
       await desktop.ensureDisplay();
       if (!closing) await ensureDesktopBrowser();
       warmupMs = Date.now() - began;
-      if (!closing) console.info(JSON.stringify({ event: 'desktop-ready', warmupMs, computerId: identity.computerId }));
+      if (!closing) logger.info(JSON.stringify({ event: 'desktop-ready', warmupMs, computerId: identity.computerId }));
+      resolveReady({ desktopReady: !closing, warmupMs });
     } catch (error) {
       startupFailure = error;
-      console.error(JSON.stringify({ event: 'desktop-startup-failed', code: error.code || 'DESKTOP_STARTUP_FAILED', message: String(error.message).slice(0, 500) }));
+      logger.error(JSON.stringify({ event: 'desktop-startup-failed', code: error.code || 'DESKTOP_STARTUP_FAILED', message: String(error.message).slice(0, 500), diagnostics: error.desktopDiagnostics }));
+      rejectReady(error);
     } finally { starting = false; }
   })();
 }), close };
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const service = createComputerAgentServer();
+
+// 生产入口在一次预热失败后清理并非零退出；恢复由 Kubernetes 显式重启承担。
+// exit/onSignal 可注入，单测无需退出测试进程，也不在库内悄悄重试。
+export function runComputerAgentDaemon({ service = createComputerAgentServer(), exit = code => process.exit(code), onSignal = handler => { process.once('SIGTERM', handler); process.once('SIGINT', handler); } } = {}) {
+  let shutdown, resolveStopped;
+  const stopped = new Promise(resolve => { resolveStopped = resolve; });
+  const stop = (code = 0) => {
+    if (shutdown) return shutdown;
+    shutdown = (async () => {
+      try { await service.close(); }
+      catch (error) { code = 1; console.error(JSON.stringify({ event: 'computer-shutdown-failed', message: String(error.message).slice(0, 500) })); }
+      try { exit(code); } finally { resolveStopped(); }
+    })();
+    return shutdown;
+  };
+  void service.whenReady.catch(() => stop(1));
+  onSignal(() => { void stop(0); });
   service.listen();
-  process.on('SIGTERM', () => { void service.close().then(() => process.exit(0)); });
+  return { service, stop, stopped };
+}
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runComputerAgentDaemon();
 }
