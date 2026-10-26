@@ -51,7 +51,7 @@ test('网关只在出票 HTTP 用 Bearer，WSS 只用 opaque 子协议且不把 
     assert.equal(url.href, 'https://gateway.example.test/IssuePersonalAssistantDesktopTicket');
     assert.equal(options.headers.authorization, 'Bearer fixture-secret');
     assert.equal(options.redirect, 'error');
-    return { ok: true, json: async () => ({ Code: 0, Data: { Ticket: ticket, AgentId: 'agent', BotId: 'default', WsPath: 'personal-assistant/desktop/ws', ExpiresAt: new Date(Date.now() + 59000).toISOString() } }) };
+    return { ok: true, json: async () => ({ Code: 0, Data: { Ticket: ticket, AgentId: 'agent', BotId: 'default', WsPath: 'personal-assistant/desktop/ws', ExpiresAt: Math.floor(Date.now() / 1000) + 59 } }) };
   });
   t.mock.method(https, 'request', (url, options) => {
     sawUpgrade = true;
@@ -72,4 +72,15 @@ test('网关只在出票 HTTP 用 Bearer，WSS 只用 opaque 子协议且不把 
   };
   const { client, ready } = await openGatewayDesktop({ gatewayUrl: 'https://gateway.example.test', apiKey: 'fixture-secret', agentId: 'agent', botId: 'default', taskId: 'task' });
   assert.equal(sawUpgrade, true); assert.equal(ready.controlAvailable, true); await client.close();
+});
+
+test('出票到期时间严格使用 Server 的 Unix 秒契约，错误类型或超过一分钟均拒绝', async t => {
+  let expiry;
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ Code: 0, Data: {
+    Ticket: 'x'.repeat(40), AgentId: 'agent', BotId: 'default', WsPath: 'personal-assistant/desktop/ws', ExpiresAt: expiry,
+  } }) }));
+  t.mock.method(https, 'request', () => assert.fail('invalid ticket must be rejected before WS upgrade'));
+  for (expiry of [new Date(Date.now() + 59000).toISOString(), Date.now() + 59000, '1793010000', 0, null, Math.floor(Date.now() / 1000) + 120]) {
+    await assert.rejects(openGatewayDesktop({ gatewayUrl: 'https://gateway.example.test', apiKey: 'fixture-secret', agentId: 'agent', botId: 'default' }), /ticket binding is invalid/u);
+  }
 });

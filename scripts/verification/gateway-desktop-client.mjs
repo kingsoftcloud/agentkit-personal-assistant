@@ -115,7 +115,9 @@ export async function openGatewayDesktop({ gatewayUrl, apiKey, agentId, botId, m
   const result = await issued.json();
   if (!issued.ok || result.Code !== 0) throw Object.assign(new Error(`gateway ticket refused: HTTP ${issued.status}; ${String(result.Message || 'unknown').slice(0, 200)}`), { status: issued.status });
   const data = result.Data;
-  const expiresAt = Date.parse(data?.ExpiresAt);
+  // Server's public ticket contract is an integer Unix timestamp in seconds.
+  // Do not accept date strings or milliseconds: either can mask a bad fixture.
+  const expiresAt = Number.isSafeInteger(data?.ExpiresAt) ? data.ExpiresAt * 1000 : NaN;
   if (!/^[A-Za-z0-9_-]{32,512}$/u.test(data?.Ticket || '') || data.WsPath !== 'personal-assistant/desktop/ws' || data.AgentId !== agentId || data.BotId !== botId
     || !Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt - Date.now() > 60000) throw new Error('gateway ticket binding is invalid');
   const url = new URL(data.WsPath, gateway), key = randomBytes(16).toString('base64');
