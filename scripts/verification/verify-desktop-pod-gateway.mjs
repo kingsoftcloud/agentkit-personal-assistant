@@ -38,7 +38,7 @@ const guiProcesses = async () => {
   const found = [];
   for (const pid of await readdir('/proc')) if (/^\d+$/u.test(pid)) try {
     const argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0'), binary = argv[0].split('/').at(-1);
-    if (['Xvfb', 'fluxbox', 'xterm', 'ffmpeg'].includes(binary) || (binary === 'chromium' && !argv.some(value => value.startsWith('--type=')))) found.push({ pid: Number(pid), binary, argv });
+    if (['Xvfb', 'fluxbox', 'xterm', 'ffmpeg', 'tint2', 'thunar', 'Thunar', 'dbus-run-session', 'dbus-daemon'].includes(binary) || (binary === 'chromium' && !argv.some(value => value.startsWith('--type=')))) found.push({ pid: Number(pid), binary, argv });
   } catch { /* 进程退出的瞬时竞态。 */ }
   return found;
 };
@@ -77,6 +77,7 @@ try {
   }
   const original = await guiProcesses();
   assert.equal(original.filter(value => value.binary === 'Xvfb').length, 1, '运行前必须已有且只有一个 Xvfb');
+  assert.equal(original.filter(value => value.binary === 'tint2').length, 1, '运行前必须已有且只有一个应用底栏');
   record('当前 Broker 健康且已有单个真实桌面');
 
   const { client: reader, ready: readReady } = await connect(input.botId, 'read');
@@ -147,22 +148,32 @@ try {
   await execFile('import', ['-display', process.env.DISPLAY || ':99', '-window', 'root', join(evidence, 'terminal-input.png')]);
   await reader.close(); await secondary.close();
   const retained = (await guiProcesses()).filter(value => value.binary !== 'ffmpeg');
-  await writeFile(join(evidence, 'processes-before.json'), JSON.stringify(retained, null, 2));
+  await writeFile(join(evidence, 'processes-before.json'), JSON.stringify(retained.map(({ pid, binary }) => ({ pid, binary })), null, 2));
   console.log(JSON.stringify({ waiting: '真实网关旁观保活', milliseconds: observerMs }));
-  const previousFrameCount = primary.frames.length; await sleep(observerMs);
+  const previousFrameCount = primary.frames.length, observerStarted = Date.now(); await sleep(observerMs);
   assert.equal(primary.closed, false); assert.ok(primary.frames.length > previousFrameCount || observerMs === 0);
-  record('保持真实网关观察会话期间不休眠', { elapsedMs: observerMs });
+  const idleFrames = primary.frames.filter(frame => frame.at >= observerStarted + 15000);
+  const idleFps = idleFrames.length > 1 ? (idleFrames.length - 1) * 1000 / (idleFrames.at(-1).at - idleFrames[0].at) : null;
+  if (observerMs >= 30000) { assert.ok(idleFps !== null && idleFps <= 1, `idle fps ${idleFps} exceeds 1`); }
+  record('保持真实网关观察会话期间不休眠', { elapsedMs: observerMs, idleFps });
   await primary.close();
+  const stopCaptureBegan = Date.now();
   await waitFor(async () => !(await guiProcesses()).some(value => value.binary === 'ffmpeg' && value.argv.includes('x11grab')), '其他观察者仍在，不能冒充无观察者阶段', 30000);
-  console.log(JSON.stringify({ waiting: '无观察者保留窗口', milliseconds: parkMs })); await sleep(parkMs);
+  record('关闭所有验收观察者后采集进程停止', { stoppedWithinMs: Date.now() - stopCaptureBegan });
+  console.log(JSON.stringify({ waiting: '无观察者保留窗口', milliseconds: parkMs }));
+  const parkedAt = Date.now(); let noObserverSamples = 0;
+  while (Date.now() - parkedAt < parkMs) {
+    assert.ok(!(await guiProcesses()).some(value => value.binary === 'ffmpeg' && value.argv.includes('x11grab')), '无观察者阶段出现新的采集器，不能继续宣称无人旁观');
+    noObserverSamples++; await sleep(Math.min(1000, Math.max(1, parkMs - (Date.now() - parkedAt))));
+  }
   reopenedSession = await broker('/broker/desktop/session', { botId: input.botId, taskId: `restore-${randomUUID()}`, mode: 'read' });
   const frame = await broker('/broker/desktop/frame-binary', { sessionId: reopenedSession.sessionId }); assert.ok(frame.byteLength > 0 && frame.byteLength <= 307200);
   const after = await guiProcesses();
   for (const process of retained) assert.ok(after.some(value => value.pid === process.pid), `原窗口进程被重建: ${process.binary} ${process.pid}`);
   assert.equal(after.filter(value => value.binary === 'Xvfb').length, 1);
-  await writeFile(join(evidence, 'processes-after.json'), JSON.stringify(after, null, 2));
+  await writeFile(join(evidence, 'processes-after.json'), JSON.stringify(after.map(({ pid, binary }) => ({ pid, binary })), null, 2));
   await execFile('import', ['-display', process.env.DISPLAY || ':99', '-window', 'root', join(evidence, 'restored-desktop.png')]);
-  record('无观察者等待后恢复仍为原 X11/WM/应用进程', { elapsedMs: parkMs, preservedPids: retained.map(value => value.pid) });
+  record('无观察者等待后恢复仍为原 X11/WM/应用进程', { elapsedMs: Date.now() - parkedAt, noObserverSamples, preservedPids: retained.map(value => value.pid) });
   report.passed = true;
 } catch (error) { report.passed = false; report.error = safeError(error); console.error(JSON.stringify(report.error)); process.exitCode = 1; }
 finally {
