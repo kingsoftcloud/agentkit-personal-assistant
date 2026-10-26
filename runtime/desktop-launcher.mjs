@@ -15,7 +15,7 @@ const assertRequest = value => {
 };
 
 // 此 socket 只承接本机桌面的固定应用入口，不提供 URL、路径、命令或远程输入接口。
-export async function createDesktopLauncherServer({ launch, timeoutMs = 3000, onError = () => {} } = {}) {
+export async function createDesktopLauncherServer({ launch, timeoutMs = 8000, onError = () => {} } = {}) {
   const directory = await mkdtemp('/tmp/agentkit-desktop-launcher-');
   await chmod(directory, 0o700);
   const socketPath = join(directory, 'launcher.sock');
@@ -74,7 +74,7 @@ export async function createDesktopLauncherServer({ launch, timeoutMs = 3000, on
   return Object.freeze({ socketPath, close });
 }
 
-export function requestDesktopLaunch(socketPath, action, { timeoutMs = 3000 } = {}) {
+export function requestDesktopLaunch(socketPath, action, { timeoutMs = 9000 } = {}) {
   assertRequest({ v: 1, action });
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);

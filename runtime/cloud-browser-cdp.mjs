@@ -1,15 +1,16 @@
 /** Minimal Chromium DevTools Protocol transport: one browser, one WebSocket, no reconnect. */
 import { spawn as spawnChild } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, mkdirSync, chmodSync, lstatSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, isAbsolute } from 'node:path';
 
 export const DEVTOOLS_PORT_FILE = 'DevToolsActivePort';
 export const DEVTOOLS_LAUNCH_TIMEOUT_MS = 30_000;
 export const CDP_COMMAND_TIMEOUT_MS = 30_000;
 const CDP_CONNECT_TIMEOUT_MS = 10_000;
 const MAX_STDERR_BYTES = 4096;
+const persistentProfileOwners = new Map();
 
 const fail = (message, code = 'ASSISTANT_BROWSER_CDP_UNAVAILABLE') => Object.assign(new Error(message), { code });
 const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms));
@@ -64,10 +65,53 @@ function collectStderr(child, state) {
   });
 }
 
+const childExited = child => child.exitCode !== null && child.exitCode !== undefined || Boolean(child.signalCode);
+const waitForOwnChild = (child, timeoutMs) => {
+  if (!child || childExited(child)) return Promise.resolve();
+  return new Promise((resolvePromise, rejectPromise) => {
+    const finish = error => { clearTimeout(timer); child.removeListener?.('exit', exited); error ? rejectPromise(error) : resolvePromise(); };
+    const exited = () => finish();
+    const timer = setTimeout(() => finish(fail('自有 Chromium 进程仍未退出，拒绝复用私有配置目录', 'ASSISTANT_BROWSER_PROCESS_STILL_RUNNING')), timeoutMs);
+    child.once('exit', exited);
+    if (childExited(child)) finish();
+  });
+};
+async function stopOwnChromium(child, kill, { wait = false, graceMs = 0 } = {}) {
+  if (!child?.pid || childExited(child)) return;
+  // 正常关窗/Browser.close 可先完成 SQLite 等状态写入；只等待自己的 child。
+  if (wait && graceMs) { try { await waitForOwnChild(child, graceMs); return; } catch (error) { if (error.code !== 'ASSISTANT_BROWSER_PROCESS_STILL_RUNNING') throw error; } }
+  try { kill(child.pid, 'SIGKILL'); } catch {
+    if (wait) throw fail('无法停止自有 Chromium，拒绝复用私有配置目录', 'ASSISTANT_BROWSER_PROCESS_STILL_RUNNING');
+  }
+  if (wait) await waitForOwnChild(child, 2000);
+}
+
+function preparePersistentProfile(userDataDir) {
+  if (!userDataDir || !isAbsolute(userDataDir)) throw fail('持久浏览器配置目录必须为绝对路径', 'ASSISTANT_BROWSER_PROFILE_INVALID');
+  try {
+    mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
+    if (!lstatSync(userDataDir).isDirectory() || lstatSync(userDataDir).isSymbolicLink()) throw fail('浏览器私有配置目录不能是符号链接', 'ASSISTANT_BROWSER_PROFILE_INVALID');
+    chmodSync(userDataDir, 0o700);
+    // 旧 child 已由调用方 dispose 等待退出。只清调试端口元数据，不碰锁或登录数据。
+    rmSync(join(userDataDir, DEVTOOLS_PORT_FILE), { force: true });
+  } catch (error) {
+    if (String(error.code).startsWith('ASSISTANT_BROWSER_')) throw error;
+    throw fail(`浏览器私有配置目录不可用: ${error.code || 'filesystem-error'}`, 'ASSISTANT_BROWSER_PROFILE_UNAVAILABLE');
+  }
+}
+
 export async function launchChromium({
-  chromium, proxy, userDataDir = createProfileDir(), spawn = spawnChild,
+  chromium, proxy, userDataDir, spawn = spawnChild,
   launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, now = Date.now, pollMs = 25, env = process.env,
+  preserveUserDataDir = false,
 } = {}) {
+  if (preserveUserDataDir) {
+    const previous = persistentProfileOwners.get(userDataDir);
+    if (previous && !childExited(previous)) throw fail('自有 Chromium 仍占用私有配置目录，拒绝启动第二个实例', 'ASSISTANT_BROWSER_PROCESS_STILL_RUNNING');
+    preparePersistentProfile(userDataDir);
+  }
+  else if (userDataDir === undefined) userDataDir = createProfileDir();
+  const cleanupProfile = () => { if (!preserveUserDataDir) rmSync(userDataDir, { recursive: true, force: true }); };
   const desktop = env.AGENTKIT_DESKTOP_MODE === '1';
   const args = chromiumArgs({ userDataDir, proxy, desktop });
   const stderr = { text: '', bytes: 0 };
@@ -79,26 +123,32 @@ export async function launchChromium({
       env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp', ...(desktop ? { DISPLAY: env.DISPLAY || ':99' } : {}) },
     });
   } catch (error) {
-    rmSync(userDataDir, { recursive: true, force: true });
+    cleanupProfile();
     throw fail(`Chromium 启动失败: ${error?.code || 'spawn-error'}`, 'ASSISTANT_BROWSER_LAUNCH_FAILED');
   }
+  if (preserveUserDataDir && child?.pid) {
+    persistentProfileOwners.set(userDataDir, child);
+    child.once('exit', () => { if (persistentProfileOwners.get(userDataDir) === child) persistentProfileOwners.delete(userDataDir); });
+  }
   collectStderr(child, stderr);
-  let exit;
+  let exit, spawnError;
   child?.once?.('exit', (code, signal) => { exit = { code, signal }; });
+  child?.once?.('error', error => { spawnError = error; });
   const deadline = now() + launchTimeoutMs;
   while (now() < deadline) {
     const endpoint = readDevToolsEndpoint(userDataDir);
     if (endpoint) return { child, userDataDir, endpoint, stderr };
+    if (spawnError) { cleanupProfile(); throw fail(`Chromium 启动失败: ${spawnError.code || 'spawn-error'}`, 'ASSISTANT_BROWSER_LAUNCH_FAILED'); }
     if (exit) {
-      killProcessTree(child?.pid);
-      rmSync(userDataDir, { recursive: true, force: true });
+      await stopOwnChromium(child, killProcessTree, { wait: preserveUserDataDir });
+      cleanupProfile();
       const detail = stderr.text.trim().slice(0, 500);
       throw fail(`Chromium 在调试端口就绪前退出（${exit.code ?? exit.signal}）${detail ? `: ${detail}` : ''}`, 'ASSISTANT_BROWSER_LAUNCH_FAILED');
     }
     await delay(pollMs);
   }
-  killProcessTree(child?.pid);
-  rmSync(userDataDir, { recursive: true, force: true });
+  await stopOwnChromium(child, killProcessTree, { wait: preserveUserDataDir });
+  cleanupProfile();
   throw fail('Chromium 调试端口在限定时间内未就绪', 'ASSISTANT_BROWSER_LAUNCH_FAILED');
 }
 
@@ -199,36 +249,40 @@ export async function connectCdp({
 
 /**
  * Launch and connect one Chromium. `dispose()` closes the channel, kills the
- * process group and removes the private profile; it never relaunches.
+ * process group. 普通临时配置会删除；Computer 明确声明的持久私有配置保留。
  */
 export async function startCdpTransport({
   chromium, proxy, spawn = spawnChild, WebSocketImpl = globalThis.WebSocket,
   kill = killProcessTree, launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS,
   commandTimeoutMs = CDP_COMMAND_TIMEOUT_MS, now = Date.now, userDataDir, endpoint: fixedEndpoint,
   env = process.env,
+  preserveUserDataDir = false,
 } = {}) {
+  if (preserveUserDataDir && (!userDataDir || !isAbsolute(userDataDir))) throw fail('持久浏览器配置目录必须为绝对路径', 'ASSISTANT_BROWSER_PROFILE_INVALID');
   const launched = fixedEndpoint
     ? { child: undefined, userDataDir, endpoint: { endpoint: fixedEndpoint }, stderr: { text: '' } }
-    : await launchChromium({ chromium, proxy, spawn, launchTimeoutMs, now, userDataDir, env });
+    : await launchChromium({ chromium, proxy, spawn, launchTimeoutMs, now, userDataDir, env, preserveUserDataDir });
   let connection;
   try { connection = await connectCdp({ endpoint: launched.endpoint.endpoint, WebSocketImpl, commandTimeoutMs }); }
   catch (error) {
-    if (launched.child?.pid) { try { kill(launched.child.pid, 'SIGKILL'); } catch {} }
-    if (launched.userDataDir) await rm(launched.userDataDir, { recursive: true, force: true }).catch(() => {});
+    await stopOwnChromium(launched.child, kill, { wait: preserveUserDataDir });
+    if (launched.userDataDir && !preserveUserDataDir) await rm(launched.userDataDir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  let disposed = false;
+  let disposing;
   return {
     connection,
     child: launched.child,
     userDataDir: launched.userDataDir,
     stderr: launched.stderr,
-    async dispose() {
-      if (disposed) return;
-      disposed = true;
-      try { connection.close(); } catch {}
-      if (launched.child?.pid) { try { kill(launched.child.pid, 'SIGKILL'); } catch {} }
-      if (launched.userDataDir) await rm(launched.userDataDir, { recursive: true, force: true }).catch(() => {});
+    dispose() {
+      if (disposing) return disposing;
+      disposing = (async () => {
+        try { connection.close(); } catch {}
+        await stopOwnChromium(launched.child, kill, { wait: preserveUserDataDir, graceMs: preserveUserDataDir ? 1000 : 0 });
+        if (launched.userDataDir && !preserveUserDataDir) await rm(launched.userDataDir, { recursive: true, force: true }).catch(() => {});
+      })();
+      return disposing;
     },
   };
 }

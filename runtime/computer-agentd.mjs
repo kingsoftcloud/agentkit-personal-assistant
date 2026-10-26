@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { verifyDesktopPermit } from './desktop-permit.mjs';
 import { createCloudBrowser } from './cloud-browser.mjs';
 import { createCloudExecutor } from './cloud-execution.mjs';
@@ -22,20 +23,32 @@ const whenReady = new Promise((resolve, reject) => { resolveReady = resolve; rej
 void whenReady.catch(() => {});
 let browser;
 let desktopBrowserOpening;
+let desktopBrowserClosing;
 let executor;
 let desktop;
-const closeDesktopBrowser = async () => {
-  if (!browser) return;
+const browserOptions = () => ({ workspace, env, beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); },
+  ...(env.AGENTKIT_DESKTOP_MODE === '1' ? { userDataDir: join(env.AGENTKIT_COMPUTER_STATE_DIR || '/var/lib/agentkit/computer', 'chromium-profile'), preserveUserDataDir: true } : {}),
+});
+const closeDesktopBrowser = () => {
+  if (desktopBrowserClosing) return desktopBrowserClosing;
+  if (!browser) return Promise.resolve();
   const current = browser;
-  browser = undefined;
   desktopBrowserOpening = undefined;
-  await current.close?.().catch?.(() => {});
-  await current.dispose?.().catch?.(() => {});
+  desktopBrowserClosing = (async () => {
+    await current.close?.().catch?.(() => {});
+    await current.dispose?.();
+    if (browser === current) browser = undefined;
+  })();
+  // 停止失败保留拒绝状态，不能随后创建第二个进程抢同一持久 profile。
+  void desktopBrowserClosing.then(() => { desktopBrowserClosing = undefined; }, () => {});
+  return desktopBrowserClosing;
 };
 const ensureDesktopBrowser = async () => {
   if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+  if (desktopBrowserClosing) await desktopBrowserClosing;
+  if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   if (desktopBrowserOpening) return desktopBrowserOpening;
-  browser ||= browserFactory({ workspace, env, beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); } });
+  browser ||= browserFactory(browserOptions());
   if (!browser.available) throw Object.assign(new Error(browser.resolution?.reason || 'desktop browser unavailable'), { code: 'ASSISTANT_BROWSER_UNAVAILABLE', status: 503 });
   // 桌面窗口和助理工具始终复用同一个可见 Chromium 实例。
   // 首帧只等待本地窗口，外网页面加载由明确的浏览器操作触发。
@@ -119,7 +132,7 @@ async function action(body) {
       await ensureDesktopBrowser();
     }
     assertAgentLease(body);
-    return (browser ||= browserFactory({ workspace, env, beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); } })).open(args.url);
+    return (browser ||= browserFactory(browserOptions())).open(args.url);
   }
   if (body.action === 'snapshot') return browser?.snapshot();
   if (body.action === 'click') return browser?.click(args);

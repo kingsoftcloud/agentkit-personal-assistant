@@ -289,6 +289,7 @@ export function createCloudBrowser({
   listDownloads: listDownloadsHook, statFile: statFileHook, removeFile: removeFileHook,
   kill, launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, commandTimeoutMs = CDP_COMMAND_TIMEOUT_MS,
   beforeCommand = null, transportFactory = startCdpTransport,
+  userDataDir, preserveUserDataDir = false,
 } = {}) {
   const root = checkedWorkspace(workspace);
   const resolution = resolveCloudBrowser({ env });
@@ -302,7 +303,7 @@ export function createCloudBrowser({
   const idleMs = Number.isSafeInteger(idleTimeoutMs) && idleTimeoutMs > 0 ? idleTimeoutMs : IDLE_TIMEOUT_MS;
   const commandMs = Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0 ? commandTimeoutMs : CDP_COMMAND_TIMEOUT_MS;
 
-  let transport = null, targetId = null, pageSession = null, launching = null, disposed = false, idleTimer = null, lastUrl = null;
+  let transport = null, targetId = null, pageSession = null, launching = null, disposed = false, disposing, idleTimer = null, lastUrl = null;
   let inputGeneration = 0, releasingInput, desktopTargetOpening;
   const closingTargets = new Set();
   const heldMouseButtons = new Map(), heldKeys = new Map();
@@ -420,6 +421,7 @@ export function createCloudBrowser({
         chromium: resolution.chromium, proxy: resolution.proxy, spawn, WebSocketImpl,
         kill, launchTimeoutMs, commandTimeoutMs: commandMs,
         env,
+        ...(desktopMode && userDataDir ? { userDataDir, preserveUserDataDir } : {}),
       });
       // 异常重建只恢复已通过 URL 策略的最后页面；不静默切回 about:blank。
       const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : 'about:blank';
@@ -435,7 +437,10 @@ export function createCloudBrowser({
       transport = started;
       return transport;
     } catch (error) {
-      if (started) await started.dispose().catch(() => {});
+      if (started) {
+        try { await started.dispose(); }
+        catch (cleanupError) { transport = started; targetId = null; pageSession = null; throw cleanupError; }
+      }
       transport = null; targetId = null; pageSession = null;
       if (typeof error?.code === 'string' && error.code.startsWith('ASSISTANT_BROWSER_')) throw error;
       throw fail(`云端浏览器启动失败: ${error?.code || 'launch-error'}`, 'ASSISTANT_BROWSER_LAUNCH_FAILED');
@@ -806,12 +811,15 @@ function browserOutput(properties, required, render) {
     download,
     close,
     releaseInput,
-    async dispose() {
-      if (disposed) return;
+    dispose() {
+      if (disposing) return disposing;
       disposed = true;
-      // 关闭与冷启动并发时，等待启动结束再回收，避免迟到的 Chromium 泄漏。
-      if (launching) await launching.catch(() => {});
-      await closeBrowser({ trusted: true });
+      disposing = (async () => {
+        // 关闭与冷启动并发时，等待启动结束再回收，避免迟到的 Chromium 泄漏。
+        if (launching) await launching.catch(() => {});
+        await closeBrowser({ trusted: true });
+      })();
+      return disposing;
     },
   };
 }

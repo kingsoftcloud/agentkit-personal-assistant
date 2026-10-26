@@ -84,11 +84,11 @@ test('an agent CDP command already waiting cannot mutate after human takeover', 
 });
 
 test('computer readiness stays 503 until the real desktop warmup completes without acquiring a lease', async t => {
-  let finishDisplay, browserStarts = 0, disposed = false;
+  let finishDisplay, browserStarts = 0, disposed = false, browserOptions;
   const displayReady = new Promise(resolve => { finishDisplay = resolve; });
   const service = createComputerAgentServer({ env: { ...env, AGENTKIT_DESKTOP_MODE: '1' },
     desktopFactory: () => ({ ensureDisplay: () => displayReady, dispose: async () => { disposed = true; } }),
-    browserFactory: () => ({ available: true, openDesktopWindow: async () => { browserStarts++; }, dispose: async () => {} }),
+    browserFactory: options => { browserOptions = options; return { available: true, openDesktopWindow: async () => { browserStarts++; }, dispose: async () => {} }; },
   });
   service.listen(); await once(service.server, 'listening');
   t.after(() => service.close());
@@ -99,6 +99,8 @@ test('computer readiness stays 503 until the real desktop warmup completes witho
   await new Promise(resolve => setImmediate(resolve));
   const health = await fetch(`${endpoint}/health`); assert.equal(health.status, 200);
   assert.equal((await health.json()).desktopReady, true); assert.equal(browserStarts, 1); assert.equal(disposed, false);
+  assert.equal(browserOptions.userDataDir, '/var/lib/agentkit/computer/chromium-profile');
+  assert.equal(browserOptions.preserveUserDataDir, true);
 });
 
 test('预热失败清理桌面和浏览器、关闭 HTTP 后以非零退出，不在进程内静默重试', async () => {
