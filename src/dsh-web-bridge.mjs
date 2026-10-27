@@ -79,11 +79,11 @@ export async function publishDshWebUrl({ brokerUrl, url, fetchImpl = globalThis.
   if (!isLoopbackDshWebUrl(url)) throw Object.assign(new Error('云端助理地址必须是本机回环地址'), { code: 'DSH_WEB_URL_INVALID' });
   if (typeof brokerUrl !== 'string' || !brokerUrl) throw Object.assign(new Error('缺少云电脑地址'), { code: 'COMPUTER_BROKER_UNAVAILABLE' });
   if (typeof fetchImpl !== 'function') throw Object.assign(new Error('缺少 fetch 实现'), { code: 'COMPUTER_BROKER_UNAVAILABLE' });
-  const target = new URL('/broker/action', brokerUrl.endsWith('/') ? brokerUrl : `${brokerUrl}/`);
+  const target = new URL('/broker/dsh-web', brokerUrl.endsWith('/') ? brokerUrl : `${brokerUrl}/`);
   const response = await fetchImpl(target, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify({ protocol: 'personal-assistant.computer-broker/v1', action: 'dsh.web', args: { url } }),
+    body: JSON.stringify({ protocol: 'personal-assistant.computer-broker/v1', url }),
     ...(signal ? { signal } : {}),
   });
   const body = await response.json().catch(() => ({}));

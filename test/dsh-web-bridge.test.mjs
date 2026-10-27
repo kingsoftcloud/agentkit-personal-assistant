@@ -55,7 +55,7 @@ test('取最新的一份启动日志，旧日志里的过期 token 不会顶掉�
   assert.equal(await findDshWebUrl({ dshHome: join(home, 'missing') , readdir: (await import('node:fs/promises')).readdir, stat: (await import('node:fs/promises')).stat, readFile: (await import('node:fs/promises')).readFile }), null);
 });
 
-test('推送只发 dsh.web 动作，且不把 token 写进日志', async () => {
+test('推送只调用 dsh-web 路由，且不把 token 写进日志', async () => {
   const seen = [];
   const result = await publishDshWebUrl({
     brokerUrl: 'http://127.0.0.1:8787/',
@@ -67,9 +67,8 @@ test('推送只发 dsh.web 动作，且不把 token 写进日志', async () => {
   });
   assert.deepEqual(result, { published: true, url: `http://127.0.0.1:8081/?token=${TOKEN}` });
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].target, 'http://127.0.0.1:8787/broker/action');
-  assert.equal(seen[0].body.action, 'dsh.web');
-  assert.equal(seen[0].body.args.url, `http://127.0.0.1:8081/?token=${TOKEN}`);
+  assert.equal(seen[0].target, 'http://127.0.0.1:8787/broker/dsh-web');
+  assert.equal(seen[0].body.url, `http://127.0.0.1:8081/?token=${TOKEN}`);
   await assert.rejects(publishDshWebUrl({ brokerUrl: 'http://127.0.0.1:8787/', url: 'http://example.com/?x=1', fetchImpl: async () => { throw new Error('should not call'); } }),
     error => error.code === 'DSH_WEB_URL_INVALID');
 });

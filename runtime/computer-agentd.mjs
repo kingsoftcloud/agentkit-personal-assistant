@@ -169,14 +169,6 @@ async function action(body, { signal } = {}) {
       session = desktop.getSession(opened.sessionId);
     }
     assertAgentLease(body);
-    // 云端 DSH 网页地址由 runtime 侧在宿主就绪后注入；只接受本机回环地址。
-    if (body.action === 'dsh.web') {
-      const url = args?.url;
-      if (!acceptsDshWebUrl(url)) throw Object.assign(new Error('云端助理地址无效'), { code: 'DSH_WEB_URL_INVALID', status: 400 });
-      dshWebUrl = url;
-      logger.info(JSON.stringify({ event: 'desktop.dsh-web.registered', host: new URL(url).hostname, port: new URL(url).port }));
-      return { registered: true };
-    }
     if (body.action === 'desktop.capture') {
       const frame = await desktop.frame({ sessionId: session.sessionId });
       assertAgentLease(body);
@@ -330,6 +322,15 @@ const server = createServer(async (request, response) => {
       response.on('close', disconnected); if (response.destroyed) disconnected();
       try { return send(response, 200, { protocol: body.protocol, ...(await action(body, { signal: controller.signal })) }); }
       finally { response.off('close', disconnected); }
+    }
+    // 云端 DSH 网页地址：宿主就绪后由运行时写入。这里不涉及桌面控制权（不是桌面动作），
+    // 所以不要求 agent lease；只接受本机回环地址，且不落盘、不写日志。
+    if (request.url === '/broker/dsh-web') {
+      const body = await readBody(request);
+      if (!acceptsDshWebUrl(body?.url)) return send(response, 400, { error: 'DSH_WEB_URL_INVALID' });
+      dshWebUrl = body.url;
+      logger.info(JSON.stringify({ event: 'desktop.dsh-web.registered', host: new URL(body.url).hostname, port: new URL(body.url).port }));
+      return send(response, 200, { registered: true });
     }
     if (request.url === '/broker/desktop/session') {
       const desktopIdentityValue = desktopIdentity(body);
