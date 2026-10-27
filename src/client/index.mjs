@@ -584,7 +584,27 @@ export function PersonalAssistantPanelIcon({ size } = {}) {
   R.createElement('path', { d: 'M3.4 3.2h9.2a1.3 1.3 0 0 1 1.3 1.3H7.7l-2.9 2.3v-2.3H3.4a1.3 1.3 0 0 1-1.3-1.3V4.5a1.3 1.3 0 0 1 1.3-1.3z' }),
   R.createElement('path', { d: 'M8.1 5.6l.62 1.46 1.46.62-1.46.62L8.1 9.76l-.62-1.46-1.46-.62 1.46-.62z' }));
 }
-export function PersonalAssistantComputerTabTitle() { return '云电脑'; }
+export function PersonalAssistantComputerTabGlyph({ size } = {}) {
+  const R = clientReact;
+  const edge = Number(size) > 0 ? Number(size) : 16;
+  if (!R?.createElement) return null;
+  return R.createElement('svg', {
+    width: edge, height: edge, viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4,
+    strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': 'true', focusable: 'false',
+    style: { display: 'block', flex: '0 0 auto' },
+  },
+  R.createElement('rect', { x: 2.2, y: 3.4, width: 11.6, height: 7.4, rx: 1.4 }),
+  R.createElement('path', { d: 'M6.6 13.4h2.8' }),
+  R.createElement('path', { d: 'M8 10.8v2.6' }));
+}
+
+export function PersonalAssistantComputerTabTitle() {
+  const R = clientReact;
+  const glyph = PersonalAssistantComputerTabGlyph({ size: 15 });
+  if (!R?.createElement || !glyph) return '云电脑';
+  return R.createElement('span', { style: { display: 'inline-flex', alignItems: 'center', gap: '6px', lineHeight: 1 } },
+    glyph, R.createElement('span', null, '云电脑'));
+}
 export function apply(ctx) {
   if (!ctx?.slots?.inject || !ctx.slots.register) throw new TypeError('Personal Assistant client requires the public DSH slots service');
   const request = async (operation, payload = {}) => {
