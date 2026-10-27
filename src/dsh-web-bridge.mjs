@@ -39,11 +39,11 @@ export function isLoopbackDshWebUrl(value) {
 }
 
 /**
- * 读运行容器 /run 里的地址文件（entrypoint 从 DSH 启动输出里摘出来，权限 600，容器重启即失效）。
+ * 读运行容器 /tmp 里的地址文件（entrypoint 从 DSH 启动输出里摘出来，权限 600，容器重启即失效）。
  * 这是首选来源；日志解析只是没有该文件时的兜底。
  */
 export async function readDshWebUrlFile({ file, readFile = null } = {}) {
-  const target = file || process.env.AGENTKIT_DSH_WEB_URL_FILE || '/run/agentkit/dsh-web-url';
+  const target = file || process.env.AGENTKIT_DSH_WEB_URL_FILE || '/tmp/agentkit-runtime/dsh-web-url';
   if (typeof target !== 'string' || !target) return null;
   try {
     const read = readFile || (await import('node:fs/promises')).readFile;
