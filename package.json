@@ -1,6 +1,6 @@
 {
   "name": "@kingsoftcloud/agentkit-personal-assistant",
-  "version": "0.1.5-desktop.20261027",
+  "version": "0.1.6-desktop.20261027",
   "description": "Standalone personal assistant DSH plugin with multi-Bot profiles and an explicit Cloud Computer Broker boundary.",
   "homepage": "https://ezone.ksyun.com/code/agentkit/agentkit-personal-assistant",
   "repository": {
