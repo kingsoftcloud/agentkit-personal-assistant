@@ -15,7 +15,7 @@ const apply = args.includes('--apply');
 const remote = args.includes('--remote') ? args[args.indexOf('--remote') + 1] : '';
 const EXCLUDE = ['docs/', '.artifacts/', '.worktrees/', 'output/'];
 
-const run = (command, options = {}) => execFileSync(command, { cwd: root, stdio: 'pipe', ...options }).toString();
+const run = (file, args = []) => execFileSync(file, args, { cwd: root, stdio: 'pipe' }).toString();
 
 const dirty = run('git', ['status', '--porcelain']).trim();
 if (dirty) throw new Error('工作区不干净，先提交再同步：\n' + dirty);
