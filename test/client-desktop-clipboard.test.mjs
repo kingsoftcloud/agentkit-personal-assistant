@@ -132,6 +132,7 @@ test('clipboardRead 返回 { text } 与裸字符串都能处理，错误码翻�
   assert.equal(clipboardFriendlyError(clipboardError('DESKTOP_READ_ONLY')), '需要先点画面接管云电脑，才能读写云端剪贴板');
   assert.equal(clipboardFriendlyError(clipboardError('DESKTOP_SESSION_NOT_FOUND')), '云电脑已空闲或断开，请先恢复画面再试');
   assert.equal(clipboardFriendlyError(clipboardError('CLIPBOARD_TEXT_TOO_LARGE')), '剪贴板内容超过 64 KiB，云电脑剪贴板放不下');
+  assert.equal(clipboardFriendlyError(clipboardError('DESKTOP_UNAVAILABLE')), '云电脑暂时不可用，请稍后重试');
   assert.equal(clipboardFriendlyError({ message: 'socket closed' }), 'socket closed');
   assert.equal(clipboardFriendlyError({}), '剪贴板操作失败，请重试');
 });
@@ -198,13 +199,20 @@ test('socket 未连接时立即失败；连接关闭时在途请求全部失败'
   assert.equal(pending.size, 0);
 });
 
-test('错误回复保留云端错误码，供中文化使用', async () => {
+test('云端的中文错误信息不被丢掉：未映射错误码直接显示云端原话', () => {
+  assert.equal(clipboardFriendlyError(clipboardError('BROKER_ACTION_FAILED', '云端助手返回异常，请重试')), '云端助手返回异常，请重试');
+  // 已映射的码优先给可照做的指引，而不是云端的技术性描述。
+  assert.equal(clipboardFriendlyError(clipboardError('COMPUTER_LEASE_REQUIRED', 'COMPUTER_LEASE_REQUIRED')), '需要先点画面接管云电脑，才能读写云端剪贴板');
+});
+
+test('错误回复保留云端错误码与信息，供中文化使用', async () => {
   const sent = [];
   const channel = createClipboardChannel({ send: message => { sent.push(message); return true; } });
   const reading = channel.read();
   channel.accept({ type: 'clipboard.response', requestId: sent[0].requestId, ok: false, error: { code: 'COMPUTER_LEASE_REQUIRED', message: 'lease required', status: 409 } });
   await assert.rejects(reading, error => {
     assert.equal(error.code, 'COMPUTER_LEASE_REQUIRED');
+    assert.equal(error.message, 'lease required', '云端 message 要保留在 error 上');
     assert.equal(clipboardFriendlyError(error), '需要先点画面接管云电脑，才能读写云端剪贴板');
     return true;
   });

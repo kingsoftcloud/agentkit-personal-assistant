@@ -67,6 +67,8 @@ export function clipboardFriendlyError(error) {
     return '云电脑已空闲或断开，请先恢复画面再试';
   }
   if (code === 'CLIPBOARD_TEXT_TOO_LARGE') return '剪贴板内容超过 64 KiB，云电脑剪贴板放不下';
+  if (['DESKTOP_UNAVAILABLE', 'DESKTOP_FRAME_FAILED', 'DESKTOP_SESSION_FAILED'].includes(code)) return '云电脑暂时不可用，请稍后重试';
+  if (['CLIPBOARD_FAILED', 'CLOUD_SESSION_FAILED'].includes(code)) return '剪贴板操作失败，请重试';
   if (code === 'CLIPBOARD_TEXT_INVALID') return '剪贴板内容格式不被云端接受，请重试';
   if (error?.message) return String(error.message);
   return code ? `剪贴板操作失败（${code}）` : '剪贴板操作失败，请重试';
@@ -125,7 +127,7 @@ export function createClipboardChannel({ send, timeoutMs = 5000, controlEpoch, s
       if (!entry) return false;
       settle(entry, () => {
         if (message.ok !== false) entry.resolve(message.value);
-        else entry.reject(clipError(message.error?.code || 'CLIPBOARD_FAILED', '', message.error));
+        else entry.reject(clipError(message.error?.code || 'CLIPBOARD_FAILED', message.error?.message || '', message.error));
       });
       return true;
     },
