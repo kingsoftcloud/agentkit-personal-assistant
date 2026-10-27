@@ -41,8 +41,7 @@
     "LICENSE",
     "NOTICE",
     "personal-assistant.plugin.schema.json",
-    "dist/client.js",
-    "docs"
+    "dist/client.js"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
