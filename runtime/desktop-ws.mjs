@@ -1,7 +1,9 @@
 /** Minimal authenticated WebSocket bridge for the Studio desktop view. */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { verifyDesktopPermit, desktopUnauthorized as unauthorized } from './desktop-permit.mjs';
-import { DESKTOP_CLIPBOARD_MAX_BYTES } from './desktop-session.mjs';
+// 云端桌面的剪贴板上限与 computer 容器保持一致；这里不导入 desktop-session.mjs，
+// 因为该模块只打进 computer 产物，runtime 镜像里不存在（导入会让插件启动失败）。
+import { DESKTOP_CLIPBOARD_MAX_BYTES } from './desktop-clipboard-limit.mjs';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from '../src/client/bot-directory.mjs';
 
 const PROTOCOL = 'agentkit.personal-assistant.desktop.v1';
