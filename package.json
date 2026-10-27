@@ -2,13 +2,13 @@
   "name": "@kingsoftcloud/agentkit-personal-assistant",
   "version": "0.1.6-desktop.20261027",
   "description": "Standalone personal assistant DSH plugin with multi-Bot profiles and an explicit Cloud Computer Broker boundary.",
-  "homepage": "https://ezone.ksyun.com/code/agentkit/agentkit-personal-assistant",
+  "homepage": "https://github.com/kingsoftcloud/agentkit-personal-assistant",
   "repository": {
     "type": "git",
-    "url": "git+ssh://ezone.ksyun.com:23/ezone/agentkit/agentkit-personal-assistant.git"
+    "url": "git+https://github.com/kingsoftcloud/agentkit-personal-assistant.git"
   },
   "bugs": {
-    "url": "https://ezone.ksyun.com/code/agentkit/agentkit-personal-assistant/-/issues"
+    "url": "https://github.com/kingsoftcloud/agentkit-personal-assistant/issues"
   },
   "license": "Apache-2.0",
   "type": "module",
@@ -52,8 +52,7 @@
     "build:client": "node scripts/build-client.mjs",
     "dev:client": "node scripts/build-client.mjs --watch",
     "prepack": "npm run build:client",
-    "export:npm-client": "node scripts/export-npm-client.mjs",
-    "pack:npm-client": "npm run build:client && npm run export:npm-client && npm pack .artifacts/npm-client --pack-destination .artifacts/npm-client"
+    "publish:check": "node --check src/index.mjs && npm test && npm pack --dry-run"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5"
@@ -79,5 +78,9 @@
   "main": "./src/index.mjs",
   "devDependencies": {
     "esbuild": "0.27.7"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
