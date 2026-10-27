@@ -198,10 +198,24 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     for (const event of events) sent = input(event) || sent;
     return sent;
   };
-  const copyCloudClipboardToLocal = () => copyCloudClipboard({
-    readCloud: () => clipboardRef.current.read(),
-    notify: clipboardNotify,
-  });
+  // ⌘C：先把按键原样交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
+  // 之前只读剪贴板不转发按键，用户按 ⌘C 等于没复制，还会在输入框里反复触发按键。
+  const copyCloudClipboardToLocal = async () => {
+    const modifier = /Mac|iPhone|iPad/u.test(String(globalThis.navigator?.platform || '')) ? 'Meta' : 'Control';
+    if (!state.current.pressed.has('_copyShortcut')) {
+      state.current.pressed.add('_copyShortcut');
+      try {
+        sendDesktopKeys([
+          { type: 'key', action: 'down', key: modifier },
+          { type: 'key', action: 'down', key: 'c' },
+          { type: 'key', action: 'up', key: 'c' },
+          { type: 'key', action: 'up', key: modifier },
+        ]);
+        await new Promise(resolve => setTimeout(resolve, 150));
+      } finally { state.current.pressed.delete('_copyShortcut'); }
+    }
+    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), notify: clipboardNotify });
+  };
   const pasteLocalClipboardToCloud = () => pasteToCloud({
     readLocal: () => readLocalClipboard(),
     writeCloud: text => clipboardRef.current.write(text),
@@ -378,7 +392,12 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     if (state.current.composition || event.isComposing || event.nativeEvent?.isComposing || event.key === 'Process' || event.key === 'Unidentified') return;
     // 画布上的 ⌘V/Ctrl+V 是"把本地剪贴板贴进云电脑"，不能把裸按键转给 Linux 桌面（它要的是 Ctrl+V）。
     if (isPasteShortcut(event)) { event.preventDefault(); void pasteLocalClipboardToCloud(); return; }
-    if (isCopyShortcut(event)) { event.preventDefault(); void copyCloudClipboardToLocal(); return; }
+    if (isCopyShortcut(event)) {
+      event.preventDefault();
+      // 长按/重复的 keydown 不再触发第二次复制。
+      if (event.type === 'keydown' && !event.repeat) void copyCloudClipboardToLocal();
+      return;
+    }
     const modified = event.ctrlKey || event.metaKey || event.altKey;
     // 普通文本只走 input/compositionend，避免同一按键被发送两遍。
     if (event.key.length === 1 && !modified) return;

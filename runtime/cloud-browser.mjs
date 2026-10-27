@@ -522,6 +522,8 @@ export function createCloudBrowser({
   async function switchDesktopWindowToBrowsing() {
     if (!desktopMode || !desktopAppWindow) return;
     desktopAppWindow = false;
+    // 用户要的是“浏览器首页就是欢迎页”：切窗口时固定回欢迎页，不沿用上次浏览的页面。
+    lastUrl = desktopRestoreUrl;
     const previous = transport;
     if (transport === previous) { transport = null; targetId = null; pageSession = null; }
     if (previous) { forgetInput(previous); await previous.dispose(); }
