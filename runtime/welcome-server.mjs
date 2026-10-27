@@ -37,9 +37,11 @@ const sendJson = (res, status, value) => {
   res.end(body);
 };
 
-export async function createWelcomeServer({ webDir, launch, timeoutMs = 8000, onError = () => {} }) {
+export async function createWelcomeServer({ webDir, launch, timeoutMs = 8000, onError = () => {}, timeZone = process.env.AGENTKIT_DESKTOP_TIME_ZONE || 'Asia/Shanghai' }) {
   const root = resolve(webDir);
   let closing = false;
+  // 欢迎页时钟按桌面时区显示：容器通常是 UTC，而用户按北京时间读表。
+  const config = Object.freeze({ timeZone: String(timeZone) });
 
   const serveStatic = async (pathname, res) => {
     // 只映射到 root 内的白名单后缀文件
@@ -96,7 +98,11 @@ export async function createWelcomeServer({ webDir, launch, timeoutMs = 8000, on
   const server = createServer((req, res) => {
     if (closing) { sendJson(res, 503, { ok: false, code: 'WELCOME_CLOSED' }); return; }
     const pathname = (req.url || '/').split('?')[0];
-    if (req.method === 'GET' || req.method === 'HEAD') { void serveStatic(pathname, res); return; }
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      if (pathname === '/config.json') { sendJson(res, 200, config); return; }
+      void serveStatic(pathname, res);
+      return;
+    }
     if (req.method === 'POST' && pathname === '/launch') { handleLaunch(req, res); return; }
     sendJson(res, 405, { ok: false, code: 'WELCOME_METHOD' });
   });

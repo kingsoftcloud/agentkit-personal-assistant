@@ -187,14 +187,29 @@
 (function () {
   'use strict';
 
-  // ── 时钟：每分钟对齐，每秒只在该变时更新文本 ──
+  // ── 时钟：按桌面时区显示（容器时钟是 UTC，用户按北京时间读表）──
   var clockEl = document.getElementById('clock');
-  function pad(n) { return n < 10 ? '0' + n : String(n); }
+  var clockFormat = null;
   function tick() {
     var d = new Date();
-    var text = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    var text;
+    try {
+      text = clockFormat ? clockFormat.format(d)
+        : (d.getHours() < 10 ? '0' : '') + d.getHours() + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes();
+    } catch (e) { text = clockEl.textContent; }
     if (clockEl.textContent !== text) clockEl.textContent = text;
   }
+  // 时区由本机桥 /config.json 提供；拿不到就退回浏览器本地时区。
+  try {
+    fetch('/config.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) {
+        if (!cfg || !cfg.timeZone) return;
+        clockFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: cfg.timeZone, hour: '2-digit', minute: '2-digit', hour12: false });
+        tick();
+      })
+      .catch(function () {});
+  } catch (e) {}
   tick();
   setInterval(tick, 1000);
 
