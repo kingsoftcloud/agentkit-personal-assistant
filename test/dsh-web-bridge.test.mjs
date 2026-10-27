@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import {
   extractDshWebUrl,
   findDshWebUrl,
+  readDshWebUrlFile,
   isLoopbackDshWebUrl,
   publishDshWebUrl,
   startDshWebBridge,
@@ -31,6 +32,12 @@ test('只接受本机回环地址', () => {
   assert.equal(isLoopbackDshWebUrl('http://10.0.0.1:8081/'), false);
   assert.equal(isLoopbackDshWebUrl('file:///etc/passwd'), false);
   assert.equal(isLoopbackDshWebUrl(undefined), false);
+});
+
+test('/run 地址文件优先，且只接受本机回环地址', async () => {
+  assert.equal(await readDshWebUrlFile({ file: '/run/agentkit/dsh-web-url', readFile: async () => `http://127.0.0.1:8081/?token=${TOKEN}\n` }), `http://127.0.0.1:8081/?token=${TOKEN}`);
+  assert.equal(await readDshWebUrlFile({ file: '/run/x', readFile: async () => 'http://example.com/?token=abcdefgh' }), null);
+  assert.equal(await readDshWebUrlFile({ file: '/run/x', readFile: async () => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); } }), null);
 });
 
 test('取最新的一份启动日志，旧日志里的过期 token 不会顶掉新的', async t => {

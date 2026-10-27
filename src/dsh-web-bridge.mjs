@@ -39,6 +39,21 @@ export function isLoopbackDshWebUrl(value) {
 }
 
 /**
+ * 读运行容器 /run 里的地址文件（entrypoint 从 DSH 启动输出里摘出来，权限 600，容器重启即失效）。
+ * 这是首选来源；日志解析只是没有该文件时的兜底。
+ */
+export async function readDshWebUrlFile({ file, readFile = null } = {}) {
+  const target = file || process.env.AGENTKIT_DSH_WEB_URL_FILE || '/run/agentkit/dsh-web-url';
+  if (typeof target !== 'string' || !target) return null;
+  try {
+    const read = readFile || (await import('node:fs/promises')).readFile;
+    const text = await read(target, 'utf8');
+    const line = String(text).split('\n').map(item => item.trim()).find(item => item.startsWith('http://') || item.startsWith('https://'));
+    return isLoopbackDshWebUrl(line) ? new URL(line).href : null;
+  } catch { return null; }
+}
+
+/**
  * 读最新的 DSH 启动日志，找这一步用的网页地址。
  * 日志文件名形如 startup-<iso>-<uuid>.log，按修改时间取最新一条即可。
  */
@@ -90,7 +105,8 @@ export function startDshWebBridge({ env = process.env, brokerUrl, intervalMs = 5
   const run = async () => {
     if (stopped) return;
     try {
-      const url = await findUrl({ dshHome, readdir: (await import('node:fs/promises')).readdir, stat: (await import('node:fs/promises')).stat, readFile: (await import('node:fs/promises')).readFile });
+      const url = await readDshWebUrlFile({ file: env.AGENTKIT_DSH_WEB_URL_FILE })
+        || await findUrl({ dshHome, readdir: (await import('node:fs/promises')).readdir, stat: (await import('node:fs/promises')).stat, readFile: (await import('node:fs/promises')).readFile });
       if (url && url !== lastPublished) {
         await publish({ brokerUrl: endpoint, url });
         lastPublished = url;
