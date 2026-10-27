@@ -51,7 +51,9 @@
     "build:artifacts": "node scripts/build-artifacts.mjs",
     "build:client": "node scripts/build-client.mjs",
     "dev:client": "node scripts/build-client.mjs --watch",
-    "prepack": "npm run build:client"
+    "prepack": "npm run build:client",
+    "export:npm-client": "node scripts/export-npm-client.mjs",
+    "pack:npm-client": "npm run build:client && npm run export:npm-client && npm pack .artifacts/npm-client --pack-destination .artifacts/npm-client"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.5"

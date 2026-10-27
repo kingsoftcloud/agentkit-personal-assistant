@@ -1,0 +1,55 @@
+name: Publish npm
+
+# 与 ksadk-web 的发布方式保持一致：GitHub Release / 手动触发，npm OIDC 证明发布。
+# 仓库内容就是 npm 客户端子集（scripts/export-npm-client.mjs 的产物），
+# 因此这里不需要再构建，直接打包发布。
+
+on:
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org/
+
+      - run: npm install -g npm@^11.5.1
+      - run: npm --version
+
+      - name: Pack client subset
+        run: npm pack --pack-destination .artifacts
+
+      - name: Check published version
+        id: published
+        shell: bash
+        run: |
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          if npm view "${package_name}@${package_version}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "${package_name}@${package_version} is already published; skipping npm publish."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.published.outputs.exists != 'true'
+        run: npm publish .artifacts/*.tgz --access public --provenance
