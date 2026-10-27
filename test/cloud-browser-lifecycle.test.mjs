@@ -25,6 +25,13 @@ async function fixture(t, options = {}) {
         }
         if (method === 'Target.closeTarget') { targets.delete(params.targetId); return {}; }
         if (method === 'Target.attachToTarget') return { sessionId: `page-${transports.length}` };
+        // 桌面模式会确认目标真的落在窗口里；默认假桌面窗口存在，个别用例用
+        // windowless 选项模拟“进程还在但没有窗口”的残留状态。
+        if (method === 'Browser.getWindowForTarget') {
+          // windowlessTransports 表示前 N 个浏览器实例处于“进程在、窗口没了”的状态。
+          if (transports.length <= (options.windowlessTransports || 0)) throw Object.assign(new Error('Target does not have a browser window'), { code: 'ASSISTANT_BROWSER_CDP_ERROR' });
+          return { windowId: 1, bounds: { left: 520, top: 90, width: 740, height: 620, windowState: options.windowState || 'normal' } };
+        }
         if (method === 'Page.navigate') { page.url = params.url; return {}; }
         if (method === 'Runtime.evaluate') return { result: { value: params.expression === 'document.readyState' ? 'complete'
           : params.expression.includes('performance.getEntries') ? []
@@ -255,4 +262,32 @@ test('页面探测遇到未知网络错误不能当作目标消失而静默重�
   await browser.open('https://example.com/');
   await assert.rejects(browser.openDesktopWindow(), { code: 'ASSISTANT_BROWSER_CDP_ERROR' });
   assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 1);
+});
+
+test('浏览器进程还在但窗口没了时补开新窗口，必要时重启一次自有 Chromium', async t => {
+  // 第一个实例是“进程在、窗口没了”的残留状态：新建窗口也不落地，
+  // 必须回收并重新拉起，否则点 dock 只会一直等到 WINDOW_UNAVAILABLE。
+  const { browser, transports, commands } = await fixture(t, { windowlessTransports: 1 });
+  const view = await browser.openDesktopWindow();
+  assert.equal(view.url, 'about:blank');
+  assert.equal(transports.length, 2, '无窗口残留实例必须被回收并重新拉起');
+  assert.equal(transports[0].disposed, true);
+  assert.equal(transports[1].disposed, false);
+  const recoveries = commands.filter(command => command.method === 'Target.createTarget' && command.params.newWindow === true);
+  assert.equal(recoveries.length, 2, '替代页面必须显式开新窗口：只建标签页在无窗口浏览器里也不可见');
+  assert.equal(commands.some(command => command.method === 'Browser.close'), false, '不追加多余的 Browser.close');
+});
+
+test('窗口仍在但被最小化时不新建窗口也不重启浏览器', async t => {
+  // 最小化窗口的 windowId 依然存在，属于桌面层要恢复的可见性，不是浏览器层重开。
+  const { browser, transports, commands } = await fixture(t, { windowState: 'minimized' });
+  await browser.openDesktopWindow();
+  assert.equal(transports.length, 1);
+  assert.equal(transports[0].disposed, false);
+  assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 1, '最小化窗口不能触发重复开窗');
+});
+
+test('新实例仍拿不到窗口时明确失败，不假装打开成功', async t => {
+  const { browser } = await fixture(t, { windowlessTransports: 2 });
+  await assert.rejects(browser.openDesktopWindow(), { code: 'ASSISTANT_BROWSER_DESKTOP_WINDOW_UNAVAILABLE' });
 });

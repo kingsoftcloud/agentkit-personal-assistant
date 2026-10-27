@@ -21,10 +21,13 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  * policy; `--proxy-bypass-list=<-loopback>` keeps loopback inside the proxy too.
  * 桌面模式的首屏是本机 127.0.0.1 的欢迎页，因此回环必须显式放行，否则页面会被
  * 出口代理吃掉而白屏；公网流量仍然全部走代理。
+ * 托管容器里 Chromium 自带沙箱不可用，`--no-sandbox` 会让窗口版 Chromium 顶部弹出
+ * “You are using an unsupported command-line flag” 信息栏；`--test-type` 抑制该提示栏，
+ * 不改变 CDP/自动化语义，也不影响页面能力。
  */
 export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl }) {
   return [
-    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90'] : ['--headless=new']),
+    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type'] : ['--headless=new']),
     // 应用窗口承载首屏：没有地址栏、没有多余标签条。
     ...(desktop && startUrl ? [`--app=${startUrl}`] : []),
     '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
@@ -117,6 +120,11 @@ export async function launchChromium({
   else if (userDataDir === undefined) userDataDir = createProfileDir();
   const cleanupProfile = () => { if (!preserveUserDataDir) rmSync(userDataDir, { recursive: true, force: true }); };
   const desktop = env.AGENTKIT_DESKTOP_MODE === '1';
+  // 桌面浏览器展示的是本地时间（欢迎页时钟、页面里的 Date），必须与桌面其它
+  // 进程同一时区；非桌面模式只沿用宿主 TZ，不改变既有口径。
+  const timeZone = typeof env.TZ === 'string' && env.TZ
+    ? env.TZ
+    : desktop ? String(env.AGENTKIT_DESKTOP_TIME_ZONE || 'Asia/Shanghai') : undefined;
   const args = chromiumArgs({ userDataDir, proxy, desktop, startUrl });
   const stderr = { text: '', bytes: 0 };
   let child;
@@ -124,7 +132,11 @@ export async function launchChromium({
     child = spawn(chromium, args, {
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp', ...(desktop ? { DISPLAY: env.DISPLAY || ':99' } : {}) },
+      env: {
+        PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp',
+        ...(timeZone ? { TZ: timeZone } : {}),
+        ...(desktop ? { DISPLAY: env.DISPLAY || ':99' } : {}),
+      },
     });
   } catch (error) {
     cleanupProfile();

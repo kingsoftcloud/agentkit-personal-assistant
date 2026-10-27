@@ -463,6 +463,39 @@ export function createCloudBrowser({
     }
   }
 
+  // CDP 里有页面目标不等于桌面上还有窗口：窗口被关掉或收起、进程仍活着时
+  // target 依然存在。桌面入口必须确认“目标真的在某一个窗口里”，否则点 dock
+  // 只会激活一个看不见的目标，随后报 DESKTOP_APP_WINDOW_UNAVAILABLE。
+  async function hasBrowserWindow(target) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const info = await browserCommand('Browser.getWindowForTarget', { targetId: target });
+        if (Number.isInteger(info?.windowId)) return true;
+      } catch { /* 目标没有窗口，或窗口正在销毁；再确认一次 */ }
+      if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+
+  // 桌面模式显式要求新窗口：只建标签页时，无窗口的浏览器不会把窗口显示出来。
+  async function createDesktopWindowTarget(restoreUrl) {
+    const created = await browserCommand('Target.createTarget', { url: restoreUrl, ...(desktopMode ? { newWindow: true } : {}) });
+    if (!created?.targetId) throw fail('Chromium 没有创建替代页面', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
+    const attached = await browserCommand('Target.attachToTarget', { targetId: created.targetId, flatten: true });
+    if (!attached?.sessionId) throw fail('Chromium 没有返回替代页面会话', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
+    await browserCommand('Target.activateTarget', { targetId: created.targetId });
+    return { targetId: created.targetId, pageSession: attached.sessionId };
+  }
+
+  // 进程还在但没有可用窗口属于坏状态：彻底回收当前实例再拉起一个新的，
+  // 不会并存两个实例抢同一持久 profile。
+  async function restartDesktopBrowser(previous) {
+    if (transport === previous) { transport = null; targetId = null; pageSession = null; }
+    forgetInput(previous);
+    await previous.dispose();
+    await ensureBrowser();
+  }
+
   async function ensureDesktopTarget() {
     if (desktopTargetOpening) return desktopTargetOpening;
     desktopTargetOpening = (async () => {
@@ -480,16 +513,22 @@ export function createCloudBrowser({
           else throw error;
         }
       }
+      if (!missing && desktopMode && !(await hasBrowserWindow(inspectedTarget))) missing = true;
       if (!missing) return;
       const restoreUrl = lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : desktopRestoreUrl;
       // 只替换已关闭/正在关闭的 page，不重启 Chromium；不等待旧 close ACK。
-      const created = await browserCommand('Target.createTarget', { url: restoreUrl });
-      if (!created?.targetId) throw fail('Chromium 没有创建替代页面', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
-      const attached = await browserCommand('Target.attachToTarget', { targetId: created.targetId, flatten: true });
-      if (!attached?.sessionId) throw fail('Chromium 没有返回替代页面会话', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
-      await browserCommand('Target.activateTarget', { targetId: created.targetId });
-      if (transport !== current || disposed) throw fail('云端浏览器在恢复页面期间已变化', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
-      targetId = created.targetId; pageSession = attached.sessionId;
+      let opened = await createDesktopWindowTarget(restoreUrl);
+      // 无窗口的浏览器上新建窗口也可能不落地（线上残留过这种状态）：确认失败
+      // 就重启一次自有 Chromium，恢复成“新进程 + 新窗口”。
+      if (desktopMode && !(await hasBrowserWindow(opened.targetId))) {
+        await restartDesktopBrowser(current);
+        opened = await createDesktopWindowTarget(restoreUrl);
+        // 全新实例仍然没有窗口时不能再假装成功，否则 dock 只会等到
+        // DESKTOP_APP_WINDOW_UNAVAILABLE，问题被掩盖在这个函数里。
+        if (!(await hasBrowserWindow(opened.targetId))) throw fail('Chromium 没有可显示的桌面窗口', 'ASSISTANT_BROWSER_DESKTOP_WINDOW_UNAVAILABLE');
+      }
+      if (disposed || !transport) throw fail('云端浏览器在恢复页面期间已变化', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
+      targetId = opened.targetId; pageSession = opened.pageSession;
     })();
     try { await desktopTargetOpening; } finally { desktopTargetOpening = undefined; }
   }

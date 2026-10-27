@@ -563,3 +563,61 @@ test('ten seconds without input reduces delivery to at most one new frame per se
   assert.equal(captures, 2);
   await controller.dispose();
 });
+
+test('浏览器窗口被最小化后点 dock 入口把它 map 回来，而不是报窗口不存在', async () => {
+  // 最小化/收起的窗口不会被 `xdotool search --onlyvisible` 命中；此前这里直接
+  // 超时抛 DESKTOP_APP_WINDOW_UNAVAILABLE，dock 图标就永久失效了。
+  const calls = [];
+  let revealed = false, launched = false;
+  const controller = createDesktopController({
+    applications: true,
+    onLaunchBrowser: async () => { launched = true; },
+    readWindowBindings: async () => Buffer.from('OnDesktop Mouse1 :HideMenus\n'),
+    spawn: () => fakeProcess(),
+    exec: async (file, args) => {
+      calls.push([file, ...args]);
+      if (file === 'xprop') return { stdout: readyWindowProperties };
+      if (file !== 'xdotool') return { stdout: '' };
+      if (args[0] === 'search') {
+        // dock 可见性探针（--pid tint2）与桌面应用入口（--class/--pid 应用）分开造。
+        if (args.includes('--pid') && !args.includes('^Chromium$')) return { stdout: '10485763\n' };
+        const onlyVisible = args.includes('--onlyvisible');
+        if (!args.includes('^Chromium$')) throw Object.assign(new Error('no window'), { code: 1 });
+        if (onlyVisible && !revealed) throw Object.assign(new Error('no visible window'), { code: 1 });
+        // 全量搜索会先列出 Chromium 的 InputOnly 辅助窗口；激活它会失败，必须被忽略。
+        return { stdout: onlyVisible ? '8388610\n' : '12582913\n8388610\n' };
+      }
+      if (args[0] === 'windowactivate' && args.includes('12582913')) throw Object.assign(new Error('cannot activate input-only window'), { code: 1 });
+      if (args[0] === 'windowactivate' && args.includes('8388610')) revealed = true;
+      return { stdout: '' };
+    },
+  });
+  try {
+    await controller.openSession({ identity: {} });
+    await controller.launchApplication('browser');
+    assert.equal(launched, true);
+    assert.ok(calls.some(call => call[0] === 'xdotool' && call[1] === 'windowmap' && call.includes('8388610')), '最小化窗口必须被显式 map');
+    assert.ok(calls.some(call => call[0] === 'xdotool' && call[1] === 'windowactivate' && call.includes('8388610')), '恢复后必须激活窗口');
+  } finally { await controller.dispose(); }
+});
+
+test('桌面所有子进程继承统一时区，避免 dock/终端与浏览器本地时间不一致', async () => {
+  const previous = process.env.TZ, previousDesktopTz = process.env.AGENTKIT_DESKTOP_TIME_ZONE;
+  process.env.TZ = 'Asia/Shanghai';
+  delete process.env.AGENTKIT_DESKTOP_TIME_ZONE;
+  const environments = [];
+  const controller = createDesktopControllerWithWmProbe({
+    readWindowBindings: async () => Buffer.from('OnDesktop Mouse1 :HideMenus\n'),
+    spawn(file, args, options) { environments.push({ file, env: options?.env }); return fakeProcess(); },
+    exec: async file => ({ stdout: file === 'xprop' ? readyWindowProperties : '' }),
+  });
+  try {
+    await controller.ensureDisplay();
+    assert.ok(environments.length >= 3, '至少拉起 Xvfb/Fluxbox/xterm');
+    for (const { file, env } of environments) assert.equal(env?.TZ, 'Asia/Shanghai', `${file} 必须使用桌面统一时区`);
+  } finally {
+    if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous;
+    if (previousDesktopTz === undefined) delete process.env.AGENTKIT_DESKTOP_TIME_ZONE; else process.env.AGENTKIT_DESKTOP_TIME_ZONE = previousDesktopTz;
+    await controller.dispose();
+  }
+});

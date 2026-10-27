@@ -154,7 +154,12 @@ export function createDesktopController({
     batch.flush();
   };
 
-  const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' });
+  // 桌面所有子进程（Xvfb/Fluxbox/tint2/xterm/文件管理器）共用同一时区，
+  // 否则 dock 时钟、终端与浏览器里的本地时间会互相矛盾。
+  const timeZone = typeof process.env.TZ === 'string' && process.env.TZ
+    ? process.env.TZ
+    : String(process.env.AGENTKIT_DESKTOP_TIME_ZONE || 'Asia/Shanghai');
+  const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TZ: timeZone });
   const trackStartupProcess = (name, child) => {
     const diagnostic = { stderr: '', exitCode: null, signal: null };
     processDiagnostics.set(name, diagnostic);
@@ -304,16 +309,37 @@ export function createDesktopController({
   const assertApplicationActive = signal => {
     if (disposed || launcherStopped || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   };
+  // 只搜索可见窗口的 `--onlyvisible` 会把「窗口还在但被最小化/收起」误判成
+  // 「没有窗口」：dock 图标点了没反应，直到桌面重启。桌面入口必须能把这种
+  // 窗口 map 回来，所以未命中可见窗口时退回全量搜索并显式恢复。
+  const searchApplicationWindows = async (args, onlyVisible) => {
+    let result;
+    try {
+      result = await exec('xdotool', ['search', ...(onlyVisible ? ['--onlyvisible'] : []), ...args], { env: environment, timeout: 1000 });
+    } catch (error) { if (error.code !== 1) throw error; }
+    return String(result?.stdout || '').trim().split('\n').filter(Boolean);
+  };
+  // Chromium 会暴露无法激活的 InputOnly 辅助窗口，逐个尝试并忽略单个失败。
+  const revealApplicationWindow = async id => {
+    await exec('xdotool', ['windowmap', id], { env: environment, timeout: 1000 }).catch(() => {});
+    await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 1000 }).catch(() => {});
+  };
   const activateApplication = async (args, signal, beforeCommand) => {
     const deadline = performance.now() + 2000;
     while (performance.now() < deadline) {
       assertApplicationActive(signal);
-      let result;
-      try { result = await exec('xdotool', ['search', '--onlyvisible', ...args], { env: environment, timeout: 1000 }); }
-      catch (error) { if (error.code !== 1) throw error; }
-      assertApplicationActive(signal);
-      const id = String(result?.stdout || '').trim().split('\n')[0];
+      const [id] = await searchApplicationWindows(args, true);
       if (id) { beforeCommand?.(); await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 1000 }); return; }
+      assertApplicationActive(signal);
+      // 可见窗口不存在，但应用窗口本身仍在（标题栏最小化、被 WM 收起）时
+      // map + activate 把它拉回来，再确认一次可见性。
+      const hidden = await searchApplicationWindows(args, false);
+      if (hidden.length) {
+        beforeCommand?.();
+        for (const candidate of hidden) await revealApplicationWindow(candidate);
+        assertApplicationActive(signal);
+        if ((await searchApplicationWindows(args, true)).length) return;
+      }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     throw Object.assign(new Error('桌面应用尚未显示窗口'), { code: 'DESKTOP_APP_WINDOW_UNAVAILABLE' });
