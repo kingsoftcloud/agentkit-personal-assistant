@@ -302,3 +302,14 @@ test('桌面浏览器固定使用简体中文界面与页面语言偏好', async
   const headless = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: false });
   assert.equal(headless.includes('--lang=zh-CN'), false, '无头模式不改语言口径');
 });
+
+test('桌面浏览器进程使用中文 locale，无头模式仍是 C.UTF-8', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const source = await readFile(new URL('../runtime/cloud-browser-cdp.mjs', import.meta.url), 'utf8');
+  assert.match(source, /LANG: 'zh_CN\.UTF-8', LANGUAGE: 'zh_CN:zh'/u);
+  assert.match(source, /LANG: 'C\.UTF-8', LC_ALL: 'C\.UTF-8'/u);
+  // LC_ALL 会盖过 LANG：桌面模式的分支里不能再出现 LC_ALL。
+  const desktopBranch = source.match(/desktop\s*\n?\s*\? \{ LANG: '([^']+)', LANGUAGE: '([^']+)' \}/u);
+  assert.ok(desktopBranch, '桌面分支必须显式给 LANG/LANGUAGE');
+  assert.equal(desktopBranch[1], 'zh_CN.UTF-8');
+});

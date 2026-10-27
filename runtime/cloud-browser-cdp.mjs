@@ -21,13 +21,15 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  * policy; `--proxy-bypass-list=<-loopback>` keeps loopback inside the proxy too.
  * 桌面模式的首屏是本机 127.0.0.1 的欢迎页，因此回环必须显式放行，否则页面会被
  * 出口代理吃掉而白屏；公网流量仍然全部走代理。
+ * 桌面窗口固定 `--class=Chromium`：否则 `--app=<地址>` 会把 WM_CLASS 设成地址本身，
+ * dock 的任务按钮匹配不到 chromium.desktop，只能显示一个灰色兜底图标。
  * 托管容器里 Chromium 自带沙箱不可用，`--no-sandbox` 会让窗口版 Chromium 顶部弹出
  * “You are using an unsupported command-line flag” 信息栏；`--test-type` 抑制该提示栏，
  * 不改变 CDP/自动化语义，也不影响页面能力。
  */
 export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl }) {
   return [
-    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh'] : ['--headless=new']),
+    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh', '--class=Chromium'] : ['--headless=new']),
     // 应用窗口承载首屏：没有地址栏、没有多余标签条。
     ...(desktop && startUrl ? [`--app=${startUrl}`] : []),
     '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
@@ -133,7 +135,12 @@ export async function launchChromium({
       detached: true,
       stdio: ['ignore', 'ignore', 'pipe'],
       env: {
-        PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TMPDIR: '/tmp',
+        PATH: '/usr/local/bin:/usr/bin:/bin', HOME: userDataDir, TMPDIR: '/tmp',
+        // 桌面窗口给用户看：界面与页面语言都用简体中文；LC_ALL 会盖过 LANG，桌面模式不能设。
+        // 无头自动化不改变既有口径（历史行为是 C.UTF-8 + 默认语言）。
+        ...(desktop
+          ? { LANG: 'zh_CN.UTF-8', LANGUAGE: 'zh_CN:zh' }
+          : { LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }),
         ...(timeZone ? { TZ: timeZone } : {}),
         ...(desktop ? { DISPLAY: env.DISPLAY || ':99' } : {}),
       },
