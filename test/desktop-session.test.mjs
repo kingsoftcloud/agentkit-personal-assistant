@@ -210,6 +210,10 @@ test('真实应用底栏只启动固定程序、复用窗口，关闭观察不�
     const dock = await readFile(join(wmHome, 'tint2rc'), 'utf8');
     assert.match(dock, /disable_transparency = 1/); assert.match(dock, /background_color = #f8fbff 100/);
     assert.equal((dock.match(/launcher_item_app = /g) || []).length, 3);
+    // 欢迎页已有大时钟，dock 不再重复显示时间。
+    assert.match(dock, /panel_items = LT/u);
+    assert.equal(dock.includes('time1_format'), false);
+    assert.equal(dock.includes('clock_'), false);
     await Promise.all(Array.from({ length: 10 }, () => requestDesktopLaunch(socketPath, 'files')));
     await requestDesktopLaunch(socketPath, 'terminal'); await requestDesktopLaunch(socketPath, 'browser');
     assert.equal(children.filter(p => p.file === 'Xvfb').length, 1); assert.equal(children.filter(p => p.file === '/usr/bin/tint2').length, 1);

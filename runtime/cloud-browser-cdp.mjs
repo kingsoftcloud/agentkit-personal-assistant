@@ -27,7 +27,7 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  */
 export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl }) {
   return [
-    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type'] : ['--headless=new']),
+    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh'] : ['--headless=new']),
     // 应用窗口承载首屏：没有地址栏、没有多余标签条。
     ...(desktop && startUrl ? [`--app=${startUrl}`] : []),
     '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',

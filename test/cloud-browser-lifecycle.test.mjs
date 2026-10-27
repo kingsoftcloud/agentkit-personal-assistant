@@ -291,3 +291,14 @@ test('新实例仍拿不到窗口时明确失败，不假装打开成功', async
   const { browser } = await fixture(t, { windowlessTransports: 2 });
   await assert.rejects(browser.openDesktopWindow(), { code: 'ASSISTANT_BROWSER_DESKTOP_WINDOW_UNAVAILABLE' });
 });
+
+test('桌面浏览器固定使用简体中文界面与页面语言偏好', async () => {
+  const { chromiumArgs } = await import('../runtime/cloud-browser-cdp.mjs');
+  const desktop = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: true, startUrl: 'http://127.0.0.1:1234/welcome.html' });
+  assert.ok(desktop.includes('--lang=zh-CN'), '桌面模式必须固定中文界面');
+  assert.ok(desktop.includes('--accept-lang=zh-CN,zh'), '页面语言偏好必须是简体中文');
+  assert.ok(desktop.includes('--test-type'), '必须抑制 --no-sandbox 的无支持命令行提示栏');
+  assert.ok(desktop.some(arg => arg.startsWith('--app=http://127.0.0.1:1234/welcome.html')));
+  const headless = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: false });
+  assert.equal(headless.includes('--lang=zh-CN'), false, '无头模式不改语言口径');
+});
