@@ -82,6 +82,8 @@ const openDshWeb = async ({ signal } = {}) => {
   if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   browser ||= browserFactory(browserOptions());
   const page = await browser.navigate(target);
+  // 普通浏览器窗口第一次拉起时 Chromium 可能自带一个空白“新标签页”，导航完再清一次。
+  await browser.closeBlankTabs?.();
   return { ...view, ...page };
 };
 desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', workspace,

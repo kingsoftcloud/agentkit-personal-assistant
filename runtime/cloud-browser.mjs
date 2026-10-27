@@ -528,6 +528,21 @@ export function createCloudBrowser({
     await ensureBrowser();
   }
 
+  // 桌面窗口只该有一个标签：切换成普通窗口/打开云端助理后，把 Chromium 自带的空白
+  // “新标签页”收掉，用户看到的就是“欢迎页变成了网页/助手的浏览器窗口”。
+  async function closeBlankTabs() {
+    if (!desktopMode) return 0;
+    const listed = await browserCommand('Target.getTargets');
+    const blank = (listed?.targetInfos || []).filter(info => info.type === 'page'
+      && info.targetId !== targetId
+      && (!info.url || info.url === 'about:blank' || info.url.startsWith('chrome://newtab')));
+    let closed = 0;
+    for (const info of blank) {
+      try { await browserCommand('Target.closeTarget', { targetId: info.targetId }); closed += 1; } catch { /* 标签可能已被自身关闭 */ }
+    }
+    return closed;
+  }
+
   async function ensureDesktopTarget() {
     if (desktopTargetOpening) return desktopTargetOpening;
     desktopTargetOpening = (async () => {
@@ -888,12 +903,14 @@ function browserOutput(properties, required, render) {
       // 用户从欢迎页或 dock 点“浏览器”：应用窗口切成普通浏览器窗口（带地址栏）。
       if (browsing) await switchDesktopWindowToBrowsing();
       await ensureDesktopTarget();
+      await closeBlankTabs();
       ensureUsable();
       // 桌面窗口的真实地址：应用窗口是欢迎页，普通窗口沿用欢迎页/最后页面。
       lastUrl ||= desktopRestoreUrl;
       return { url: lastUrl };
     },
     navigate,
+    closeBlankTabs,
     snapshot,
     click,
     type,
