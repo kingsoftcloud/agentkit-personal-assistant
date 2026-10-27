@@ -48,7 +48,7 @@ const closeDesktopBrowser = () => {
   void desktopBrowserClosing.then(() => { desktopBrowserClosing = undefined; }, () => {});
   return desktopBrowserClosing;
 };
-const ensureDesktopBrowser = async () => {
+const ensureDesktopBrowser = async (options = {}) => {
   if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   if (desktopBrowserClosing) await desktopBrowserClosing;
   if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
@@ -57,7 +57,7 @@ const ensureDesktopBrowser = async () => {
   if (!browser.available) throw Object.assign(new Error(browser.resolution?.reason || 'desktop browser unavailable'), { code: 'ASSISTANT_BROWSER_UNAVAILABLE', status: 503 });
   // 桌面窗口和助理工具始终复用同一个可见 Chromium 实例。
   // 首帧只等待本地窗口，外网页面加载由明确的浏览器操作触发。
-  desktopBrowserOpening = browser.openDesktopWindow();
+  desktopBrowserOpening = browser.openDesktopWindow(options);
   try {
     const result = await desktopBrowserOpening;
     if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
@@ -67,7 +67,8 @@ const ensureDesktopBrowser = async () => {
 desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', workspace,
   onLaunchBrowser: async ({ signal } = {}) => {
     if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
-    const result = await ensureDesktopBrowser();
+    // 用户主动点“浏览器”：欢迎页应用窗口切换成带地址栏的普通浏览器窗口。
+    const result = await ensureDesktopBrowser({ browsing: true });
     if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
     return result;
   },

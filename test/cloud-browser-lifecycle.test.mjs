@@ -313,3 +313,44 @@ test('桌面浏览器进程使用中文 locale，无头模式仍是 C.UTF-8', as
   assert.ok(desktopBranch, '桌面分支必须显式给 LANG/LANGUAGE');
   assert.equal(desktopBranch[1], 'zh_CN.UTF-8');
 });
+
+
+test('点浏览器时把欢迎页应用窗口切成普通浏览器窗口（带地址栏），地址沿用欢迎页', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'pa-browser-browsing-'));
+  const transports = [], commands = [];
+  let targetNumber = 0;
+  const transportFactory = async launchOptions => {
+    const page = { url: 'about:blank', title: 'welcome' };
+    const targets = new Set();
+    const transport = { launchOptions, disposed: false, page, targets, connection: {
+      closed: false,
+      async send(method, params) {
+        commands.push({ method, params });
+        if (method === 'Target.createTarget') { page.url = params.url; const targetId = `target-${++targetNumber}`; targets.add(targetId); return { targetId }; }
+        if (method === 'Target.getTargetInfo') return { targetInfo: { targetId: params.targetId } };
+        if (method === 'Target.attachToTarget') return { sessionId: `page-${transports.length}` };
+        if (method === 'Browser.getWindowForTarget') return { windowId: 1, bounds: { left: 520, top: 90, width: 740, height: 620 } };
+        if (method === 'Target.getTargets') return { targetInfos: [{ type: 'page', targetId: 'target-welcome', url: 'http://127.0.0.1:34567/welcome.html' }] };
+        if (method === 'Page.navigate') { page.url = params.url; return {}; }
+        if (method === 'Runtime.evaluate') return { result: { value: { ...page, text: 'welcome', links: [] } } };
+        return {};
+      },
+    }, async dispose() { this.disposed = true; this.connection.closed = true; } };
+    transports.push(transport); return transport;
+  };
+  const browser = createCloudBrowser({ workspace, env: { AGENTKIT_CHROMIUM: process.execPath, AGENTKIT_DESKTOP_MODE: '1', AGENTKIT_WELCOME_URL: 'http://127.0.0.1:34567/welcome.html' }, transportFactory });
+  try {
+    // 首屏是应用窗口：带 startUrl（--app）。
+    await browser.openDesktopWindow();
+    assert.equal(transports[0].launchOptions.startUrl, 'http://127.0.0.1:34567/welcome.html');
+    // 点浏览器：重启成普通窗口，不再带 --app，页面仍是欢迎页地址。
+    const view = await browser.openDesktopWindow({ browsing: true });
+    assert.equal(transports.length, 2);
+    assert.equal(transports[0].disposed, true);
+    assert.equal(transports[1].launchOptions.startUrl, undefined);
+    assert.equal(view.url, 'http://127.0.0.1:34567/welcome.html');
+    // 再点一次不再重启实例。
+    await browser.openDesktopWindow({ browsing: true });
+    assert.equal(transports.length, 2);
+  } finally { await browser.dispose(); await rm(workspace, { recursive: true, force: true }); }
+});

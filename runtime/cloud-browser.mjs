@@ -299,7 +299,14 @@ export function createCloudBrowser({
   const welcomeUrl = desktopMode && typeof env.AGENTKIT_WELCOME_URL === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/\S*$/u.test(env.AGENTKIT_WELCOME_URL)
     ? env.AGENTKIT_WELCOME_URL : null;
   const desktopStartUrl = welcomeUrl || null;
+  // 首屏是 `--app=` 应用窗口（无地址栏）。用户点“浏览器”表示要真正上网：把同一个
+  // 界面换成普通窗口（保留欢迎页地址），此后就有地址栏可导航。
+  let desktopAppWindow = Boolean(desktopStartUrl);
   const desktopRestoreUrl = welcomeUrl || 'about:blank';
+  // 欢迎页来自桌面本机桥（127.0.0.1 + 随机端口），公网 URL 策略不适用；其余地址照旧校验。
+  const isDesktopWelcomeUrl = url => desktopMode && desktopStartUrl !== null && url === desktopStartUrl;
+  const desktopPolicy = raw => isDesktopWelcomeUrl(raw) ? new URL(raw) : urlPolicy(raw).url;
+
   const shotsDir = join(root, 'files', '.cloud-browser');
   const downloadsDir = join(root, 'files', 'downloads');
   const listDownloads = typeof listDownloadsHook === 'function' ? listDownloadsHook
@@ -428,13 +435,13 @@ export function createCloudBrowser({
         kill, launchTimeoutMs, commandTimeoutMs: commandMs,
         env,
         ...(desktopMode && userDataDir ? { userDataDir, preserveUserDataDir } : {}),
-        ...(desktopStartUrl ? { startUrl: desktopStartUrl } : {}),
+        ...(desktopAppWindow && desktopStartUrl ? { startUrl: desktopStartUrl } : {}),
       });
       // 异常重建只恢复已通过 URL 策略的最后页面；不静默切回 about:blank。
-      const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : desktopRestoreUrl;
+      const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
       // `--app=` 已经把首屏开出来了，复用那个页面，避免多出一个标签/窗口。
       let adopted = null;
-      if (desktopStartUrl) {
+      if (desktopAppWindow && desktopStartUrl) {
         try {
           const listed = await started.connection.send('Target.getTargets', {}, { timeoutMs: commandMs });
           adopted = (listed?.targetInfos || []).find(info => info.type === 'page' && info.url === desktopStartUrl) || null;
@@ -496,6 +503,17 @@ export function createCloudBrowser({
     await ensureBrowser();
   }
 
+  // 把应用窗口换成普通浏览器窗口：进程参数不同（去掉 --app），只能重启自有实例；
+  // 页面地址沿用 lastUrl / 欢迎页，用户感知是“欢迎页变成了能上网的浏览器”。
+  async function switchDesktopWindowToBrowsing() {
+    if (!desktopMode || !desktopAppWindow) return;
+    desktopAppWindow = false;
+    const previous = transport;
+    if (transport === previous) { transport = null; targetId = null; pageSession = null; }
+    if (previous) { forgetInput(previous); await previous.dispose(); }
+    await ensureBrowser();
+  }
+
   async function ensureDesktopTarget() {
     if (desktopTargetOpening) return desktopTargetOpening;
     desktopTargetOpening = (async () => {
@@ -515,7 +533,7 @@ export function createCloudBrowser({
       }
       if (!missing && desktopMode && !(await hasBrowserWindow(inspectedTarget))) missing = true;
       if (!missing) return;
-      const restoreUrl = lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : desktopRestoreUrl;
+      const restoreUrl = lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
       // 只替换已关闭/正在关闭的 page，不重启 Chromium；不等待旧 close ACK。
       let opened = await createDesktopWindowTarget(restoreUrl);
       // 无窗口的浏览器上新建窗口也可能不落地（线上残留过这种状态）：确认失败
@@ -602,7 +620,7 @@ export function createCloudBrowser({
     const state = await evaluate(PAGE_STATE_EXPRESSION);
     const finalRaw = typeof state?.url === 'string' && state.url ? state.url : url.href;
     let finalUrl;
-    try { finalUrl = urlPolicy(finalRaw).url; }
+    try { finalUrl = desktopPolicy(finalRaw); }
     catch { throw fail('页面跳转到被拒绝的地址', 'ASSISTANT_BROWSER_URL_REFUSED'); }
     const warnings = await waitForResources();
     lastUrl = finalUrl.href;
@@ -615,7 +633,7 @@ export function createCloudBrowser({
     const value = await evaluate(snapshotExpression());
     const state = value && typeof value === 'object' ? value : {};
     let url = typeof state.url === 'string' && state.url ? state.url : lastUrl;
-    try { url = urlPolicy(String(url)).url.href; }
+    try { url = desktopPolicy(String(url)).href; }
     catch { throw fail('当前页面地址已被拒绝', 'ASSISTANT_BROWSER_URL_REFUSED'); }
     lastUrl = url;
     const text = sliceUtf8(typeof state.text === 'string' ? state.text : '', MAX_SNAPSHOT_BYTES);
@@ -850,11 +868,14 @@ function browserOutput(properties, required, render) {
       return await definition.execute(args, exec);
     },
     open(input, options) { return navigate(typeof input === 'string' ? input : input?.url, options); },
-    async openDesktopWindow() {
+    async openDesktopWindow({ browsing = false } = {}) {
       if (!desktopMode) throw fail('当前浏览器未启用桌面模式', 'ASSISTANT_BROWSER_DESKTOP_REQUIRED');
+      // 用户从欢迎页或 dock 点“浏览器”：应用窗口切成普通浏览器窗口（带地址栏）。
+      if (browsing) await switchDesktopWindowToBrowsing();
       await ensureDesktopTarget();
       ensureUsable();
-      lastUrl ||= 'about:blank';
+      // 桌面窗口的真实地址：应用窗口是欢迎页，普通窗口沿用欢迎页/最后页面。
+      lastUrl ||= desktopRestoreUrl;
       return { url: lastUrl };
     },
     navigate,
