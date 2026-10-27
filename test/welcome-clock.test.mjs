@@ -48,3 +48,33 @@ test('欢迎页桥只接受 GET 的 config.json，POST 仍走 /launch 白名单'
     await server.close();
   }
 });
+
+test('云端 DSH 网页地址只在就绪后出现，且只允许本机回环地址', async () => {
+  let url = null;
+  const server = await createWelcomeServer({ webDir, launch: async () => {}, dshWeb: () => url });
+  try {
+    const missing = await fetchText(`http://127.0.0.1:${server.port}/dsh-web.json`);
+    assert.equal(missing.status, 404);
+    assert.equal(JSON.parse(missing.body).code, 'DSH_WEB_UNAVAILABLE');
+
+    url = 'http://127.0.0.1:8081/?token=abc12345';
+    const ready = await fetchText(`http://127.0.0.1:${server.port}/dsh-web.json`);
+    assert.equal(ready.status, 200);
+    assert.deepEqual(JSON.parse(ready.body), { url: 'http://127.0.0.1:8081/?token=abc12345' });
+
+    // 外网地址不能通过欢迎页桥泄露给桌面
+    url = 'http://example.com/?token=abc12345';
+    const refused = await fetchText(`http://127.0.0.1:${server.port}/dsh-web.json`);
+    assert.equal(refused.status, 404);
+  } finally {
+    await server.close();
+  }
+});
+
+test('欢迎页有云助理磁贴：先确认地址就绪，再让 launcher 打开', async () => {
+  const html = await readFile(join(webDir, 'welcome.html'), 'utf8');
+  assert.match(html, /data-action="dsh"/u);
+  assert.match(html, /云助理/u);
+  assert.match(html, /fetch\('\/dsh-web\.json'\)/u);
+  assert.match(html, /launch\('dsh'\)/u);
+});

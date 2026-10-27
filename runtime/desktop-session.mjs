@@ -108,6 +108,9 @@ export function createDesktopController({
   applications = false,
   workspace = process.env.AGENTKIT_WORKSPACE_DIR || '/workspace',
   onLaunchBrowser = null,
+  // 云端 DSH 网页（同一 Pod 内 127.0.0.1:8081 + token）由 runtime 侧注入地址，桌面只负责打开。
+  dshWebUrl = null,
+  onLaunchDshWeb = null,
   onLaunchError = () => {},
 } = {}) {
   const sessions = new Map();
@@ -249,6 +252,7 @@ export function createDesktopController({
             webDir: fileURLToPath(new URL('../web', import.meta.url)),
             launch: launchApplication,
             onError: onLaunchError,
+            dshWeb: typeof dshWebUrl === 'function' ? dshWebUrl : () => dshWebUrl,
           });
           welcomeUrl = welcome.url;
         } catch (error) {
@@ -354,6 +358,10 @@ export function createDesktopController({
         if (!onLaunchBrowser) throw Object.assign(new Error('浏览器入口尚未连接'), { code: 'DESKTOP_BROWSER_UNAVAILABLE' });
         await onLaunchBrowser({ signal });
         // CDP 的 activateTarget 只选择标签页；应用入口还需让同一窗口获得 WM 焦点。
+        await activateApplication(['--class', '^Chromium$'], signal, beforeCommand);
+      } else if (action === 'dsh') {
+        if (!onLaunchDshWeb) throw Object.assign(new Error('云端助理网页尚未接入'), { code: 'DSH_WEB_UNAVAILABLE' });
+        await onLaunchDshWeb({ signal });
         await activateApplication(['--class', '^Chromium$'], signal, beforeCommand);
       } else if (action === 'terminal') {
         if (terminalProcess && terminalProcess.exitCode === null && !terminalProcess.killed) await activateApplication(['--pid', String(terminalProcess.pid)], signal, beforeCommand);

@@ -359,3 +359,37 @@ test('点浏览器时把欢迎页应用窗口切成普通浏览器窗口（带�
     assert.equal(transports.length, 2);
   } finally { await browser.dispose(); await rm(workspace, { recursive: true, force: true }); }
 });
+
+test('桌面浏览器能打开同一 Pod 内的本机服务（云端 DSH 网页），公网仍只允许 80/443', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'pa-browser-loopback-'));
+  const commands = [];
+  const transportFactory = async () => {
+    const page = { url: 'about:blank', title: 'x' };
+    const targets = new Set();
+    return { disposed: false, page, targets, connection: {
+      closed: false,
+      async send(method, params) {
+        commands.push({ method, params });
+        if (method === 'Target.createTarget') { page.url = params.url; const targetId = `target-${targets.size + 1}`; targets.add(targetId); return { targetId }; }
+        if (method === 'Target.getTargetInfo') return { targetInfo: { targetId: params.targetId } };
+        if (method === 'Target.attachToTarget') return { sessionId: 'page-1' };
+        if (method === 'Browser.getWindowForTarget') return { windowId: 1, bounds: { left: 520, top: 90, width: 740, height: 620 } };
+        if (method === 'Page.navigate') { page.url = params.url; return {}; }
+        if (method === 'Runtime.evaluate') {
+          const expression = String(params?.expression || '');
+          if (expression.includes('readyState')) return { result: { value: 'complete' } };
+          return { result: { value: { url: page.url, title: 'x', text: 'x', links: [] } } };
+        }
+        return {};
+      },
+    }, async dispose() { this.disposed = true; } };
+  };
+  const browser = createCloudBrowser({ workspace, env: { AGENTKIT_CHROMIUM: process.execPath, AGENTKIT_DESKTOP_MODE: '1' }, transportFactory });
+  try {
+    await browser.openDesktopWindow();
+    const local = await browser.navigate('http://127.0.0.1:8081/?token=abcdefgh12345678');
+    assert.equal(local.url, 'http://127.0.0.1:8081/?token=abcdefgh12345678');
+    await assert.rejects(browser.navigate('http://example.com:8081/'), error => error.code === 'ASSISTANT_BROWSER_URL_REFUSED',
+      '外网端口仍要被拒绝，本机回环是例外而不是放开策略');
+  } finally { await browser.dispose(); await rm(workspace, { recursive: true, force: true }); }
+});

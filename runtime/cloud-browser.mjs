@@ -305,7 +305,14 @@ export function createCloudBrowser({
   const desktopRestoreUrl = welcomeUrl || 'about:blank';
   // 欢迎页来自桌面本机桥（127.0.0.1 + 随机端口），公网 URL 策略不适用；其余地址照旧校验。
   const isDesktopWelcomeUrl = url => desktopMode && desktopStartUrl !== null && url === desktopStartUrl;
-  const desktopPolicy = raw => isDesktopWelcomeUrl(raw) ? new URL(raw) : urlPolicy(raw).url;
+  // 桌面模式还要能打开同一 Pod 内的本机服务（如 127.0.0.1:8081 的云端 DSH 网页）；
+  // 公网地址仍然只允许 80/443 的 http(s)。
+  const isPodLoopback = raw => {
+    if (!desktopMode) return false;
+    try { const parsed = new URL(raw); return ['http:', 'https:'].includes(parsed.protocol) && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname); }
+    catch { return false; }
+  };
+  const desktopPolicy = raw => isDesktopWelcomeUrl(raw) || isPodLoopback(raw) ? new URL(raw) : urlPolicy(raw).url;
 
   const shotsDir = join(root, 'files', '.cloud-browser');
   const downloadsDir = join(root, 'files', 'downloads');
@@ -617,7 +624,8 @@ export function createCloudBrowser({
   }
 
   async function navigate(rawUrl, { signal } = {}) {
-    const { url } = urlPolicy(rawUrl);
+    // 桌面模式下允许打开同一 Pod 内的本机服务（云端 DSH 网页）；公网仍走原策略。
+    const url = desktopPolicy(String(rawUrl));
     ensureUsable();
     throwIfAborted(signal);
     const result = await pageCommand('Page.navigate', { url: url.href });

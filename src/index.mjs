@@ -1,5 +1,6 @@
 import { BotRegistry } from './bot-registry.mjs';
 import { createComputerBrokerClient, createHttpComputerBrokerTransport } from './computer-broker.mjs';
+import { startDshWebBridge } from './dsh-web-bridge.mjs';
 import { createComputerToolset, registerComputerTools } from './cloud-computer-tools.mjs';
 import { createScheduleManager } from './schedule-manager.mjs';
 import { registerAutomationTools } from './automation-tools.mjs';
@@ -121,7 +122,10 @@ export function apply(ctx, config = {}) {
       const { startAssistantRuntime } = await import('../runtime/assistant-runtime.mjs');
       const handle = await startAssistantRuntime({ runtime, env });
       console.info(JSON.stringify({ event: 'personal-assistant.host.ready', assistantId: env.ASSISTANT_ID, port: Number(env.AGENTKIT_RUNTIME_PORT), dshSessionController: true }));
-      return () => handle.close();
+      // 把本机云端 DSH 网页地址交给云电脑（欢迎页「云助理」磁贴用它打开网页化宿主）。
+      // token 只在 Pod 内传递，不落盘、不写日志；失败不影响宿主就绪。
+      const dshWeb = startDshWebBridge({ env, brokerUrl: env.COMPUTER_BROKER_URL || env.AGENTKIT_COMPUTER_URL });
+      return () => { dshWeb.stop(); return handle.close(); };
     };
     if (typeof ctx.effect !== 'function') throw new Error('DSH effect lifecycle is required');
     ctx.effect(serve, 'personal-assistant.http');

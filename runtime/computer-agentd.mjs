@@ -48,6 +48,16 @@ const closeDesktopBrowser = () => {
   void desktopBrowserClosing.then(() => { desktopBrowserClosing = undefined; }, () => {});
   return desktopBrowserClosing;
 };
+// 云端 DSH 网页地址：runtime 侧把 127.0.0.1:8081 的带 token 地址推过来，只存内存、不落盘。
+let dshWebUrl = null;
+const acceptsDshWebUrl = value => {
+  if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 512) return false;
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    return ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname);
+  } catch { return false; }
+};
 const ensureDesktopBrowser = async (options = {}) => {
   if (closing) throw Object.assign(new Error('云电脑正在关闭'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   if (desktopBrowserClosing) await desktopBrowserClosing;
@@ -64,7 +74,18 @@ const ensureDesktopBrowser = async (options = {}) => {
     return result;
   } finally { desktopBrowserOpening = undefined; }
 };
+const openDshWeb = async ({ signal } = {}) => {
+  if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+  if (!dshWebUrl) throw Object.assign(new Error('云端助理网页还没准备好'), { code: 'DSH_WEB_UNAVAILABLE' });
+  const target = dshWebUrl;
+  const view = await ensureDesktopBrowser({ browsing: true });
+  if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+  browser ||= browserFactory(browserOptions());
+  const page = await browser.navigate(target);
+  return { ...view, ...page };
+};
 desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', workspace,
+  dshWebUrl: () => dshWebUrl, onLaunchDshWeb: openDshWeb,
   onLaunchBrowser: async ({ signal } = {}) => {
     if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
     // 用户主动点“浏览器”：欢迎页应用窗口切换成带地址栏的普通浏览器窗口。
@@ -148,6 +169,14 @@ async function action(body, { signal } = {}) {
       session = desktop.getSession(opened.sessionId);
     }
     assertAgentLease(body);
+    // 云端 DSH 网页地址由 runtime 侧在宿主就绪后注入；只接受本机回环地址。
+    if (body.action === 'dsh.web') {
+      const url = args?.url;
+      if (!acceptsDshWebUrl(url)) throw Object.assign(new Error('云端助理地址无效'), { code: 'DSH_WEB_URL_INVALID', status: 400 });
+      dshWebUrl = url;
+      logger.info(JSON.stringify({ event: 'desktop.dsh-web.registered', host: new URL(url).hostname, port: new URL(url).port }));
+      return { registered: true };
+    }
     if (body.action === 'desktop.capture') {
       const frame = await desktop.frame({ sessionId: session.sessionId });
       assertAgentLease(body);

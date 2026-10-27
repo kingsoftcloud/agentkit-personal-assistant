@@ -160,6 +160,12 @@
       </span>
       <span class="app__label">文件</span>
     </button>
+    <button class="app" role="listitem" data-action="dsh" title="打开云端助理网页">
+      <span class="app__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#1f9d6b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="5" width="17.6" height="12.4" rx="2.6"/><path d="M8 21h8"/><path d="M12 17.4V21"/><path d="M7.6 10.4l2.2 1.6-2.2 1.6"/><path d="M12.4 13.6h3.4"/></svg>
+      </span>
+      <span class="app__label">云助理</span>
+    </button>
     <button class="app" role="listitem" data-action="workspace" title="工作区说明">
       <span class="app__icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="#7b61ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14v16h4.5A1.5 1.5 0 0 0 20 18.5z"/></svg>
@@ -245,8 +251,24 @@
     }).then(function (r) { return r.json(); });
   }
 
+  // 云端 DSH 网页由同一 Pod 内的 127.0.0.1:8081 提供，地址由本机桥转发给桌面重新导航。
+  function openDsh(btn) {
+    if (btn) btn.disabled = true;
+    fetch('/dsh-web.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (info) {
+      if (!info || !info.url) { toast('云端助理网页还在启动，请稍后再试'); return; }
+      return launch('dsh').then(function (res) {
+        if (!res || res.ok !== true) toast('打开失败：' + ((res && res.code) || '未知错误'));
+      });
+    }).catch(function () {
+      toast('云端助理网页暂时不可用');
+    }).then(function () {
+      if (btn) btn.disabled = false;
+    });
+  }
+
   function handle(action, btn) {
     if (action === 'workspace') { toast(WORKSPACE_HINT); return; }
+    if (action === 'dsh') { openDsh(btn); return; }
     if (btn) btn.disabled = true;
     launch(action).then(function (res) {
       if (!res || res.ok !== true) toast('打开失败：' + ((res && res.code) || '未知错误'));
