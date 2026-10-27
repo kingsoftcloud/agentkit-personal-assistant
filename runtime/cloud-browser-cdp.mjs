@@ -27,11 +27,13 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  * “You are using an unsupported command-line flag” 信息栏；`--test-type` 抑制该提示栏，
  * 不改变 CDP/自动化语义，也不影响页面能力。
  */
-export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl }) {
+export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl, openUrl }) {
   return [
-    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh', '--class=Chromium'] : ['--headless=new']),
+    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh', '--class=Chromium', '--hide-crash-restore-bubble'] : ['--headless=new']),
     // 应用窗口承载首屏：没有地址栏、没有多余标签条。
     ...(desktop && startUrl ? [`--app=${startUrl}`] : []),
+    // 普通窗口模式：把首页作为位置参数交给 Chromium，避免先出一个空白标签再补一个页面。
+    ...(desktop && !startUrl && openUrl ? [openUrl] : []),
     '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync',
     '--disable-background-networking', '--disable-breakpad', '--disable-crash-reporter',
@@ -112,7 +114,7 @@ function preparePersistentProfile(userDataDir) {
 export async function launchChromium({
   chromium, proxy, userDataDir, spawn = spawnChild,
   launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, now = Date.now, pollMs = 25, env = process.env,
-  preserveUserDataDir = false, startUrl,
+  preserveUserDataDir = false, startUrl, openUrl,
 } = {}) {
   if (preserveUserDataDir) {
     const previous = persistentProfileOwners.get(userDataDir);
@@ -127,7 +129,7 @@ export async function launchChromium({
   const timeZone = typeof env.TZ === 'string' && env.TZ
     ? env.TZ
     : desktop ? String(env.AGENTKIT_DESKTOP_TIME_ZONE || 'Asia/Shanghai') : undefined;
-  const args = chromiumArgs({ userDataDir, proxy, desktop, startUrl });
+  const args = chromiumArgs({ userDataDir, proxy, desktop, startUrl, openUrl });
   const stderr = { text: '', bytes: 0 };
   let child;
   try {

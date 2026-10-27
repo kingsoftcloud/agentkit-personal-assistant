@@ -428,6 +428,8 @@ export function createCloudBrowser({
   }
 
   async function launch() {
+    // 异常重建只恢复已通过 URL 策略的最后页面；不静默切回 about:blank。
+    const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
     let started;
     try {
       started = await transportFactory({
@@ -435,17 +437,22 @@ export function createCloudBrowser({
         kill, launchTimeoutMs, commandTimeoutMs: commandMs,
         env,
         ...(desktopMode && userDataDir ? { userDataDir, preserveUserDataDir } : {}),
+        // 应用窗口用 --app 自带首屏；普通窗口模式把同一个地址作为位置参数打开，
+        // 这样不会多出一个空白“新标签页”。
         ...(desktopAppWindow && desktopStartUrl ? { startUrl: desktopStartUrl } : {}),
+        ...(!desktopAppWindow && desktopMode && restoreUrl !== 'about:blank' ? { openUrl: restoreUrl } : {}),
       });
-      // 异常重建只恢复已通过 URL 策略的最后页面；不静默切回 about:blank。
-      const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
-      // `--app=` 已经把首屏开出来了，复用那个页面，避免多出一个标签/窗口。
+      // 首屏已经由 Chromium 自己打开，复用那个页面，避免多出一个标签/窗口。
       let adopted = null;
-      if (desktopAppWindow && desktopStartUrl) {
-        try {
-          const listed = await started.connection.send('Target.getTargets', {}, { timeoutMs: commandMs });
-          adopted = (listed?.targetInfos || []).find(info => info.type === 'page' && info.url === desktopStartUrl) || null;
-        } catch { adopted = null; }
+      {
+        const wantedUrl = desktopAppWindow && desktopStartUrl ? desktopStartUrl
+          : !desktopAppWindow && desktopMode && restoreUrl !== 'about:blank' ? restoreUrl : null;
+        if (wantedUrl) {
+          try {
+            const listed = await started.connection.send('Target.getTargets', {}, { timeoutMs: commandMs });
+            adopted = (listed?.targetInfos || []).find(info => info.type === 'page' && info.url === wantedUrl) || null;
+          } catch { adopted = null; }
+        }
       }
       const created = adopted ? { targetId: adopted.targetId }
         : await started.connection.send('Target.createTarget', { url: restoreUrl }, { timeoutMs: commandMs });

@@ -298,6 +298,7 @@ test('桌面浏览器固定使用简体中文界面与页面语言偏好', async
   assert.ok(desktop.includes('--lang=zh-CN'), '桌面模式必须固定中文界面');
   assert.ok(desktop.includes('--accept-lang=zh-CN,zh'), '页面语言偏好必须是简体中文');
   assert.ok(desktop.includes('--test-type'), '必须抑制 --no-sandbox 的无支持命令行提示栏');
+  assert.ok(desktop.includes('--hide-crash-restore-bubble'), '切换窗口后不能再弹“Chromium 未正确关闭”气泡');
   assert.ok(desktop.some(arg => arg.startsWith('--app=http://127.0.0.1:1234/welcome.html')));
   const headless = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: false });
   assert.equal(headless.includes('--lang=zh-CN'), false, '无头模式不改语言口径');
@@ -348,7 +349,11 @@ test('点浏览器时把欢迎页应用窗口切成普通浏览器窗口（带�
     assert.equal(transports.length, 2);
     assert.equal(transports[0].disposed, true);
     assert.equal(transports[1].launchOptions.startUrl, undefined);
+    // 普通窗口把首页作为位置参数打开，不再多一个空白标签。
+    assert.equal(transports[1].launchOptions.openUrl, 'http://127.0.0.1:34567/welcome.html');
     assert.equal(view.url, 'http://127.0.0.1:34567/welcome.html');
+    assert.equal(commands.filter(command => command.method === 'Target.createTarget').length, 0,
+      '首屏由 Chromium 自己打开时应复用该标签，不能再建一个空白页面');
     // 再点一次不再重启实例。
     await browser.openDesktopWindow({ browsing: true });
     assert.equal(transports.length, 2);
