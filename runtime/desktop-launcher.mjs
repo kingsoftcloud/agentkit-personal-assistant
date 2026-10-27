@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const actions = new Set(['browser', 'terminal', 'files']);
+const actions = new Set(['browser', 'terminal', 'files', 'dsh']);
 const MAX_REQUEST_BYTES = 256;
 const failure = (code, message) => Object.assign(new Error(message), { code });
 const assertRequest = value => {

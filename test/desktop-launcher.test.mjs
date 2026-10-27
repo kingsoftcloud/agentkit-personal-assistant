@@ -17,12 +17,12 @@ test('本地应用入口使用私有 socket，仅固定枚举可以到达回调'
   try {
     assert.equal((await stat(dirname(launcher.socketPath))).mode & 0o777, 0o700);
     assert.equal((await stat(launcher.socketPath)).mode & 0o777, 0o600);
-    for (const action of ['browser', 'terminal', 'files']) await requestDesktopLaunch(launcher.socketPath, action);
+    for (const action of ['browser', 'terminal', 'files', 'dsh']) await requestDesktopLaunch(launcher.socketPath, action);
     for (const request of [{ v: 1, action: 'browser', url: 'https://example.com' }, { v: 1, action: 'files', path: '/etc' }, { v: 1, action: 'command', command: 'touch /tmp/forbidden' }]) {
       assert.equal((await raw(launcher.socketPath, JSON.stringify(request) + '\n')).code, 'DESKTOP_LAUNCH_INVALID');
     }
     assert.equal((await raw(launcher.socketPath, 'x'.repeat(257) + '\n')).code, 'DESKTOP_LAUNCH_INVALID');
-    assert.deepEqual(called, ['browser', 'terminal', 'files']);
+    assert.deepEqual(called, ['browser', 'terminal', 'files', 'dsh']);
   } finally { await launcher.close(); }
 });
 
