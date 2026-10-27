@@ -57,6 +57,8 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
     browserClose: () => request('personal-assistant.computer.action', { action: 'stop', args: {}, botId: selectedBotId }),
     cloudBash: (command, timeoutMs) => request('personal-assistant.computer.action', { action: 'terminal.exec', args: { language: 'shell', command, ...(timeoutMs === undefined ? {} : { timeoutMs }) }, botId: selectedBotId }),
     cloudRunCode: (language, code, timeoutMs) => request('personal-assistant.computer.action', { action: 'terminal.exec', args: { language, code, ...(timeoutMs === undefined ? {} : { timeoutMs }) }, botId: selectedBotId }),
+    clipboardRead: () => request('personal-assistant.computer.action', { action: 'clipboard.read', args: {}, botId: selectedBotId }),
+    clipboardWrite: text => request('personal-assistant.computer.action', { action: 'clipboard.write', args: { text }, botId: selectedBotId }),
     desktop,
   });
 }

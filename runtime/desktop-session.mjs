@@ -26,9 +26,18 @@ export const DESKTOP_ACTIVITY_WINDOW_MS = 10_000;
 export const DESKTOP_IDLE_TIMEOUT_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_TIMEOUT_MS || 10 * 60_000);
 export const DESKTOP_IDLE_RETENTION_MS = Number(process.env.AGENTKIT_DESKTOP_IDLE_RETENTION_MS || 15 * 60_000);
 export const DESKTOP_TEXT_COALESCE_MS = 30;
+export const DESKTOP_CLIPBOARD_MAX_BYTES = 64 * 1024;
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, Math.round(Number(value))));
 const inputError = (message, code = 'DESKTOP_INPUT_INVALID', status = 400) => Object.assign(new Error(message), { code, status });
+const truncateUtf8 = (value, maxBytes) => {
+  const buffer = Buffer.from(String(value ?? ''), 'utf8');
+  if (buffer.length <= maxBytes) return buffer.toString('utf8');
+  // 按 UTF-8 字符边界截断，不能把多字节字符切一半。
+  let end = maxBytes;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString('utf8');
+};
 
 // 仅在系统默认文件缺失时使用；正常镜像逐字复制 /etc/X11/fluxbox/keys。
 // 正文点击由 ClickFocus/clickRaises 处理并转交应用，不用 OnWindow Mouse1 抢走应用单击。
@@ -109,6 +118,8 @@ export function createDesktopController({
   let dockProcess, fileManagerProcess, launcher, welcome, welcomeUrl, launcherStopped = false, launcherShutdown = false;
   let appQueue = Promise.resolve();
   const processGroups = new Set();
+  // X11 剪贴板由 owner 进程持有；只保留最新一份写入，避免旧 selection 被读到。
+  const clipboardOwners = new Set();
   let collector;
   let collectorStarting;
   let collectorStopping;
@@ -506,31 +517,71 @@ export function createDesktopController({
     for (const button of buttons) await exec('xdotool', ['mouseup', String(button)], { env: environment, timeout: 2000 }).catch(() => {});
     if (keys.length) await exec('xdotool', ['keyup', ...keys], { env: environment, timeout: 2000 }).catch(() => {});
   };
-  const pasteText = async text => {
+  const stopClipboardOwner = async owner => {
+    clipboardOwners.delete(owner);
+    const child = owner.child;
+    if (child.exitCode !== null) return;
+    try { child.kill('SIGTERM'); } catch { /* 进程已退出 */ }
+    await Promise.race([owner.closed, new Promise(resolve => setTimeout(resolve, 200))]);
+    if (child.exitCode === null) { try { child.kill('SIGKILL'); } catch { /* 进程已退出 */ } }
+  };
+  const releaseClipboardOwners = async () => { await Promise.all([...clipboardOwners].map(stopClipboardOwner)); };
+  // xclip must own the selection while the target requests its data. Waiting
+  // for it to exit before sending paste deadlocks. Keep a tracked foreground
+  // owner, verify its UTF-8 value, then hand it to the caller.
+  const ownClipboard = async text => {
     await ensureDisplay();
-    // xclip must own the selection while the target requests its data. Waiting
-    // for it to exit before sending paste deadlocks. Keep a tracked foreground
-    // owner, verify its UTF-8 value, send the paste, then reap the owner.
+    // 新写入就是新的 selection；旧的 owner 必须先退出，不能留下两份文本。
+    await releaseClipboardOwners();
     const child = spawn('xclip', ['-quiet', '-selection', 'clipboard', '-display', display, '-loops', '0', '-target', 'UTF8_STRING'], { env: environment, stdio: ['pipe', 'ignore', 'pipe'] });
-    let spawnFailure, stderr = '';
+    const owner = { child, stderr: '', closed: new Promise(resolve => child.once('close', resolve)) };
+    let spawnFailure;
     child.on('error', error => { spawnFailure = error; });
-    child.stderr?.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-2048); });
-    const closed = new Promise(resolve => child.once('close', resolve));
+    child.stderr?.on('data', chunk => { owner.stderr = (owner.stderr + chunk.toString('utf8')).slice(-2048); });
     child.stdin.on('error', () => {});
     child.stdin.end(text, 'utf8');
     try {
       const deadline = Date.now() + 2000;
       let ready = false;
       while (Date.now() < deadline) {
-        if (spawnFailure || child.exitCode !== null) throw spawnFailure || new Error(stderr || 'clipboard owner exited');
+        if (spawnFailure || child.exitCode !== null) throw spawnFailure || new Error(owner.stderr || 'clipboard owner exited');
         try {
-          const selected = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', 'UTF8_STRING'], { env: environment, encoding: 'utf8', timeout: 500, maxBuffer: 64 * 1024 });
+          const selected = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', 'UTF8_STRING'], { env: environment, encoding: 'utf8', timeout: 500, maxBuffer: DESKTOP_CLIPBOARD_MAX_BYTES });
           if (selected.stdout === text) { ready = true; break; }
         } catch { /* the owner may still be establishing the selection */ }
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       if (!ready) throw new Error('clipboard selection did not become ready');
-      const requestsSeen = () => Math.max(0, ...Array.from(stderr.matchAll(/Waiting for selection request number (\d+)/gu), match => Number(match[1])));
+      clipboardOwners.add(owner);
+      return owner;
+    } catch (error) {
+      await stopClipboardOwner(owner);
+      throw error;
+    }
+  };
+  const readClipboard = async () => {
+    await ensureDisplay();
+    try {
+      const result = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', 'UTF8_STRING'], { env: environment, encoding: 'utf8', timeout: 2000, maxBuffer: 256 * 1024 });
+      return truncateUtf8(result?.stdout, DESKTOP_CLIPBOARD_MAX_BYTES);
+    } catch {
+      // 没有 owner、selection 为空或 X 尚不可用都等价于“没有可读文本”，
+      // 读剪贴板不能因为空 selection 打断宿主同步。
+      return '';
+    }
+  };
+  const writeClipboard = async text => {
+    const value = String(text ?? '');
+    try { await ownClipboard(value); }
+    catch (error) { throw Object.assign(new Error(`desktop clipboard write failed: ${error.message}`), { code: 'DESKTOP_CLIPBOARD_FAILED', cause: error }); }
+    // owner 进程留在后台继续提供 selection，直到下一次写入或桌面停止。
+    return { written: true };
+  };
+  const pasteText = async text => {
+    let owner;
+    try {
+      owner = await ownClipboard(text);
+      const requestsSeen = () => Math.max(0, ...Array.from(owner.stderr.matchAll(/Waiting for selection request number (\d+)/gu), match => Number(match[1])));
       const beforePaste = requestsSeen();
       await pressKey('ctrl+shift+v');
       // The key event is queued by X11 before the target asks for selection
@@ -542,9 +593,7 @@ export function createDesktopController({
     } catch (error) {
       throw Object.assign(new Error(`desktop clipboard input failed: ${error.message}`), { code: 'DESKTOP_CLIPBOARD_FAILED', cause: error });
     } finally {
-      child.kill('SIGTERM');
-      await Promise.race([closed, new Promise(resolve => setTimeout(resolve, 200))]);
-      if (child.exitCode === null) child.kill('SIGKILL');
+      if (owner) await stopClipboardOwner(owner);
     }
   };
   const injectInput = async event => {
@@ -719,6 +768,7 @@ export function createDesktopController({
     const stopping = (async () => {
       await stopLauncher({ permanent: false });
       await releasePressedInput();
+      await releaseClipboardOwners();
       await stopCollector();
       const processes = [dockProcess, fileManagerProcess, wm, terminalProcess, xvfb];
       dockProcess = undefined; fileManagerProcess = undefined; wm = undefined; terminalProcess = undefined; xvfb = undefined; displayReady = undefined;
@@ -751,5 +801,5 @@ export function createDesktopController({
     await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 2000 });
     return { windowId: id, focused: true };
   };
-  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, stopLauncher, dispose, stats, injectInput, captureFrame, windows, focusWindow, launchApplication, get welcomeUrl() { return welcomeUrl; } });
+  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, stopLauncher, dispose, stats, injectInput, captureFrame, windows, focusWindow, launchApplication, readClipboard, writeClipboard, get welcomeUrl() { return welcomeUrl; } });
 }

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { verifyDesktopPermit } from './desktop-permit.mjs';
 import { createCloudBrowser } from './cloud-browser.mjs';
 import { createCloudExecutor } from './cloud-execution.mjs';
-import { createDesktopController } from './desktop-session.mjs';
+import { createDesktopController, DESKTOP_CLIPBOARD_MAX_BYTES } from './desktop-session.mjs';
 
 export function createComputerAgentServer({ env = process.env, desktopFactory = createDesktopController, browserFactory = createCloudBrowser, executorFactory = createCloudExecutor, logger = console } = {}) {
 const host = env.COMPUTER_HOST || '127.0.0.1';
@@ -175,6 +175,15 @@ async function action(body, { signal } = {}) {
       assertAgentLease(body);
       return { application: args.application, opened: true };
     }
+  }
+  if (body.action === 'clipboard.read' || body.action === 'clipboard.write') {
+    // 剪贴板是 X11 桌面资源；未启用桌面模式时不能假装同步成功。
+    if (env.AGENTKIT_DESKTOP_MODE !== '1') throw Object.assign(new Error('云电脑桌面未启用'), { code: 'DESKTOP_UNAVAILABLE', status: 503 });
+    if (body.action === 'clipboard.read') return { text: await desktop.readClipboard() };
+    if (typeof args.text !== 'string') throw Object.assign(new Error('clipboard text must be a string'), { code: 'CLIPBOARD_TEXT_INVALID', status: 400 });
+    if (Buffer.byteLength(args.text, 'utf8') > DESKTOP_CLIPBOARD_MAX_BYTES) throw Object.assign(new Error(`clipboard text must not exceed ${DESKTOP_CLIPBOARD_MAX_BYTES} bytes`), { code: 'CLIPBOARD_TEXT_TOO_LARGE', status: 413 });
+    const written = await desktop.writeClipboard(args.text);
+    return { written: written?.written === true };
   }
   if (body.action === 'open') {
     if (env.AGENTKIT_DESKTOP_MODE === '1') {
