@@ -326,7 +326,7 @@ const server = createServer(async (request, response) => {
     // 云端 DSH 网页地址：宿主就绪后由运行时写入。这里不涉及桌面控制权（不是桌面动作），
     // 所以不要求 agent lease；只接受本机回环地址，且不落盘、不写日志。
     if (request.url === '/broker/dsh-web') {
-      const body = await readBody(request);
+      // 注意：请求体在上面已经读过一次，这里不能再 readBody（流已消费会一直挂住）。
       if (!acceptsDshWebUrl(body?.url)) return send(response, 400, { error: 'DSH_WEB_URL_INVALID' });
       dshWebUrl = body.url;
       logger.info(JSON.stringify({ event: 'desktop.dsh-web.registered', host: new URL(body.url).hostname, port: new URL(body.url).port }));
