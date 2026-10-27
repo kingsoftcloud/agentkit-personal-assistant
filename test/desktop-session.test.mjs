@@ -151,8 +151,10 @@ test('窗口管理器逐字复制系统默认绑定，并使用独立 HOME 而�
     for (const name of ['menu.title.font', 'menu.frame.font', 'menu.hilite.font', 'window.font', 'toolbar.clock.font', 'toolbar.workspace.font']) {
       assert.match(style, new RegExp(`${name}: Noto Sans CJK SC-`));
     }
-    assert.equal(launched.options.env.LANG, 'C.UTF-8');
-    assert.equal(launched.options.env.LC_ALL, 'C.UTF-8');
+    // 桌面面向中文用户：LANG 必须是中文，且不能残留 LC_ALL（它会盖过 LANG）。
+    assert.equal(launched.options.env.LANG, 'zh_CN.UTF-8');
+    assert.equal(launched.options.env.LANGUAGE, 'zh_CN:zh');
+    assert.equal(launched.options.env.LC_ALL, undefined);
     controller.closeSession(first.sessionId);
     await controller.openSession({ identity: {} });
     assert.equal(reads, 1, '同一桌面启动期间不重复准备窗口管理器');
@@ -210,10 +212,11 @@ test('真实应用底栏只启动固定程序、复用窗口，关闭观察不�
     const dock = await readFile(join(wmHome, 'tint2rc'), 'utf8');
     assert.match(dock, /disable_transparency = 1/); assert.match(dock, /background_color = #f8fbff 100/);
     assert.equal((dock.match(/launcher_item_app = /g) || []).length, 3);
-    // 欢迎页已有大时钟，dock 不再重复显示时间。
-    assert.match(dock, /panel_items = LT/u);
+    // dock 只留三个启动图标：没有时钟（欢迎页已有大时钟），也没有任务栏按钮。
+    assert.match(dock, /panel_items = L$/mu);
     assert.equal(dock.includes('time1_format'), false);
     assert.equal(dock.includes('clock_'), false);
+    assert.equal(dock.includes('taskbar_'), false);
     await Promise.all(Array.from({ length: 10 }, () => requestDesktopLaunch(socketPath, 'files')));
     await requestDesktopLaunch(socketPath, 'terminal'); await requestDesktopLaunch(socketPath, 'browser');
     assert.equal(children.filter(p => p.file === 'Xvfb').length, 1); assert.equal(children.filter(p => p.file === '/usr/bin/tint2').length, 1);
@@ -364,8 +367,9 @@ test('旁观三分钟不休眠、关闭观察后十二分钟再开仍复用 X11 
     assert.equal(terminal.args.includes('-fd'), false, '不能把所有宽字符锁定在 CJK 字体而破坏 emoji 后备');
     assert.ok(terminal.args.includes('56x24+20+65'));
     assert.ok(terminal.args.some(value => value.includes('Shift <Key>Insert')));
-    assert.equal(terminal.options.env.LANG, 'C.UTF-8');
-    assert.equal(terminal.options.env.LC_ALL, 'C.UTF-8');
+    assert.equal(terminal.options.env.LANG, 'zh_CN.UTF-8');
+    assert.equal(terminal.options.env.LANGUAGE, 'zh_CN:zh');
+    assert.equal(terminal.options.env.LC_ALL, undefined);
   } finally { await controller.dispose(); }
 });
 

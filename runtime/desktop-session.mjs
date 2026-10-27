@@ -159,7 +159,8 @@ export function createDesktopController({
   const timeZone = typeof process.env.TZ === 'string' && process.env.TZ
     ? process.env.TZ
     : String(process.env.AGENTKIT_DESKTOP_TIME_ZONE || 'Asia/Shanghai');
-  const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TZ: timeZone });
+  // 桌面面向中文用户：终端、文件管理器、窗口管理器都用简体中文（LC_ALL 会盖过 LANG）。
+  const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'zh_CN.UTF-8', LANGUAGE: 'zh_CN:zh', TZ: timeZone });
   const trackStartupProcess = (name, child) => {
     const diagnostic = { stderr: '', exitCode: null, signal: null };
     processDiagnostics.set(name, diagnostic);
@@ -266,8 +267,8 @@ export function createDesktopController({
         menu = '[begin] (云电脑)\n' + entries.map(([action, name]) => `[exec] (${name}) {${command(action)}}\n`).join('') + '[end]\n';
         await writeFile(join(wmConfiguration, 'tint2rc'), [
           'rounded = 0', 'border_width = 1', 'background_color = #f8fbff 100', 'border_color = #c5d2e3 100',
-          // 面板只放启动器与任务栏：欢迎页已有大时钟，dock 再显示一个会和它对不上。
-          'panel_items = LT', 'panel_size = 240 56', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
+          // 面板只放三个启动图标：不显示时钟（欢迎页已有大时钟），也不显示任务栏按钮。
+          'panel_items = L', 'panel_size = 240 56', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
           'panel_background_id = 1', 'panel_position = bottom center horizontal', 'panel_layer = top',
           'panel_monitor = primary', 'panel_dock = 0', 'panel_shrink = 0', 'panel_window_name = AgentKit Dock',
           'disable_transparency = 1', 'mouse_effects = 1', 'wm_menu = 0',
