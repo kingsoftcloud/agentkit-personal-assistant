@@ -1,6 +1,7 @@
 /** Minimal authenticated WebSocket bridge for the Studio desktop view. */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { verifyDesktopPermit, desktopUnauthorized as unauthorized } from './desktop-permit.mjs';
+import { DESKTOP_CLIPBOARD_MAX_BYTES } from './desktop-session.mjs';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from '../src/client/bot-directory.mjs';
 
 const PROTOCOL = 'agentkit.personal-assistant.desktop.v1';
@@ -285,6 +286,33 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
           if (state.timer) clearTimeout(state.timer);
           if (!state.frameBusy) state.timer = setTimeout(poll, 0);
           send({ type: 'input-accepted', ...accepted }); return;
+        }
+        if (body.type === 'clipboard.read' || body.type === 'clipboard.write') {
+          // 面板与云电脑之间只有这条 WS 是活通道；剪贴板复用 agentd 的
+          // /broker/action，不在这里重新实现 X11 读写。
+          const requestId = String(body.requestId || '');
+          // 非法标识无法安全回显，直接回通用错误帧；合法标识的错误统一走
+          // clipboard.response，客户端只按 requestId 关联。
+          if (!/^[A-Za-z0-9_-]{1,80}$/u.test(requestId)) { send({ type: 'error', status: 400, code: 'CLIPBOARD_REQUEST_INVALID', message: '剪贴板请求标识无效' }); return; }
+          try {
+            if (claims?.mode === 'read') throw Object.assign(new Error('只读授权不能读写剪贴板'), { code: 'DESKTOP_READ_ONLY', status: 403 });
+            if (!state.sessionId) throw Object.assign(new Error('desktop session is not open'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
+            if (state.idle) throw Object.assign(new Error('桌面已空闲，请先恢复连接'), { code: 'DESKTOP_SESSION_IDLE', status: 409 });
+            if (state.handoff && (!state.leaseId || body.controlEpoch !== state.controlEpoch)) throw Object.assign(new Error('剪贴板未持有当前控制权'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
+            if (body.type === 'clipboard.write' && typeof body.text !== 'string') throw Object.assign(new Error('剪贴板文本必须是字符串'), { code: 'CLIPBOARD_TEXT_INVALID', status: 400 });
+            if (body.type === 'clipboard.write' && Buffer.byteLength(body.text, 'utf8') > DESKTOP_CLIPBOARD_MAX_BYTES) throw Object.assign(new Error('剪贴板文本不能超过 64 KiB'), { code: 'CLIPBOARD_TEXT_TOO_LARGE', status: 413 });
+            brokerStarted = true;
+            const value = await brokerDesktopRequest('/broker/action', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, action: body.type, args: body.type === 'clipboard.write' ? { text: body.text } : {} });
+            if (state.closed) return;
+            send({ type: 'clipboard.response', requestId, ok: true, value });
+            return;
+          } catch (error) {
+            if (state.closed) return;
+            // 控制权在操作期间变化时同步一次 epoch，客户端下一帧即可重试。
+            if (state.handoff && Number(error?.status) === 409) { try { await syncControl(); } catch {} }
+            send({ type: 'clipboard.response', requestId, ok: false, error: { code: error?.code || 'CLIPBOARD_FAILED', message: error?.status ? String(error?.message || '剪贴板请求失败') : '云端剪贴板请求失败', status: error?.status || 400 } });
+            return;
+          }
         }
         if (body.type === 'close') return close();
         if (body.type === 'pause') { state.paused = true; if (state.timer) clearTimeout(state.timer); return; }
