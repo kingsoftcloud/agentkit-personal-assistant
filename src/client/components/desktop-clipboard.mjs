@@ -32,7 +32,7 @@ export async function readLocalClipboard({ clipboard } = {}) {
     const text = await api.readText();
     return typeof text === 'string' ? text : '';
   } catch (error) {
-    throw clipError('CLIPBOARD_READ_DENIED', '浏览器不允许读取剪贴板，请点「粘贴」按钮再试', error);
+    throw clipError('CLIPBOARD_READ_DENIED', '浏览器不允许读取剪贴板，请按 ⌘V / Ctrl+V 再试', error);
   }
 }
 
@@ -147,6 +147,14 @@ export function isPasteShortcut(event) {
   return event.metaKey === true || event.ctrlKey === true;
 }
 
+/** ⌘C / Ctrl+C：把云电脑剪贴板内容取回本地（面板不再放按钮，只用快捷键）。 */
+export function isCopyShortcut(event) {
+  if (!event || String(event.key ?? '').toLowerCase() !== 'c') return false;
+  if (event.altKey || event.shiftKey) return false;
+  if (event.isComposing || event.nativeEvent?.isComposing) return false;
+  return event.metaKey === true || event.ctrlKey === true;
+}
+
 /**
  * 粘贴：本地剪贴板 → 云电脑剪贴板 → 云桌面 Ctrl+V。
  * notify 负责把结果写进面板上的轻提示；返回结构化结果方便调用方/测试断言。
@@ -155,7 +163,7 @@ export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = (
   const read = readLocal || (() => readLocalClipboard());
   let text = '';
   try { text = await read(); }
-  catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许读取剪贴板，请点「粘贴」按钮再试'); return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' }; }
+  catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许读取剪贴板，请按 ⌘V / Ctrl+V 再试'); return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' }; }
   if (!text) { notify('本地剪贴板是空的，没有可粘贴的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
   if (byteLength(text) > MAX_CLIPBOARD_BYTES) { notify('剪贴板内容超过 64 KiB，云电脑剪贴板放不下'); return { ok: false, code: 'CLIPBOARD_TOO_LARGE' }; }
   try { await writeCloud(text); }
@@ -183,63 +191,4 @@ export async function copyCloudClipboard({ readCloud, writeLocal, notify = () =>
   catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许写入剪贴板，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
   notify('已复制到本地');
   return { ok: true, text };
-}
-
-const pasteGlyph = h => h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
-  h('rect', { x: 6, y: 4, width: 12, height: 17, rx: 2 }),
-  h('path', { d: 'M9 4.5V3.2A1.2 1.2 0 0 1 10.2 2h3.6A1.2 1.2 0 0 1 15 3.2v1.3' }));
-
-const copyGlyph = h => h('svg', { width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
-  h('rect', { x: 9, y: 9, width: 11, height: 11, rx: 2 }),
-  h('path', { d: 'M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1' }));
-
-const buttonStyle = (disabled, primary) => ({
-  display: 'inline-flex', alignItems: 'center', gap: 4, padding: '3px 9px', borderRadius: 999,
-  font: 'inherit', fontSize: 11, lineHeight: 1.6,
-  cursor: disabled ? 'default' : 'pointer',
-  border: primary ? 'none' : '1px solid var(--dsw-alias-border-default, #d8dee8)',
-  background: primary ? 'var(--dsw-alias-label-primary, #17202c)' : 'transparent',
-  color: primary ? 'var(--dsw-alias-bg-layer-1, #fff)' : 'inherit',
-  opacity: disabled ? 0.5 : 1,
-});
-
-/**
- * 面板里渲染的两个入口（粘贴 / 复制云电脑剪贴板）+ 一行轻提示。
- * 依赖注入方式与其它组件一致：React 运行时由调用方传入，云端操作用调用方的 rpc 闭包。
- */
-export function DesktopClipboardControls({ React: R, readCloud, writeCloud, sendKeys, readLocal, writeLocal, disabled = false, primary = false, notify: externalNotify = null, toast: externalToast = null } = {}) {
-  if (!R?.createElement) return null;
-  const { createElement: h, useRef, useState } = R;
-  const [internalToast, setInternalToast] = useState('');
-  const timerRef = useRef(null);
-  // 面板需要让画布快捷键也弹同一条提示，所以允许把 toast/notify 提到父组件；否则组件自管。
-  const notify = externalNotify || (message => {
-    setInternalToast(message);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setInternalToast(''), 4000);
-  });
-  const toast = externalToast ?? internalToast;
-  const paste = () => {
-    void pasteToCloud({
-      readLocal: readLocal || (() => readLocalClipboard()),
-      writeCloud, sendKeys, notify,
-    });
-  };
-  const copy = () => {
-    void copyCloudClipboard({
-      readCloud,
-      writeLocal: writeLocal || (text => writeLocalClipboard(text)),
-      notify,
-    });
-  };
-  return h('div', { 'data-personal-assistant-clipboard': 'true', style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'center' } },
-    h('button', {
-      type: 'button', 'aria-label': '粘贴到云电脑', title: '把本地剪贴板内容粘贴到云电脑（⌘V / Ctrl+V）',
-      disabled, style: buttonStyle(disabled, true), onClick: paste,
-    }, pasteGlyph(h), '粘贴'),
-    h('button', {
-      type: 'button', 'aria-label': '复制云电脑剪贴板', title: '把云电脑剪贴板内容复制到本地',
-      disabled, style: buttonStyle(disabled, false), onClick: copy,
-    }, copyGlyph(h), '复制'),
-    toast ? h('span', { role: 'status', 'aria-live': 'polite', style: { fontSize: 11, color: 'var(--dsw-alias-label-secondary, #536174)', maxWidth: '100%', overflowWrap: 'anywhere' } }, toast) : null);
 }

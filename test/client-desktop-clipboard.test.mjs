@@ -5,12 +5,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DesktopClipboardControls,
   MAX_CLIPBOARD_BYTES,
   clipboardFriendlyError,
   clipboardTextOf,
   copyCloudClipboard,
   createClipboardChannel,
+  isCopyShortcut,
   isPasteShortcut,
   pasteShortcutEvents,
   pasteToCloud,
@@ -41,7 +41,7 @@ test('只听 ⌘V / Ctrl+V；裸 v、带 Shift、输入法组合期间都不抢'
 test('浏览器拒绝读本地剪贴板时给可照做的中文提示，不抛英文原文', async () => {
   assert.equal(await readLocalClipboard({ clipboard: { readText: async () => '待粘贴' } }), '待粘贴');
   await assert.rejects(readLocalClipboard({ clipboard: { readText: async () => { throw new Error('NotAllowedError'); } } }),
-    /浏览器不允许读取剪贴板，请点「粘贴」按钮再试/);
+    /浏览器不允许读取剪贴板，请按 ⌘V \/ Ctrl\+V 再试/);
   await assert.rejects(readLocalClipboard({ clipboard: {} }), /当前环境不允许读取剪贴板/);
   let written = '';
   await writeLocalClipboard('复制回来的', { clipboard: { writeText: async text => { written = text; } } });
@@ -76,7 +76,7 @@ test('本地剪贴板为空/超 64KiB/被拒绝时不写云端，并保留内容
 
   const denied = collect();
   const deniedResult = await pasteToCloud({
-    readLocal: async () => { throw clipboardError('CLIPBOARD_READ_DENIED', '浏览器不允许读取剪贴板，请点「粘贴」按钮再试'); },
+    readLocal: async () => { throw clipboardError('CLIPBOARD_READ_DENIED', '浏览器不允许读取剪贴板，请按 ⌘V / Ctrl+V 再试'); },
     writeCloud: async text => { writes.push(text); }, notify: denied.notify,
   });
   assert.equal(deniedResult.ok, false);
@@ -218,59 +218,25 @@ test('错误回复保留云端错误码与信息，供中文化使用', async ()
   });
 });
 
-/** 极简 React 运行时：这个组件只用到 createElement/useState/useRef。 */
-function renderControls(t, props = {}) {
-  const hooks = [], record = { toasts: [] }; let cursor = 0, dirty = true, tree;
-  const R = {
-    createElement(type, elementProps, ...children) { return { type, props: elementProps || {}, children: children.flat() }; },
-    useState(initial) { const i = cursor++; if (!(i in hooks)) hooks[i] = initial; return [hooks[i], value => { hooks[i] = typeof value === 'function' ? value(hooks[i]) : value; dirty = true; }]; },
-    useRef(initial) { const i = cursor++; return hooks[i] ||= { current: initial }; },
-  };
-  const render = () => { cursor = 0; dirty = false; tree = DesktopClipboardControls({ React: R, ...props, notify: props.notify || (message => record.toasts.push(message)) }); };
-  const settle = async () => { for (let i = 0; i < 20; i++) { if (dirty) render(); await new Promise(resolve => setImmediate(resolve)); } return tree; };
-  const all = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(all)] : [];
-  render();
-  return {
-    settle, record,
-    button: label => all(tree).find(node => node.type === 'button' && node.props['aria-label'] === label),
-    flatText: () => all(tree).map(node => (Array.isArray(node.children) ? node.children : []).filter(child => typeof child === 'string')).flat().join(' '),
-  };
-}
-
-test('面板两个入口：粘贴按钮走本地→云端，复制按钮走云端→本地，并显示中文轻提示', async t => {
-  const view = renderControls(t, {
-    readLocal: async () => '本机文字',
-    writeLocal: async () => {},
-    readCloud: async () => ({ text: '云端文字' }),
-    writeCloud: async () => ({ written: true }),
-    sendKeys: () => true,
-    toast: '',
-  });
-  await view.settle();
-  assert.ok(view.button('粘贴到云电脑') && view.button('复制云电脑剪贴板'));
-
-  view.button('粘贴到云电脑').props.onClick();
-  await view.settle();
-  assert.deepEqual(view.record.toasts, ['已粘贴到云电脑']);
-
-  view.button('复制云电脑剪贴板').props.onClick();
-  await view.settle();
-  assert.deepEqual(view.record.toasts, ['已粘贴到云电脑', '已复制到本地']);
-});
-
-test('本地剪贴板读不到时，按钮给出可照做的提示且不调用云端写入', async t => {
-  const writes = [];
-  const view = renderControls(t, {
-    readLocal: async () => { throw clipboardError('CLIPBOARD_READ_DENIED', '浏览器不允许读取剪贴板，请点「粘贴」按钮再试'); },
-    writeLocal: async () => {},
-    readCloud: async () => ({ text: '' }),
+test('本地剪贴板读不到时给出可照做的提示，且不调用云端写入', async () => {
+  const writes = [], messages = [];
+  const result = await pasteToCloud({
+    readLocal: async () => { throw clipboardError('CLIPBOARD_READ_DENIED', '浏览器不允许读取剪贴板，请按 ⌘V / Ctrl+V 再试'); },
     writeCloud: async text => { writes.push(text); },
     sendKeys: () => true,
-    toast: '',
+    notify: message => messages.push(message),
   });
-  await view.settle();
-  view.button('粘贴到云电脑').props.onClick();
-  await view.settle();
-  assert.match(view.record.toasts[0], /浏览器不允许读取剪贴板，请点「粘贴」按钮再试/);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'CLIPBOARD_READ_DENIED');
+  assert.match(messages[0], /浏览器不允许读取剪贴板，请按 ⌘V \/ Ctrl\+V 再试/);
   assert.deepEqual(writes, []);
+});
+
+test('⌘C / Ctrl+C 只处理组合键，裸 c、Shift、输入法组合都不抢', () => {
+  assert.equal(isCopyShortcut({ key: 'c', metaKey: true }), true);
+  assert.equal(isCopyShortcut({ key: 'C', ctrlKey: true }), true);
+  assert.equal(isCopyShortcut({ key: 'c' }), false);
+  assert.equal(isCopyShortcut({ key: 'c', ctrlKey: true, shiftKey: true }), false);
+  assert.equal(isCopyShortcut({ key: 'c', ctrlKey: true, isComposing: true }), false);
+  assert.equal(isCopyShortcut({ key: 'v', ctrlKey: true }), false);
 });

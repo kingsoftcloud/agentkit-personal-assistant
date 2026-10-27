@@ -69,7 +69,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { mapDisplayPoint, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { DesktopClipboardControls, createClipboardChannel, isPasteShortcut, pasteToCloud, readLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -198,6 +198,10 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     for (const event of events) sent = input(event) || sent;
     return sent;
   };
+  const copyCloudClipboardToLocal = () => copyCloudClipboard({
+    readCloud: () => clipboardRef.current.read(),
+    notify: clipboardNotify,
+  });
   const pasteLocalClipboardToCloud = () => pasteToCloud({
     readLocal: () => readLocalClipboard(),
     writeCloud: text => clipboardRef.current.write(text),
@@ -374,6 +378,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     if (state.current.composition || event.isComposing || event.nativeEvent?.isComposing || event.key === 'Process' || event.key === 'Unidentified') return;
     // 画布上的 ⌘V/Ctrl+V 是"把本地剪贴板贴进云电脑"，不能把裸按键转给 Linux 桌面（它要的是 Ctrl+V）。
     if (isPasteShortcut(event)) { event.preventDefault(); void pasteLocalClipboardToCloud(); return; }
+    if (isCopyShortcut(event)) { event.preventDefault(); void copyCloudClipboardToLocal(); return; }
     const modified = event.ctrlKey || event.metaKey || event.altKey;
     // 普通文本只走 input/compositionend，避免同一按键被发送两遍。
     if (event.key.length === 1 && !modified) return;
@@ -426,15 +431,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         active && readOnly && controlRef.current.snapshot.available ? h('button', { style: { ...pillStyle, padding: '3px 9px', fontSize: 11 }, onClick: () => controlRef.current.acquire() }, '接管') : null,
         active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '您拥有控制权 · 点画面外释放') : null,
         active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null,
-        active ? h(DesktopClipboardControls, {
-          React: R,
-          toast: clipboardNotice,
-          notify: clipboardNotify,
-          readCloud: () => clipboardRef.current.read(),
-          writeCloud: text => clipboardRef.current.write(text),
-          sendKeys: sendDesktopKeys,
-          disabled: false,
-        }) : null) : null),
+        // 剪贴板不再放按钮：面板里只保留 ⌘V 粘贴 / ⌘C 复制与一行状态文字。
+        active && clipboardNotice ? h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, clipboardNotice) : null) : null),
       h('details', { style: { alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } }, h('summary', { style: { cursor: 'pointer' } }, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`))));
   }
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },
