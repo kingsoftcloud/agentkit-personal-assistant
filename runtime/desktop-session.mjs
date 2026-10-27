@@ -268,9 +268,10 @@ export function createDesktopController({
         await writeFile(join(wmConfiguration, 'tint2rc'), [
           'rounded = 0', 'border_width = 1', 'background_color = #f8fbff 100', 'border_color = #c5d2e3 100',
           // 面板只放三个启动图标：不显示时钟（欢迎页已有大时钟），也不显示任务栏按钮。
-          'panel_items = L', 'panel_size = 240 56', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
+          // 宽度随内容收缩：3 个图标之外不留空白条。
+          'panel_items = L', 'panel_size = 0 56', 'panel_shrink = 1', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
           'panel_background_id = 1', 'panel_position = bottom center horizontal', 'panel_layer = top',
-          'panel_monitor = primary', 'panel_dock = 0', 'panel_shrink = 0', 'panel_window_name = AgentKit Dock',
+          'panel_monitor = primary', 'panel_dock = 0', 'panel_window_name = AgentKit Dock',
           'disable_transparency = 1', 'mouse_effects = 1', 'wm_menu = 0',
           'launcher_padding = 4 0 14', 'launcher_icon_size = 36', 'launcher_background_id = 0',
           'launcher_icon_background_id = 0', 'launcher_icon_asb = 100 0 0', 'launcher_tooltip = 1',

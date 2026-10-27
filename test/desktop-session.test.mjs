@@ -214,6 +214,9 @@ test('真实应用底栏只启动固定程序、复用窗口，关闭观察不�
     assert.equal((dock.match(/launcher_item_app = /g) || []).length, 3);
     // dock 只留三个启动图标：没有时钟（欢迎页已有大时钟），也没有任务栏按钮。
     assert.match(dock, /panel_items = L$/mu);
+    // 三个图标之外不留空白：面板宽度随内容收缩。
+    assert.match(dock, /panel_size = 0 56/u);
+    assert.match(dock, /panel_shrink = 1/u);
     assert.equal(dock.includes('time1_format'), false);
     assert.equal(dock.includes('clock_'), false);
     assert.equal(dock.includes('taskbar_'), false);
