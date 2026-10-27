@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createDesktopLauncherServer } from './desktop-launcher.mjs';
+import { createWelcomeServer } from './welcome-server.mjs';
 
 const execFile = promisify(execFileCallback);
 export const DESKTOP_WIDTH = 1280;
@@ -105,7 +106,7 @@ export function createDesktopController({
   let wm;
   let windowManagerFailure;
   let terminalProcess;
-  let dockProcess, fileManagerProcess, launcher, launcherStopped = false, launcherShutdown = false;
+  let dockProcess, fileManagerProcess, launcher, welcome, welcomeUrl, launcherStopped = false, launcherShutdown = false;
   let appQueue = Promise.resolve();
   const processGroups = new Set();
   let collector;
@@ -225,6 +226,18 @@ export function createDesktopController({
         if (launcherShutdown) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
         launcherStopped = false;
         launcher = await createDesktopLauncherServer({ launch: launchApplication, onError: onLaunchError });
+        // 欢迎页由本地回环桥提供：页面上的磁贴点击会走与 dock 相同的 launchApplication。
+        try {
+          welcome = await createWelcomeServer({
+            webDir: fileURLToPath(new URL('../web', import.meta.url)),
+            launch: launchApplication,
+            onError: onLaunchError,
+          });
+          welcomeUrl = welcome.url;
+        } catch (error) {
+          welcome = undefined; welcomeUrl = undefined;
+          onLaunchError?.(error);
+        }
         const helper = fileURLToPath(new URL('./desktop-launcher.mjs', import.meta.url));
         const quote = value => `"${String(value).replace(/[\\"`$]/g, '\\$&')}"`;
         const command = action => [quote(process.execPath), quote(helper), '--socket', quote(launcher.socketPath), '--action', action].join(' ');
@@ -237,7 +250,9 @@ export function createDesktopController({
         menu = '[begin] (云电脑)\n' + entries.map(([action, name]) => `[exec] (${name}) {${command(action)}}\n`).join('') + '[end]\n';
         await writeFile(join(wmConfiguration, 'tint2rc'), [
           'rounded = 0', 'border_width = 1', 'background_color = #f8fbff 100', 'border_color = #c5d2e3 100',
-          'panel_items = L', 'panel_size = 184 54', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
+          'panel_items = LTC', 'panel_size = 240 56', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
+          'time1_format = %H:%M', 'time1_font = Noto Sans CJK SC 10', 'clock_font_color = #3d4a5c 100',
+          'time1_timezone = Asia/Shanghai', 'clock_padding = 4 0 6 0', 'clock_background_id = 0',
           'panel_background_id = 1', 'panel_position = bottom center horizontal', 'panel_layer = top',
           'panel_monitor = primary', 'panel_dock = 0', 'panel_shrink = 0', 'panel_window_name = AgentKit Dock',
           'disable_transparency = 1', 'mouse_effects = 1', 'wm_menu = 0',
@@ -320,7 +335,13 @@ export function createDesktopController({
     appQueue = pending.catch(() => {});
     return pending;
   };
-  const stopLauncher = async ({ permanent = true } = {}) => { launcherShutdown ||= permanent; launcherStopped = true; const current = launcher; launcher = undefined; await current?.close(); };
+  const stopLauncher = async ({ permanent = true } = {}) => {
+    launcherShutdown ||= permanent; launcherStopped = true;
+    const current = launcher; launcher = undefined; welcomeUrl = undefined;
+    const currentWelcome = welcome; welcome = undefined;
+    await currentWelcome?.close();
+    await current?.close();
+  };
   const waitDisplay = async () => {
     if (displayReady) return displayReady;
     const began = performance.now();
@@ -730,5 +751,5 @@ export function createDesktopController({
     await exec('xdotool', ['windowactivate', '--sync', id], { env: environment, timeout: 2000 });
     return { windowId: id, focused: true };
   };
-  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, stopLauncher, dispose, stats, injectInput, captureFrame, windows, focusWindow, launchApplication });
+  return Object.freeze({ openSession, getSession, suspendSession, resumeSession, setSessionControl, frame, frameBinary, input, closeSession, closeSessionsForLease, ensureDisplay, stopLauncher, dispose, stats, injectInput, captureFrame, windows, focusWindow, launchApplication, get welcomeUrl() { return welcomeUrl; } });
 }

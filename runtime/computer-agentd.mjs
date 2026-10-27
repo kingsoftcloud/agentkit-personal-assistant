@@ -28,7 +28,10 @@ let desktopBrowserOpening;
 let desktopBrowserClosing;
 let executor;
 let desktop;
-const browserOptions = () => ({ workspace, env, beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); },
+// 桌面首屏由 desktop-session 的本地桥提供；浏览器创建时把地址透传过去。
+const browserEnv = () => (env.AGENTKIT_DESKTOP_MODE === '1' && typeof desktop?.welcomeUrl === 'string' && desktop.welcomeUrl
+  ? { ...env, AGENTKIT_WELCOME_URL: desktop.welcomeUrl } : env);
+const browserOptions = () => ({ workspace, env: browserEnv(), beforeCommand: () => { const owner = actionContext.getStore(); if (owner) assertAgentLease(owner); },
   ...(env.AGENTKIT_DESKTOP_MODE === '1' ? { userDataDir: join(env.AGENTKIT_COMPUTER_STATE_DIR || '/var/lib/agentkit/computer', 'chromium-profile'), preserveUserDataDir: true } : {}),
 });
 const closeDesktopBrowser = () => {

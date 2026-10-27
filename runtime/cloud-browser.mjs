@@ -294,6 +294,12 @@ export function createCloudBrowser({
   const root = checkedWorkspace(workspace);
   const resolution = resolveCloudBrowser({ env });
   const desktopMode = env.AGENTKIT_DESKTOP_MODE === '1';
+  // 桌面首屏（欢迎页）由 desktop-session 的本地桥提供；没有这项能力时退回 about:blank，
+  // 口径变化只在桌面模式，助手工具侧行为不变。
+  const welcomeUrl = desktopMode && typeof env.AGENTKIT_WELCOME_URL === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/\S*$/u.test(env.AGENTKIT_WELCOME_URL)
+    ? env.AGENTKIT_WELCOME_URL : null;
+  const desktopStartUrl = welcomeUrl || null;
+  const desktopRestoreUrl = welcomeUrl || 'about:blank';
   const shotsDir = join(root, 'files', '.cloud-browser');
   const downloadsDir = join(root, 'files', 'downloads');
   const listDownloads = typeof listDownloadsHook === 'function' ? listDownloadsHook
@@ -422,10 +428,20 @@ export function createCloudBrowser({
         kill, launchTimeoutMs, commandTimeoutMs: commandMs,
         env,
         ...(desktopMode && userDataDir ? { userDataDir, preserveUserDataDir } : {}),
+        ...(desktopStartUrl ? { startUrl: desktopStartUrl } : {}),
       });
       // 异常重建只恢复已通过 URL 策略的最后页面；不静默切回 about:blank。
-      const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : 'about:blank';
-      const created = await started.connection.send('Target.createTarget', { url: restoreUrl }, { timeoutMs: commandMs });
+      const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : desktopRestoreUrl;
+      // `--app=` 已经把首屏开出来了，复用那个页面，避免多出一个标签/窗口。
+      let adopted = null;
+      if (desktopStartUrl) {
+        try {
+          const listed = await started.connection.send('Target.getTargets', {}, { timeoutMs: commandMs });
+          adopted = (listed?.targetInfos || []).find(info => info.type === 'page' && info.url === desktopStartUrl) || null;
+        } catch { adopted = null; }
+      }
+      const created = adopted ? { targetId: adopted.targetId }
+        : await started.connection.send('Target.createTarget', { url: restoreUrl }, { timeoutMs: commandMs });
       if (!created?.targetId) throw fail('Chromium 没有创建页面目标', 'ASSISTANT_BROWSER_LAUNCH_FAILED');
       targetId = created.targetId;
       const attached = await started.connection.send('Target.attachToTarget', { targetId, flatten: true }, { timeoutMs: commandMs });
@@ -465,7 +481,7 @@ export function createCloudBrowser({
         }
       }
       if (!missing) return;
-      const restoreUrl = lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : 'about:blank';
+      const restoreUrl = lastUrl && lastUrl !== 'about:blank' ? urlPolicy(lastUrl).url.href : desktopRestoreUrl;
       // 只替换已关闭/正在关闭的 page，不重启 Chromium；不等待旧 close ACK。
       const created = await browserCommand('Target.createTarget', { url: restoreUrl });
       if (!created?.targetId) throw fail('Chromium 没有创建替代页面', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');

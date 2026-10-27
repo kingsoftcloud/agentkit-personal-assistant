@@ -19,10 +19,14 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  * Chromium flags for the managed image. Chromium's own sandbox is unavailable in
  * most managed containers, so the egress proxy stays authoritative for network
  * policy; `--proxy-bypass-list=<-loopback>` keeps loopback inside the proxy too.
+ * 桌面模式的首屏是本机 127.0.0.1 的欢迎页，因此回环必须显式放行，否则页面会被
+ * 出口代理吃掉而白屏；公网流量仍然全部走代理。
  */
-export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false }) {
+export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl }) {
   return [
     ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90'] : ['--headless=new']),
+    // 应用窗口承载首屏：没有地址栏、没有多余标签条。
+    ...(desktop && startUrl ? [`--app=${startUrl}`] : []),
     '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync',
     '--disable-background-networking', '--disable-breakpad', '--disable-crash-reporter',
@@ -31,7 +35,7 @@ export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desk
     '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${userDataDir}`,
     `--proxy-server=${proxy}`,
-    '--proxy-bypass-list=<-loopback>',
+    '--proxy-bypass-list=<-loopback>,127.0.0.1,localhost',
   ];
 }
 
@@ -103,7 +107,7 @@ function preparePersistentProfile(userDataDir) {
 export async function launchChromium({
   chromium, proxy, userDataDir, spawn = spawnChild,
   launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, now = Date.now, pollMs = 25, env = process.env,
-  preserveUserDataDir = false,
+  preserveUserDataDir = false, startUrl,
 } = {}) {
   if (preserveUserDataDir) {
     const previous = persistentProfileOwners.get(userDataDir);
@@ -113,7 +117,7 @@ export async function launchChromium({
   else if (userDataDir === undefined) userDataDir = createProfileDir();
   const cleanupProfile = () => { if (!preserveUserDataDir) rmSync(userDataDir, { recursive: true, force: true }); };
   const desktop = env.AGENTKIT_DESKTOP_MODE === '1';
-  const args = chromiumArgs({ userDataDir, proxy, desktop });
+  const args = chromiumArgs({ userDataDir, proxy, desktop, startUrl });
   const stderr = { text: '', bytes: 0 };
   let child;
   try {
@@ -256,12 +260,12 @@ export async function startCdpTransport({
   kill = killProcessTree, launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS,
   commandTimeoutMs = CDP_COMMAND_TIMEOUT_MS, now = Date.now, userDataDir, endpoint: fixedEndpoint,
   env = process.env,
-  preserveUserDataDir = false,
+  preserveUserDataDir = false, startUrl,
 } = {}) {
   if (preserveUserDataDir && (!userDataDir || !isAbsolute(userDataDir))) throw fail('持久浏览器配置目录必须为绝对路径', 'ASSISTANT_BROWSER_PROFILE_INVALID');
   const launched = fixedEndpoint
     ? { child: undefined, userDataDir, endpoint: { endpoint: fixedEndpoint }, stderr: { text: '' } }
-    : await launchChromium({ chromium, proxy, spawn, launchTimeoutMs, now, userDataDir, env, preserveUserDataDir });
+    : await launchChromium({ chromium, proxy, spawn, launchTimeoutMs, now, userDataDir, env, preserveUserDataDir, startUrl });
   let connection;
   try { connection = await connectCdp({ endpoint: launched.endpoint.endpoint, WebSocketImpl, commandTimeoutMs }); }
   catch (error) {
