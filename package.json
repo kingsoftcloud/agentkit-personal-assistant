@@ -1,0 +1,85 @@
+{
+  "name": "@kingsoftcloud/agentkit-personal-assistant",
+  "version": "0.1.6-desktop.20261027",
+  "description": "Standalone personal assistant DSH plugin with multi-Bot profiles and an explicit Cloud Computer Broker boundary.",
+  "homepage": "https://github.com/kingsoftcloud/agentkit-personal-assistant",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kingsoftcloud/agentkit-personal-assistant.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kingsoftcloud/agentkit-personal-assistant/issues"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": "^22.23.4 || >=24.22.1",
+    "dsh": "0.2.1-rc.2"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./client": "./dist/client.js",
+    "./manifest": "./personal-assistant.plugin.json",
+    "./bot-registry": "./src/bot-registry.mjs",
+    "./computer-broker": "./src/computer-broker.mjs",
+    "./computer-broker-protocol": "./src/computer-broker-protocol.mjs",
+    "./plugin-manifest": "./src/plugin-manifest.mjs",
+    "./cloud-computer-tools": "./src/cloud-computer-tools.mjs",
+    "./schedule-manager": "./src/schedule-manager.mjs",
+    "./persistent-state": "./src/persistent-state.mjs",
+    "./workspace": "./src/workspace.mjs",
+    "./implementation-capabilities": "./src/implementation-capabilities.mjs",
+    "./dsh-session-bridge": "./src/dsh-session-bridge.mjs"
+  },
+  "files": [
+    "src",
+    "runtime",
+    "scripts",
+    "personal-assistant.plugin.json",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "personal-assistant.plugin.schema.json",
+    "dist/client.js"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check src/index.mjs && node --check src/bot-registry.mjs && node --check src/computer-broker-protocol.mjs && node --check src/computer-broker.mjs && node --check src/client/index.mjs && npm test && node --check src/cloud-computer-tools.mjs && node --check src/dsh-session-bridge.mjs && node --check src/implementation-capabilities.mjs && node --check src/persistent-state.mjs && node --check src/schedule-manager.mjs && node --check src/workspace.mjs && node --check runtime/assistant-runtime.mjs && node --check runtime/computer-agentd.mjs && node --check src/host-gateway.mjs && node --check src/host-session-channel.mjs && node --check src/system-fetch.mjs && node --check src/client/markdown.mjs && node --check src/client/conversation.mjs && node --check src/client/desktop-view.mjs",
+    "pack:check": "npm pack --dry-run",
+    "build:artifacts": "node scripts/build-artifacts.mjs",
+    "build:client": "node scripts/build-client.mjs",
+    "dev:client": "node scripts/build-client.mjs --watch",
+    "prepack": "npm run build:client",
+    "publish:check": "node --check src/index.mjs && npm test && npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-client-connection"
+      ]
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "main": "./src/index.mjs",
+  "devDependencies": {
+    "esbuild": "0.27.7"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

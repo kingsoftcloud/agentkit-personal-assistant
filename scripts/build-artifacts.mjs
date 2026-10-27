@@ -1,0 +1,81 @@
+import { cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const exec = promisify(execFile);
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const output = resolve(process.env.PA_ARTIFACT_OUTPUT || join(root, 'dist', 'artifacts'));
+if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error(`artifact build requires Node 22, got ${process.versions.node}`);
+
+async function hash(path) {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}
+
+async function pack(role, files) {
+  await mkdir(output, { recursive: true });
+  const stage = await mkdtemp(join(output, `.stage-${role}-`));
+  try {
+    for (const [relative, source] of files) {
+      const target = join(stage, relative);
+      await mkdir(dirname(target), { recursive: true });
+      await cp(source, target, { recursive: true });
+    }
+    const archive = join(output, `agentkit-personal-assistant-${role}.tar`);
+    try {
+      await exec('tar', ['--sort=name', '--mtime=@0', '--owner=0', '--group=0', '--numeric-owner', '-cf', archive, '-C', stage, '.']);
+    } catch (error) {
+      const detail = String(error?.stderr || error?.message);
+      if (!detail.includes('unrecognized option') && !detail.includes('not supported')) throw error;
+      await exec('python3', [join(root, 'scripts', 'deterministic_tar.py'), stage, archive]);
+    }
+    const context = join(output, `${role}-context`, 'artifact');
+    await mkdir(context, { recursive: true });
+    await cp(archive, join(context, archive.split('/').at(-1)));
+    return { role, archive, context: dirname(context), sha256: await hash(archive) };
+  } finally {
+    await rm(stage, { recursive: true, force: true });
+  }
+}
+
+const results = [
+  await pack('runtime', [
+    ['bin/assistant-runtime', join(root, 'scripts', 'assistant-runtime-launcher.sh')],
+    ['runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
+    ['runtime/cloud-session-channel.mjs', join(root, 'runtime', 'cloud-session-channel.mjs')],
+    ['runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
+    ['runtime/desktop-clipboard-limit.mjs', join(root, 'runtime', 'desktop-clipboard-limit.mjs')],
+    ['runtime/desktop-permit.mjs', join(root, 'runtime', 'desktop-permit.mjs')],
+    ['src', join(root, 'src')],
+    // The cloud runtime is a real DSH host. Keep a self-contained plugin
+    // package beside the stateful launcher so the DSH profile can resolve it
+    // without reaching an npm registry at pod start.
+    ['plugin/package.json', join(root, 'package.json')],
+    ['plugin/cordis.patch.yml', join(root, 'cordis.patch.yml')],
+    ['plugin/personal-assistant.plugin.json', join(root, 'personal-assistant.plugin.json')],
+    ['plugin/personal-assistant.plugin.schema.json', join(root, 'personal-assistant.plugin.schema.json')],
+    ['plugin/src', join(root, 'src')],
+    ['plugin/runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
+    ['plugin/runtime/cloud-session-channel.mjs', join(root, 'runtime', 'cloud-session-channel.mjs')],
+    ['plugin/runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
+    ['plugin/runtime/desktop-clipboard-limit.mjs', join(root, 'runtime', 'desktop-clipboard-limit.mjs')],
+    ['plugin/runtime/desktop-permit.mjs', join(root, 'runtime', 'desktop-permit.mjs')],
+    ['plugin/runtime/prepare-dsh-profile.mjs', join(root, 'runtime', 'prepare-dsh-profile.mjs')],
+    ['plugin/runtime/check-manifest.mjs', join(root, 'runtime', 'check-manifest.mjs')],
+  ]),
+  await pack('computer', [
+    ['bin/computer-agentd', join(root, 'scripts', 'computer-agentd-launcher.sh')],
+    ['runtime/computer-agentd.mjs', join(root, 'runtime', 'computer-agentd.mjs')],
+    ['runtime/desktop-permit.mjs', join(root, 'runtime', 'desktop-permit.mjs')],
+    ['runtime/cloud-browser.mjs', join(root, 'runtime', 'cloud-browser.mjs')],
+    ['runtime/cloud-browser-cdp.mjs', join(root, 'runtime', 'cloud-browser-cdp.mjs')],
+    ['runtime/cloud-execution.mjs', join(root, 'runtime', 'cloud-execution.mjs')],
+    ['runtime/desktop-session.mjs', join(root, 'runtime', 'desktop-session.mjs')],
+    ['runtime/desktop-launcher.mjs', join(root, 'runtime', 'desktop-launcher.mjs')],
+    ['runtime/welcome-server.mjs', join(root, 'runtime', 'welcome-server.mjs')],
+    ['web/welcome.html', join(root, 'web', 'welcome.html')],
+  ]),
+];
+console.log(JSON.stringify({ node: process.versions.node, artifacts: results }, null, 2));

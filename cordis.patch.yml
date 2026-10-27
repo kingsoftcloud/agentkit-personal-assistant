@@ -1,0 +1,6 @@
+# DSH bundle entry for the standalone Personal Assistant plugin.
+# Product defaults (panel disabled and no auto-connect) are owned by the
+# application metadata/feature gate; the Loader only sees this composition row.
+- insert:
+    - id: personal-assistant
+      name: '@kingsoftcloud/agentkit-personal-assistant'

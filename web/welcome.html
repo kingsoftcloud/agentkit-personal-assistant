@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>欢迎回来</title>
+<style>
+  :root{
+    --bg:#f7f7f5; --ink:#1f1f1f; --ink-2:#6b6b6b; --line:#e6e6e2;
+    --card:#ffffff; --shadow:0 2px 10px rgba(15,15,15,.07);
+    --accent:#2f6bff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:"Noto Sans CJK SC","Noto Sans SC","PingFang SC",system-ui,-apple-system,sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    overflow:hidden; position:relative;
+    -webkit-font-smoothing:antialiased;
+  }
+  /* 背景涂鸦：低对比线稿，对应 dot 的装饰 */
+  .doodles{position:fixed; inset:0; pointer-events:none; opacity:.35}
+  .doodles svg{position:absolute; fill:none; stroke:#c9c9c2; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round}
+
+  .stage{position:relative; width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0}
+
+  /* 顶部引导气泡 */
+  .hint{
+    position:absolute; top:18px; left:18px; max-width:330px;
+    display:flex; align-items:flex-start; gap:10px;
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    box-shadow:var(--shadow); padding:11px 12px;
+    font-size:13px; line-height:1.55; color:#333;
+    transition:opacity .18s ease, transform .18s ease;
+  }
+  .hint[hidden]{display:none}
+  .hint.is-hidden{opacity:0; transform:translateY(-4px); pointer-events:none}
+  .hint__close{
+    flex:0 0 auto; width:18px; height:18px; border:0; border-radius:6px;
+    background:transparent; color:#9a9a95; cursor:pointer; font-size:13px; line-height:1;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .hint__close:hover{background:#f0f0ec; color:#555}
+
+  /* 吉祥物 */
+  .mascot{width:74px; height:74px; margin-bottom:14px}
+  .mascot svg{width:100%; height:100%; display:block}
+
+  /* 时钟 */
+  .clock{
+    font-size:58px; line-height:1; font-weight:600; letter-spacing:.5px;
+    font-variant-numeric:tabular-nums; color:#2b2b2b;
+  }
+  .welcome{margin-top:10px; font-size:15px; color:var(--ink-2)}
+
+  /* 应用栅格 */
+  .grid{
+    margin-top:34px; display:grid; grid-template-columns:repeat(4,84px);
+    gap:22px 18px; justify-items:center;
+  }
+  .app{
+    width:84px; background:none; border:0; padding:0; cursor:pointer;
+    display:flex; flex-direction:column; align-items:center; gap:7px;
+    font-family:inherit; color:inherit;
+  }
+  .app__icon{
+    width:54px; height:54px; border-radius:14px; display:flex; align-items:center; justify-content:center;
+    background:var(--card); border:1px solid var(--line); box-shadow:var(--shadow);
+    transition:transform .14s ease, box-shadow .14s ease, border-color .14s ease;
+  }
+  .app:hover .app__icon{transform:translateY(-2px); box-shadow:0 6px 16px rgba(15,15,15,.12); border-color:#dcdcd6}
+  .app:active .app__icon{transform:translateY(0) scale(.97)}
+  .app:focus-visible .app__icon{outline:2px solid var(--accent); outline-offset:2px}
+  .app__icon svg{width:26px; height:26px}
+  .app__label{font-size:11.5px; color:#555; letter-spacing:.2px}
+
+  /* 底部 dock */
+  .dock{
+    position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
+    display:flex; align-items:center; gap:8px;
+    padding:8px 10px; border-radius:26px;
+    background:rgba(255,255,255,.72); border:1px solid rgba(0,0,0,.06);
+    box-shadow:0 6px 20px rgba(15,15,15,.10);
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  }
+  .dock button{
+    width:40px; height:40px; border:0; border-radius:12px; cursor:pointer;
+    background:transparent; display:flex; align-items:center; justify-content:center;
+  }
+  .dock button:hover{background:rgba(0,0,0,.05)}
+  .dock button svg{width:22px; height:22px}
+
+  /* 提示条 */
+  .toast{
+    position:absolute; bottom:80px; left:50%; transform:translate(-50%,6px);
+    background:#1f1f1f; color:#fff; font-size:12.5px; padding:8px 14px; border-radius:999px;
+    opacity:0; transition:opacity .18s ease, transform .18s ease; pointer-events:none;
+  }
+  .toast.is-on{opacity:1; transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+<div class="doodles" aria-hidden="true">
+  <svg style="left:8%;top:16%;width:52px;height:52px" viewBox="0 0 52 52"><path d="M14 26c0-6 4-10 10-10s10 4 10 10c0 5-3 8-6 9v5h-3v-4h-2v4h-3v-5c-3-1-6-4-6-9z"/><circle cx="20" cy="24" r="1.4"/><circle cx="28" cy="24" r="1.4"/><path d="M23 29c1.4 1.2 4.6 1.2 6 0"/></svg>
+  <svg style="right:12%;top:14%;width:44px;height:44px" viewBox="0 0 44 44"><path d="M22 12c7 0 12 5 12 11s-5 9-12 9-12-3-12-9 5-11 12-11z"/><path d="M22 12v-4"/><path d="M14 24h16"/></svg>
+  <svg style="left:14%;bottom:26%;width:40px;height:40px" viewBox="0 0 40 40"><path d="M20 8c4 6 9 9 9 15a9 9 0 1 1-18 0c0-6 5-9 9-15z"/></svg>
+  <svg style="right:16%;bottom:30%;width:46px;height:46px" viewBox="0 0 46 46"><path d="M12 30c4-8 10-12 16-12 4 0 7 2 7 6 0 5-6 8-13 8-4 0-7-1-10-2z"/><path d="M18 18c0-4 3-6 6-6"/></svg>
+  <svg style="left:44%;top:9%;width:34px;height:34px" viewBox="0 0 34 34"><circle cx="17" cy="17" r="7"/><circle cx="17" cy="17" r="2" fill="#c9c9c2"/></svg>
+  <svg style="right:40%;top:11%;width:32px;height:32px" viewBox="0 0 32 32"><path d="M16 6c3 0 5 2 5 5s-2 5-5 5-5-2-5-5 2-5 5-5z"/><path d="M16 16v10"/><path d="M11 26c2-3 8-3 10 0"/></svg>
+</div>
+
+<div class="stage">
+  <div class="hint" id="hint" role="status">
+    <div>这是我的电脑。你可以看我操作，也可以在需要时接管。</div>
+    <button class="hint__close" id="hint-close" aria-label="关闭提示">✕</button>
+  </div>
+
+  <div class="mascot" aria-hidden="true">
+    <svg viewBox="0 0 84 84">
+      <!-- 天线 -->
+      <path d="M42 4v7" stroke="#2f5fd6" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="42" cy="4" r="3.2" fill="#7fa6ff"/>
+      <!-- 头部 -->
+      <rect x="12" y="13" width="60" height="52" rx="17" fill="#4a7bf7"/>
+      <rect x="12" y="13" width="60" height="52" rx="17" fill="url(#g1)" opacity=".55"/>
+      <defs>
+        <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#7fa6ff"/><stop offset="1" stop-color="#4a7bf7" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <!-- 表情 >_ -->
+      <path d="M29 31l7 9-7 9" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M46 49h11" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+      <!-- 两侧耳块 -->
+      <rect x="6" y="31" width="7" height="16" rx="3.5" fill="#3d6ae0"/>
+      <rect x="71" y="31" width="7" height="16" rx="3.5" fill="#3d6ae0"/>
+    </svg>
+  </div>
+
+  <div class="clock" id="clock">--:--</div>
+  <div class="welcome">欢迎回来，个人助理。</div>
+
+  <div class="grid" role="list">
+    <button class="app" role="listitem" data-action="terminal" title="打开终端">
+      <span class="app__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#2b2b2b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 10l3 2-3 2"/><path d="M12.5 14h4"/></svg>
+      </span>
+      <span class="app__label">终端</span>
+    </button>
+    <button class="app" role="listitem" data-action="browser" title="打开浏览器">
+      <span class="app__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#2f6bff" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.2"/><path d="M3.8 12h16.4"/><path d="M12 3.8c2.4 2.3 3.6 5 3.6 8.2S14.4 17.9 12 20.2c-2.4-2.3-3.6-5-3.6-8.2S9.6 6.1 12 3.8z"/></svg>
+      </span>
+      <span class="app__label">浏览器</span>
+    </button>
+    <button class="app" role="listitem" data-action="files" title="打开文件管理器">
+      <span class="app__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#e39a1f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.4h7a2 2 0 0 1 2 2v7.6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>
+      </span>
+      <span class="app__label">文件</span>
+    </button>
+    <button class="app" role="listitem" data-action="dsh" title="打开云端助理网页">
+      <span class="app__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#1f9d6b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.2" y="5" width="17.6" height="12.4" rx="2.6"/><path d="M8 21h8"/><path d="M12 17.4V21"/><path d="M7.6 10.4l2.2 1.6-2.2 1.6"/><path d="M12.4 13.6h3.4"/></svg>
+      </span>
+      <span class="app__label">云助理</span>
+    </button>
+    <button class="app" role="listitem" data-action="workspace" title="工作区说明">
+      <span class="app__icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#7b61ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H10v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H14v16h4.5A1.5 1.5 0 0 0 20 18.5z"/></svg>
+      </span>
+      <span class="app__label">工作区</span>
+    </button>
+  </div>
+</div>
+
+<div class="dock" aria-label="快捷入口">
+  <button data-action="browser" title="浏览器" aria-label="浏览器">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#2f6bff" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><path d="M4 12h16"/></svg>
+  </button>
+  <button data-action="terminal" title="终端" aria-label="终端">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#2b2b2b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M7.5 10l2.8 2-2.8 2"/><path d="M12.5 14h3.5"/></svg>
+  </button>
+  <button data-action="files" title="文件" aria-label="文件">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#e39a1f" stroke-width="1.8" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.4h7a2 2 0 0 1 2 2v7.6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>
+  </button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── 时钟：按桌面时区显示（容器时钟是 UTC，用户按北京时间读表）──
+  var clockEl = document.getElementById('clock');
+  var clockFormat = null;
+  function tick() {
+    var d = new Date();
+    var text;
+    try {
+      text = clockFormat ? clockFormat.format(d)
+        : (d.getHours() < 10 ? '0' : '') + d.getHours() + ':' + (d.getMinutes() < 10 ? '0' : '') + d.getMinutes();
+    } catch (e) { text = clockEl.textContent; }
+    if (clockEl.textContent !== text) clockEl.textContent = text;
+  }
+  // 时区由本机桥 /config.json 提供；拿不到就退回浏览器本地时区。
+  try {
+    fetch('/config.json', { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) {
+        if (!cfg || !cfg.timeZone) return;
+        clockFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: cfg.timeZone, hour: '2-digit', minute: '2-digit', hour12: false });
+        tick();
+      })
+      .catch(function () {});
+  } catch (e) {}
+  tick();
+  setInterval(tick, 1000);
+
+  // ── 引导气泡：关闭状态存 localStorage ──
+  var hint = document.getElementById('hint');
+  try {
+    if (localStorage.getItem('pa.welcome.hint.dismissed') === '1') hint.hidden = true;
+  } catch (e) {}
+  document.getElementById('hint-close').addEventListener('click', function () {
+    hint.classList.add('is-hidden');
+    setTimeout(function () { hint.hidden = true; }, 200);
+    try { localStorage.setItem('pa.welcome.hint.dismissed', '1'); } catch (e) {}
+  });
+
+  // ── 提示条 ──
+  var toastEl = document.getElementById('toast'), toastTimer = 0;
+  function toast(text) {
+    toastEl.textContent = text;
+    toastEl.classList.add('is-on');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('is-on'); }, 2200);
+  }
+
+  var WORKSPACE_HINT = '工作区在 /workspace，产出的文件会出现在左侧「文件」里。';
+
+  // ── 通过本机 launcher 的 HTTP 桥启动固定应用 ──
+  // 桥只接受 {action: "browser"|"terminal"|"files"}，服务端会再用 launcher.sock 校验一遍。
+  function launch(action) {
+    return fetch('/launch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: action })
+    }).then(function (r) { return r.json(); });
+  }
+
+  // 云端 DSH 网页由同一 Pod 内的 127.0.0.1:8081 提供，地址由本机桥转发给桌面重新导航。
+  function openDsh(btn) {
+    if (btn) btn.disabled = true;
+    fetch('/dsh-web.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (info) {
+      if (!info || !info.url) { toast('云端助理网页还在启动，请稍后再试'); return; }
+      return launch('dsh').then(function (res) {
+        if (!res || res.ok !== true) toast('打开失败：' + ((res && res.code) || '未知错误'));
+      });
+    }).catch(function () {
+      toast('云端助理网页暂时不可用');
+    }).then(function () {
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  function handle(action, btn) {
+    if (action === 'workspace') { toast(WORKSPACE_HINT); return; }
+    if (action === 'dsh') { openDsh(btn); return; }
+    if (btn) btn.disabled = true;
+    launch(action).then(function (res) {
+      if (!res || res.ok !== true) toast('打开失败：' + ((res && res.code) || '未知错误'));
+    }).catch(function () {
+      toast('桌面入口暂时不可用');
+    }).then(function () {
+      if (btn) btn.disabled = false;
+    });
+  }
+
+  document.querySelectorAll('[data-action]').forEach(function (el) {
+    el.addEventListener('click', function () { handle(el.getAttribute('data-action'), el); });
+  });
+
+  // ── 键盘：1/2/3 快捷启动（可选，不抢焦点） ──
+  var keys = { '1': 'terminal', '2': 'browser', '3': 'files' };
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var action = keys[e.key];
+    if (action) { e.preventDefault(); handle(action, null); }
+  });
+})();
+</script>
+</body>
+</html>

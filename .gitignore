@@ -1,0 +1,12 @@
+node_modules/
+.npm/
+coverage/
+dist/
+.DS_Store
+*.log
+
+.artifacts/
+.playwright-cli/
+
+# 本地构建/验收输出
+output/

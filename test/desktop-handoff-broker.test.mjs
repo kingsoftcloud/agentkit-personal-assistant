@@ -1,0 +1,230 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { once } from 'node:events';
+import { createComputerAgentServer, runComputerAgentDaemon } from '../runtime/computer-agentd.mjs';
+
+const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+const env = { USER_ID: 'u', ASSISTANT_ID: 'a', COMPUTER_ID: 'c', COMPUTER_HOST: '127.0.0.1', COMPUTER_PORT: '0',
+  AGENTKIT_DESKTOP_JWKS_JSON: JSON.stringify({ keys: [{ ...publicKey.export({ format: 'jwk' }), kid: 'handoff-test' }] }) };
+function permit(mode = 'control', botId = 'bot') {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'agentkit-desktop+jwt', kid: 'handoff-test' })).toString('base64url');
+  const body = Buffer.from(JSON.stringify({ iss: 'agentengine-server', aud: 'agentkit-personal-assistant-desktop', scope: 'desktop', agentId: 'a', botId, mode, iat: now, exp: now + 60, jti: randomUUID() })).toString('base64url');
+  return `${header}.${body}.${sign(null, Buffer.from(`${header}.${body}`), privateKey).toString('base64url')}`;
+}
+async function fixture(t, { browserFactory, onInput, executorFactory } = {}) {
+  const sessions = new Map(), inputs = [];
+  const view = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controlEpoch: session.controlEpoch, idleMode: 'retain-desktop' });
+  const service = createComputerAgentServer({ env, executorFactory, browserFactory: browserFactory || (() => ({ available: true, openDesktopWindow: async () => ({}), dispose: async () => {} })), desktopFactory: () => ({
+    ensureDisplay: async () => {},
+    openSession: async value => { const session = { ...value, sessionId: randomUUID(), controlEpoch: 0 }; sessions.set(session.sessionId, session); return view(session); },
+    getSession: id => sessions.get(id),
+    setSessionControl: async ({ sessionId, controllable, leaseId, taskId }) => { const session = sessions.get(sessionId); Object.assign(session, { controllable, leaseId, taskId, controlEpoch: session.controlEpoch + 1 }); return view(session); },
+    input: async value => { inputs.push(value); await onInput?.(value); return { accepted: true }; },
+    closeSessionsForLease: leaseId => { for (const [id, session] of sessions) if (session.leaseId === leaseId) sessions.delete(id); },
+    closeSession: id => sessions.delete(id),
+    stats: () => ({ sessions: sessions.size }), dispose: async () => {},
+    frame: async ({ sessionId }) => ({ sessionId, data: 'frame' }),
+    windows: async () => [{ windowId: '0x123', title: 'AgentKit Cloud Desktop' }],
+    launchApplication: async (_application, options) => options?.beforeCommand?.(),
+  }) });
+  service.listen(); await once(service.server, 'listening'); t.after(() => service.close());
+  const post = async (path, body = {}, options = {}) => { const response = await fetch(`http://127.0.0.1:${service.server.address().port}/broker/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: 'u', assistantId: 'a', computerId: 'c', botId: 'bot', taskId: 'human', ...body }), ...options }); return { status: response.status, value: await response.json() }; };
+  return { post, sessions, inputs };
+}
+
+test('human control requires a signed control grant; read/forged/replayed grants never acquire', async t => {
+  const { post } = await fixture(t);
+  assert.equal((await post('desktop/session', { mode: 'observe', controlPermit: permit('read') })).status, 403);
+  assert.equal((await post('desktop/session', { mode: 'observe', controlPermit: 'forged' })).status, 401);
+  const reader = await post('desktop/session', { controlAvailable: true });
+  assert.equal((await post('desktop/control/acquire', { sessionId: reader.value.sessionId, controlEpoch: 0 })).status, 403);
+  const token = permit();
+  const opened = await post('desktop/session', { mode: 'observe', controlPermit: token });
+  assert.equal(opened.status, 200); assert.equal(opened.value.controlAvailable, true); assert.equal(opened.value.readOnly, true);
+  assert.equal((await post('desktop/session', { mode: 'observe', controlPermit: token })).status, 401);
+});
+
+test('Agent 桌面输入绑定同一租约，人接管后旧 Agent 输入在服务端拒绝', async t => {
+  const { post, inputs } = await fixture(t);
+  const leaseId = (await post('lease/acquire', { taskId: 'agent-task' })).value.lease.leaseId;
+  const input = { taskId: 'agent-task', leaseId, action: 'desktop.input', args: { event: { type: 'text', text: 'cloud only' } } };
+  assert.equal((await post('action', input)).status, 200);
+  assert.equal(inputs.length, 1);
+  const windows = await post('action', { taskId: 'agent-task', leaseId, action: 'desktop.windows', args: {} });
+  assert.equal(windows.value.windows[0].windowId, '0x123');
+  const human = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value;
+  assert.equal((await post('desktop/control/acquire', { sessionId: human.sessionId, controlEpoch: 0 })).status, 200);
+  assert.equal((await post('action', input)).value.error, 'COMPUTER_USER_CONTROLLED');
+  assert.equal(inputs.length, 1);
+});
+
+test('一个拖拽批次被人接管后，剩余事件不能借新租约继续发送', async t => {
+  let entered, proceed;
+  const reached = new Promise(resolve => { entered = resolve; });
+  const wait = new Promise(resolve => { proceed = resolve; });
+  const { post, inputs } = await fixture(t, { onInput: async () => { entered(); await wait; } });
+  const leaseId = (await post('lease/acquire', { taskId: 'agent-task' })).value.lease.leaseId;
+  const pending = post('action', { taskId: 'agent-task', leaseId, action: 'desktop.input', args: { events: [{ type: 'pointermove', x: 10, y: 10 }, { type: 'button', button: 1, action: 'down' }] } });
+  await reached;
+  const human = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value;
+  assert.equal((await post('desktop/control/acquire', { sessionId: human.sessionId, controlEpoch: 0 })).status, 200);
+  proceed();
+  assert.equal((await pending).value.error, 'COMPUTER_USER_CONTROLLED');
+  assert.equal(inputs.length, 1);
+});
+
+test('human takeover preserves video session, fences old input, rejects second client and releases to agent', async t => {
+  const { post, sessions, inputs } = await fixture(t);
+  const agentLease = (await post('lease/acquire', { taskId: 'agent-task', ttlMs: 60000 })).value.lease;
+  const sessionId = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value.sessionId;
+  assert.equal((await post('lease/renew', { taskId: 'agent-task', leaseId: agentLease.leaseId })).status, 200);
+  const acquired = await post('desktop/control/acquire', { sessionId, controlEpoch: 0 });
+  assert.equal(acquired.status, 200); assert.equal(acquired.value.readOnly, false); assert.equal(acquired.value.controlEpoch, 1);
+  assert.equal(sessions.has(sessionId), true);
+  const leaseId = acquired.value.lease.leaseId;
+  assert.equal((await post('action', { taskId: 'agent-task', leaseId: agentLease.leaseId, action: 'stop' })).value.error, 'COMPUTER_USER_CONTROLLED');
+  assert.equal((await post('lease/acquire', { botId: 'other', taskId: 'other', kind: 'human' })).status, 409);
+  const secondId = (await post('desktop/session', { mode: 'observe', controlPermit: permit(), taskId: 'second-client' })).value.sessionId;
+  assert.equal((await post('desktop/control/acquire', { sessionId: secondId, taskId: 'second-client', controlEpoch: 0 })).status, 409);
+  assert.equal((await post('desktop/input', { sessionId, leaseId, controlEpoch: 0, event: { type: 'button', action: 'down' } })).status, 409);
+  assert.equal((await post('desktop/input', { sessionId, leaseId, controlEpoch: 1, event: { type: 'button', action: 'down' } })).status, 202);
+  assert.equal(inputs.length, 1);
+  const released = await post('desktop/control/release', { sessionId, leaseId, controlEpoch: 1 });
+  assert.equal(released.status, 200); assert.equal(released.value.readOnly, true); assert.equal(released.value.controlEpoch, 2);
+  assert.equal((await post('desktop/frame', { sessionId })).status, 200);
+  assert.equal(sessions.has(sessionId), true);
+  assert.equal((await post('lease/acquire', { botId: 'other', taskId: 'other' })).status, 200);
+  assert.equal((await post('desktop/input', { sessionId, leaseId, controlEpoch: 1, event: { type: 'text', text: 'stale' } })).status, 409);
+});
+
+test('an agent CDP command already waiting cannot mutate after human takeover', async t => {
+  let beforeCommand, reached;
+  const ready = new Promise(resolve => { reached = resolve; });
+  let proceed;
+  const wait = new Promise(resolve => { proceed = resolve; });
+  const { post } = await fixture(t, { browserFactory: options => { beforeCommand = options.beforeCommand; return { available: true, openDesktopWindow: async () => ({}), dispose: async () => {}, open: async () => { await beforeCommand(); reached(); await wait; await beforeCommand(); throw new Error('old command escaped fencing'); } }; } });
+  const leaseId = (await post('lease/acquire', { taskId: 'agent-task' })).value.lease.leaseId;
+  const pending = post('action', { taskId: 'agent-task', leaseId, action: 'open', args: { url: 'https://example.com/' } });
+  await ready;
+  const sessionId = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value.sessionId;
+  assert.equal((await post('desktop/control/acquire', { sessionId, controlEpoch: 0 })).status, 200);
+  proceed();
+  assert.equal((await pending).value.error, 'COMPUTER_USER_CONTROLLED');
+});
+
+test('computer readiness stays 503 until the real desktop warmup completes without acquiring a lease', async t => {
+  let finishDisplay, browserStarts = 0, disposed = false, browserOptions;
+  const displayReady = new Promise(resolve => { finishDisplay = resolve; });
+  const service = createComputerAgentServer({ env: { ...env, AGENTKIT_DESKTOP_MODE: '1' },
+    desktopFactory: () => ({ ensureDisplay: () => displayReady, dispose: async () => { disposed = true; } }),
+    browserFactory: options => { browserOptions = options; return { available: true, openDesktopWindow: async () => { browserStarts++; }, dispose: async () => {} }; },
+  });
+  service.listen(); await once(service.server, 'listening');
+  t.after(() => service.close());
+  const endpoint = `http://127.0.0.1:${service.server.address().port}`;
+  assert.equal((await fetch(`${endpoint}/health`)).status, 503);
+  assert.equal((await fetch(`${endpoint}/v1/status`)).status, 503);
+  finishDisplay();
+  await new Promise(resolve => setImmediate(resolve));
+  const health = await fetch(`${endpoint}/health`); assert.equal(health.status, 200);
+  assert.equal((await health.json()).desktopReady, true); assert.equal(browserStarts, 1); assert.equal(disposed, false);
+  assert.equal(browserOptions.userDataDir, '/var/lib/agentkit/computer/chromium-profile');
+  assert.equal(browserOptions.preserveUserDataDir, true);
+});
+
+test('预热失败清理桌面和浏览器、关闭 HTTP 后以非零退出，不在进程内静默重试', async () => {
+  const events = [], logs = [];
+  const failure = Object.assign(new Error('fixture WM failed'), { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE',
+    desktopDiagnostics: { elapsedMs: 5000, lastProbe: { stdout: 'not found' } }, secret: 'MUST_NOT_LOG' });
+  let starts = 0, exitCode;
+  const service = createComputerAgentServer({ env: { ...env, AGENTKIT_DESKTOP_MODE: '1' }, logger: { info() {}, error: line => logs.push(JSON.parse(line)) },
+    desktopFactory: () => ({ ensureDisplay: async () => { events.push('desktop-ready'); }, dispose: async () => events.push('desktop-dispose') }),
+    browserFactory: () => ({ available: true, openDesktopWindow: async () => { starts++; throw failure; }, dispose: async () => events.push('browser-dispose') }),
+  });
+  const daemon = runComputerAgentDaemon({ service, exit: code => { exitCode = code; events.push('exit'); }, onSignal: () => {} });
+  await assert.rejects(service.whenReady, { code: 'DESKTOP_WINDOW_MANAGER_UNAVAILABLE' });
+  await daemon.stopped;
+  assert.equal(starts, 1); assert.equal(exitCode, 1); assert.equal(service.server.listening, false);
+  assert.deepEqual(events, ['desktop-ready', 'browser-dispose', 'desktop-dispose', 'exit']);
+  assert.equal(logs[0].event, 'desktop-startup-failed'); assert.equal(logs[0].diagnostics.lastProbe.stdout, 'not found');
+  assert.equal(JSON.stringify(logs).includes('MUST_NOT_LOG'), false);
+});
+
+test('预热成功不会请求退出，显式停止时只清理一次', async () => {
+  let exits = 0, disposals = 0;
+  const service = createComputerAgentServer({ env: { ...env, AGENTKIT_DESKTOP_MODE: '1' }, logger: { info() {}, error() {} },
+    desktopFactory: () => ({ ensureDisplay: async () => {}, dispose: async () => { disposals++; } }),
+    browserFactory: () => ({ available: true, openDesktopWindow: async () => {}, dispose: async () => {} }),
+  });
+  const daemon = runComputerAgentDaemon({ service, exit: code => { assert.equal(code, 0); exits++; }, onSignal: () => {} });
+  await service.whenReady;
+  assert.equal(exits, 0); assert.equal(service.server.listening, true);
+  await Promise.all([daemon.stop(0), daemon.stop(0)]);
+  assert.equal(exits, 1); assert.equal(disposals, 1);
+});
+
+test('本地浏览器入口只复用受管浏览器，关闭先停入口且拒绝晚到请求', async () => {
+  let options, factories = 0, opens = 0, stopped;
+  const stoppedGate = new Promise(resolve => { stopped = resolve; });
+  const events = [];
+  const service = createComputerAgentServer({ env,
+    desktopFactory: value => { options = value; return { dispose: async () => events.push('desktop-dispose'), stopLauncher: async () => { events.push('launcher-stop'); await stoppedGate; } }; },
+    browserFactory: () => { factories++; return { available: true, openDesktopWindow: async () => { opens++; }, dispose: async () => events.push('browser-dispose') }; },
+  });
+  service.listen(); await service.whenReady;
+  await options.onLaunchBrowser(); await options.onLaunchBrowser();
+  assert.equal(factories, 1); assert.equal(opens, 2);
+  const endpoint = `http://127.0.0.1:${service.server.address().port}`;
+  const closing = service.close();
+  assert.equal((await fetch(endpoint + '/health')).status, 503);
+  await assert.rejects(options.onLaunchBrowser(), { code: 'DESKTOP_LAUNCH_CLOSED' });
+  stopped(); await closing;
+  assert.equal(factories, 1); assert.deepEqual(events, ['launcher-stop', 'launcher-stop', 'browser-dispose', 'desktop-dispose']);
+});
+
+const pendingExecutor = () => {
+  let started, cancelled;
+  const began = new Promise(resolve => { started = resolve; });
+  const aborted = new Promise(resolve => { cancelled = resolve; });
+  const run = async (_args, { signal }) => {
+    started(signal);
+    return new Promise((_resolve, reject) => {
+      const stop = () => { cancelled(); reject(new Error('executor was cancelled')); };
+      if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true });
+    });
+  };
+  return { began, aborted, factory: () => ({ runBash: run, runCode: run, dispose: async () => {} }) };
+};
+
+test('真人接管先取消旧租约中的命令，旧命令不在交还后被重放', async t => {
+  const execution = pendingExecutor(), { post } = await fixture(t, { executorFactory: execution.factory });
+  const lease = await post('lease/acquire', { taskId: 'agent-work', idempotencyKey: 'job', ttlMs: 60000 });
+  const job = post('action', { taskId: 'agent-work', leaseId: lease.value.lease.leaseId, action: 'terminal.exec', args: { language: 'shell', command: 'long-running-job' } });
+  const signal = await execution.began;
+  const opened = await post('desktop/session', { mode: 'observe', controlPermit: permit() });
+  const human = await post('desktop/control/acquire', { sessionId: opened.value.sessionId, controlEpoch: 0 });
+  assert.equal(human.status, 200); assert.equal(human.value.readOnly, false);
+  await execution.aborted; assert.equal(signal.aborted, true);
+  const stopped = await job; assert.equal(stopped.status, 409); assert.equal(stopped.value.error, 'COMPUTER_LEASE_REVOKED'); assert.equal(stopped.value.outcomeUnknown, true);
+  await post('desktop/control/release', { sessionId: opened.value.sessionId, leaseId: human.value.lease.leaseId, controlEpoch: human.value.controlEpoch });
+});
+
+test('请求断开取消服务端执行，不留下后台命令', async t => {
+  const execution = pendingExecutor(), { post } = await fixture(t, { executorFactory: execution.factory });
+  const first = await post('lease/acquire', { taskId: 'disconnect', idempotencyKey: 'disconnect', ttlMs: 60000 });
+  const cancel = new AbortController();
+  const job = assert.rejects(post('action', { taskId: 'disconnect', leaseId: first.value.lease.leaseId, action: 'terminal.exec', args: { language: 'shell', command: 'long-job' } }, { signal: cancel.signal }), { name: 'AbortError' });
+  await execution.began; cancel.abort(); await job; await execution.aborted;
+  await post('lease/release', { taskId: 'disconnect', leaseId: first.value.lease.leaseId });
+});
+
+test('无其他请求时租约到期仍取消命令，不依赖客户端保活', async t => {
+  const execution = pendingExecutor(), { post } = await fixture(t, { executorFactory: execution.factory });
+  const lease = await post('lease/acquire', { taskId: 'expiry', idempotencyKey: 'expiry', ttlMs: 1000 });
+  const job = post('action', { taskId: 'expiry', leaseId: lease.value.lease.leaseId, action: 'terminal.exec', args: { language: 'shell', command: 'never-finishes' } });
+  await execution.began;
+  const result = await job; assert.equal(result.status, 409); assert.equal(result.value.error, 'COMPUTER_LEASE_REVOKED'); assert.equal(result.value.outcomeUnknown, true);
+  await execution.aborted;
+});
