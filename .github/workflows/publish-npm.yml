@@ -1,9 +1,6 @@
 name: Publish npm
 
-# 与 ksadk-web 的发布方式保持一致：GitHub Release / 手动触发，npm OIDC 证明发布。
-# 仓库内容就是 npm 客户端子集（scripts/export-npm-client.mjs 的产物），
-# 因此这里不需要再构建，直接打包发布。
-
+# 与 ksadk-web 保持一致：GitHub Release / 手动触发，npm 用 OIDC 可信发布（无需长期 token）。
 on:
   release:
     types:
@@ -33,9 +30,8 @@ jobs:
 
       - run: npm install -g npm@^11.5.1
       - run: npm --version
-
-      - name: Pack client subset
-        run: npm pack --pack-destination .artifacts
+      - run: npm ci
+      - run: npm test
 
       - name: Check published version
         id: published
@@ -52,4 +48,4 @@ jobs:
 
       - name: Publish to npm
         if: steps.published.outputs.exists != 'true'
-        run: npm publish .artifacts/*.tgz --access public --provenance
+        run: npm publish --access public --provenance
