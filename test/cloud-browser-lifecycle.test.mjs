@@ -10,10 +10,10 @@ async function fixture(t, options = {}) {
   const workspace = await mkdtemp(join(tmpdir(), 'pa-browser-lifecycle-'));
   const transports = [], commands = [];
   let targetNumber = 0;
-  const transportFactory = async () => {
+  const transportFactory = async (launchOptions = {}) => {
     const page = { url: 'about:blank', title: 'Example Domain' };
     const targets = new Set();
-    const transport = { disposed: false, page, targets, connection: {
+    const transport = { launchOptions, disposed: false, page, targets, connection: {
       closed: false,
       async send(method, params) {
         commands.push({ method, params });
@@ -358,6 +358,31 @@ test('点浏览器时把欢迎页应用窗口切成普通浏览器窗口（带�
     await browser.openDesktopWindow({ browsing: true });
     assert.equal(transports.length, 2);
   } finally { await browser.dispose(); await rm(workspace, { recursive: true, force: true }); }
+});
+
+test('云端 DSH 网页不会粘成浏览器首页：进程重建和再次点“浏览器”都回到欢迎页', async t => {
+  const welcome = 'http://127.0.0.1:34567/welcome.html';
+  const { browser, transports } = await fixture(t, { env: { AGENTKIT_CHROMIUM: process.execPath, AGENTKIT_DESKTOP_MODE: '1', AGENTKIT_WELCOME_URL: welcome } });
+  // 首屏：应用窗口打开欢迎页。
+  await browser.openDesktopWindow();
+  assert.equal(transports[0].launchOptions.startUrl, welcome);
+  // 点“云助理”/工具导航到同一 Pod 的云端 DSH 网页。
+  await browser.navigate('http://127.0.0.1:8081/');
+  assert.equal(transports[0].page.url, 'http://127.0.0.1:8081/');
+  // 浏览器进程消失后重建：首屏必须回到欢迎页，而不是 8081。
+  transports[0].connection.closed = true;
+  await browser.openDesktopWindow();
+  assert.equal(transports.length, 2);
+  assert.equal(transports[1].launchOptions.startUrl, welcome);
+  assert.notEqual(transports[1].launchOptions.openUrl, 'http://127.0.0.1:8081/');
+  // 已经是普通浏览窗口时，再点一次“浏览器”也要复位首页：随后重建仍回欢迎页。
+  await browser.navigate('http://127.0.0.1:8081/');
+  const view = await browser.openDesktopWindow({ browsing: true });
+  assert.equal(view.url, welcome);
+  transports[1].connection.closed = true;
+  await browser.openDesktopWindow();
+  assert.equal(transports.length, 3);
+  assert.equal(transports[2].launchOptions.openUrl, welcome);
 });
 
 test('桌面浏览器能打开同一 Pod 内的本机服务（云端 DSH 网页），公网仍只允许 80/443', async () => {

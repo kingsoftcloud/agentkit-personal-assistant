@@ -72,3 +72,35 @@ test('云端回合按 clientTurnId 持久幂等，并发重复提交仅执行一
   assert.equal(mismatch.status, 409);
   await f.handle.waitForIdle();
 });
+
+
+test('同一会话的两轮对话排队执行，不再把“上一轮未结束”记成失败任务', async t => {
+  const submits = [];
+  let releaseFirst;
+  const firstStarted = new Promise(resolve => { releaseFirst = resolve; });
+  let firstRunning = false;
+  const f = await fixture(t, {
+    available: true,
+    async submitTurn(value) { submits.push(value); return { accepted: true, execution: 'dsh-session-controller', requestId: value.requestId }; },
+    async waitForTurn({ requestId }) {
+      if (!firstRunning) { firstRunning = true; await firstStarted; return { status: 'completed', messages: ['first done'] }; }
+      return { status: 'completed', messages: ['second done'] };
+    },
+  });
+  const session = (await f.request('/v1/sessions', { botId: 'writer' })).body;
+  const first = await f.request(`/v1/sessions/${session.sessionId}/turns`, { botId: 'writer', input: 'one' });
+  assert.equal(first.status, 202);
+  assert.equal(submits.length, 1);
+  const second = await f.request(`/v1/sessions/${session.sessionId}/turns`, { botId: 'writer', input: 'two' });
+  assert.equal(second.status, 202);
+  assert.equal(second.body.status, 'queued', '上一轮未结束时应排到 queued，而不是直接提交成失败轮次');
+  assert.equal(submits.length, 1, '上一轮结束前不能提交下一轮');
+  releaseFirst();
+  await f.handle.waitForIdle();
+  const turns = (await f.request(`/v1/sessions/${session.sessionId}/turns?botId=writer`)).body.turns;
+  assert.deepEqual(turns.map(turn => turn.status), ['completed', 'completed']);
+  assert.deepEqual(turns.map(turn => turn.error), [null, null]);
+  assert.equal(submits.length, 2);
+  const messages = (await f.request(`/v1/sessions/${session.sessionId}/messages?botId=writer`)).body.messages;
+  assert.deepEqual(messages.filter(row => row.role === 'assistant').map(row => row.content), ['first done', 'second done']);
+});

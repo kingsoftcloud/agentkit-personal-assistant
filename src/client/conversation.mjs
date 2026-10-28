@@ -27,6 +27,23 @@
 import { renderMarkdown } from './markdown.mjs';
 
 const EMPTY_HINT = '有什么可以帮你？';
+/** 这两类失败是“消息根本没开始跑”的瞬时状态：云端现在会按会话排队重试，
+ * 历史会话里残留的记录不再渲染成任务失败，避免对话结束后一直显示红色失败。 */
+const TRANSIENT_TURN_ERRORS = new Set(['DSH_SESSION_BUSY', 'DSH_TURN_TIMEOUT']);
+const TURN_ERROR_TEXT = {
+  RUNTIME_PROCESS_INTERRUPTED: '云电脑重启，任务被中断',
+  DSH_SESSION_CONTROLLER_UNAVAILABLE: '云端连接暂时不可用，请稍后重试',
+  DSH_TURN_NOT_ACCEPTED: '云端没有接受这一轮对话，请重新发送',
+  DSH_SESSION_NOT_FOUND: '会话不存在或已被删除',
+};
+const turnErrorText = error => {
+  const value = String(error || '').trim();
+  if (!value) return '请检查任务状态后重试';
+  if (TURN_ERROR_TEXT[value]) return TURN_ERROR_TEXT[value];
+  // 纯大写错误码对用户没有意义；短句/中文错误保持原文。
+  return /^[A-Z][A-Z0-9_]{5,}$/u.test(value) ? '云端没有完成这一轮，请重试' : value.slice(0, 160);
+};
+
 /** 判定回合结束后稍等再发队首：云端把 turn 标记为 running 有延迟，抢跑会撞 409。 */
 const QUEUE_FLUSH_DELAY_MS = 400;
 /** 云电脑仍忙时的退避重试上限：超过后交还给用户手动重试（消息内容仍在列表里）。 */
@@ -311,7 +328,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
           const labels = { cloud_computer: '操作云电脑', cloud_workspace: '处理云端文件', cloud_bash: '执行云端命令', cloud_run_code: '运行云端代码', assistant_schedule: '设置云端任务' };
           const tool = active?.progress?.tool;
           setProgressText(tool ? `${active.progress.state === 'running' ? '正在' : '已完成'}${labels[tool] || (tool.startsWith('cloud_browser_') ? '操作云端浏览器' : '执行工具')}` : '');
-          mergeEvents(page.turns.filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn.status)).map(turn => ({ type: 'step', id: `turn-status-${turn.turnId}`, text: `任务${turn.status === 'failed' ? '失败' : '已中断'}：${turn.error || '请检查任务状态后重试'}` })));
+          const visibleFailures = page.turns
+            .filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn.status) && !TRANSIENT_TURN_ERRORS.has(String(turn.error || '')))
+            .map(turn => ({ type: 'step', id: `turn-status-${turn.turnId}`, text: `任务${turn.status === 'failed' ? '失败' : '已中断'}：${turnErrorText(turn.error)}` }));
+          mergeEvents(visibleFailures);
         }
         setError('');
       } catch (failure) {

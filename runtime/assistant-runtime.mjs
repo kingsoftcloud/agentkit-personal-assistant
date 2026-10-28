@@ -198,6 +198,65 @@ const turnWrite = async (body, sessionId) => {
   submissionLocks.set(key, current);
   try { return await current; } finally { if (submissionLocks.get(key) === current) submissionLocks.delete(key); }
 };
+// 一轮对话的观察上限：DSH 侧的工具/长命令可能跑很久，5 分钟会把正常任务误判成超时，
+// 进而在会话里留下永久的 failed turn（面板一直显示“任务失败：DSH_TURN_TIMEOUT”）。
+const TURN_OBSERVE_TIMEOUT_MS = 30 * 60_000;
+// 同一会话的轮次串行执行：上一轮真正结束（含 DSH turn/end）后才提交下一轮，
+// 而不是把“上一轮还在跑”的用户消息记成 DSH_SESSION_BUSY 的失败任务。
+const sessionTurnChains = new Map();
+const sessionChainKey = (botId, sessionId) => `${botId}\u0000${sessionId}`;
+
+const trackTurnWork = promise => {
+  pendingTurns.add(promise);
+  void promise.catch(() => {}).finally(() => pendingTurns.delete(promise));
+};
+
+const buildTurnContent = async (body, botId, sessionId) => {
+  const content = [{ type: 'text', text: body.input }];
+  for (const attachment of body.attachments || []) {
+    const data = await cloudFiles.attachment({ botId, sessionId, path: attachment.path });
+    // 只有明确的图像附件进入模型图片通道；其他文件由工作区工具读取处理。
+    if (['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(attachment.mediaType)) {
+      const store = runtime?.ctx?.get?.('attachments');
+      if (!store?.saveImage) throw Object.assign(new Error('云端图片附件服务不可用'), { status: 503 });
+      const ref = await store.saveImage({ data, mediaType: attachment.mediaType, name: attachment.name });
+      content.push({ type: 'image', attachment: ref });
+    }
+  }
+  return content;
+};
+
+// bridge 的 busy 标记在 waitForTurn 的 finally 里释放，链式排队后理论上不会撞上；
+// 仍保留短重试兜底（例如云端 DSH 内部还有未归位的旧 turn）。
+const submitWithBusyRetry = async args => {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await turnBridge.submitTurn(args); }
+    catch (error) {
+      if (error?.code !== 'DSH_SESSION_BUSY' || attempt >= 20) throw error;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+};
+
+const observeTurn = async ({ botId, sessionId, turn, clientTurnId, receipt }) => {
+  const result = await turnBridge.waitForTurn({ botId, sessionId, requestId: receipt.requestId, timeoutMs: TURN_OBSERVE_TIMEOUT_MS, onProgress: progress => updateTurn(turn.turnId, { progress }) });
+  for (const content of result.messages) await stateStore.appendMessage({ botId, sessionId, role: 'assistant', content, metadata: { turnId: turn.turnId, ...(clientTurnId ? { clientTurnId } : {}), execution: receipt.execution } });
+  await updateTurn(turn.turnId, { status: result.status, result: result.messages.join('\n'), error: result.error || null });
+  console.info(JSON.stringify({ event: 'personal-assistant.turn.finished', botId, sessionId, turnId: turn.turnId, status: result.status }));
+};
+
+const executeTurn = async ({ botId, sessionId, body, turn, clientTurnId }) => {
+  try {
+    const content = await buildTurnContent(body, botId, sessionId);
+    const receipt = await submitWithBusyRetry({ botId, sessionId, input: body.input, parts: content, requestId: turn.turnId });
+    await updateTurn(turn.turnId, { status: 'running', execution: receipt.execution, requestId: receipt.requestId });
+    await observeTurn({ botId, sessionId, turn, clientTurnId, receipt });
+  } catch (error) {
+    await updateTurn(turn.turnId, { status: 'failed', error: error.code || error.message });
+    throw error;
+  }
+};
+
 const submitCloudTurn = async (body, sessionId) => {
   const botId = stateBotId(body.botId);
   await requireSession(botId, sessionId);
@@ -212,32 +271,29 @@ const submitCloudTurn = async (body, sessionId) => {
   }
   const turn = await stateStore.createTurn({ botId, sessionId, input: body.input, metadata: body.metadata });
   const message = await stateStore.appendMessage({ botId, sessionId, role: 'user', content: body.input, metadata: { turnId: turn.turnId, ...(clientTurnId ? { clientTurnId } : {}) } });
-  try {
-    const content = [{ type: 'text', text: body.input }];
-    for (const attachment of body.attachments || []) {
-      const data = await cloudFiles.attachment({ botId, sessionId, path: attachment.path });
-      // 只有明确的图像附件进入模型图片通道；其他文件由工作区工具读取处理。
-      if (['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(attachment.mediaType)) {
-        const store = runtime?.ctx?.get?.('attachments');
-        if (!store?.saveImage) throw Object.assign(new Error('云端图片附件服务不可用'), { status: 503 });
-        const ref = await store.saveImage({ data, mediaType: attachment.mediaType, name: attachment.name });
-        content.push({ type: 'image', attachment: ref });
-      }
-    }
-    const receipt = await turnBridge.submitTurn({ botId, sessionId, input: body.input, parts: content, requestId: turn.turnId });
-    await updateTurn(turn.turnId, { status: 'running', execution: receipt.execution, requestId: receipt.requestId });
-    const pending = turnBridge.waitForTurn({ botId, sessionId, requestId: receipt.requestId, onProgress: progress => updateTurn(turn.turnId, { progress }) }).then(async result => {
-      for (const content of result.messages) await stateStore.appendMessage({ botId, sessionId, role: 'assistant', content, metadata: { turnId: turn.turnId, ...(clientTurnId ? { clientTurnId } : {}), execution: receipt.execution } });
-      await updateTurn(turn.turnId, { status: result.status, result: result.messages.join('\n'), error: result.error || null });
-      console.info(JSON.stringify({ event: 'personal-assistant.turn.finished', botId, sessionId, turnId: turn.turnId, status: result.status }));
-    }).catch(error => updateTurn(turn.turnId, { status: 'failed', error: error.code || error.message }));
-    pendingTurns.add(pending);
-    void pending.finally(() => pendingTurns.delete(pending));
-    return { ...turn, status: 'running', messageId: message.messageId, ...receipt };
-  } catch (error) {
+  const key = sessionChainKey(botId, sessionId);
+  const previous = sessionTurnChains.get(key);
+  if (previous) {
+    // 上一轮还没结束：保留 queued 状态，等它完成后再提交，不产生失败任务。
+    const queued = previous.catch(() => {}).then(() => executeTurn({ botId, sessionId, body, turn, clientTurnId }));
+    sessionTurnChains.set(key, queued);
+    void queued.catch(() => {}).finally(() => { if (sessionTurnChains.get(key) === queued) sessionTurnChains.delete(key); });
+    trackTurnWork(queued);
+    return { ...turn, status: 'queued', messageId: message.messageId };
+  }
+  // 会话空闲：立即提交，保持原有“提交即返回 running + requestId”的接口语义。
+  let receipt;
+  try { receipt = await submitWithBusyRetry({ botId, sessionId, input: body.input, parts: await buildTurnContent(body, botId, sessionId), requestId: turn.turnId }); }
+  catch (error) {
     await updateTurn(turn.turnId, { status: 'failed', error: error.code || error.message });
     throw error;
   }
+  await updateTurn(turn.turnId, { status: 'running', execution: receipt.execution, requestId: receipt.requestId });
+  const observed = observeTurn({ botId, sessionId, turn, clientTurnId, receipt }).catch(error => updateTurn(turn.turnId, { status: 'failed', error: error.code || error.message }));
+  sessionTurnChains.set(key, observed);
+  void observed.finally(() => { if (sessionTurnChains.get(key) === observed) sessionTurnChains.delete(key); });
+  trackTurnWork(observed);
+  return { ...turn, status: 'running', messageId: message.messageId, ...receipt };
 };
 
 // 尚未开始的任务可恢复；中断时不自动重放未知结果，避免重复执行操作。

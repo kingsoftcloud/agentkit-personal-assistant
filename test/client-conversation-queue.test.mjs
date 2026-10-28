@@ -228,3 +228,19 @@ test('同会话重建（cursor 失效）不清空排队，跨会话才丢弃', a
   await view.tick(600);
   assert.equal(view.queuedTexts(), 1);
 });
+
+
+test('历史里的瞬时失败轮次不再显示成任务失败，真实失败换成可读文案', async t => {
+  const view = conversation(t, {});
+  await thinking(view);
+  await endTurn(view);
+  view.setTurns([
+    { turnId: 'turn-busy', status: 'failed', error: 'DSH_SESSION_BUSY' },
+    { turnId: 'turn-timeout', status: 'failed', error: 'DSH_TURN_TIMEOUT' },
+    { turnId: 'turn-restart', status: 'failed', error: 'RUNTIME_PROCESS_INTERRUPTED' },
+  ]);
+  await view.tick(600);
+  assert.equal(view.hasText('DSH_SESSION_BUSY'), false, '忙/超时的历史失败不能漏出内部错误码');
+  assert.equal(view.hasText('DSH_TURN_TIMEOUT'), false);
+  assert.ok(view.hasText('任务失败：云电脑重启，任务被中断'));
+});

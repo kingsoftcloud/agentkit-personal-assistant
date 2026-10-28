@@ -435,8 +435,11 @@ export function createCloudBrowser({
   }
 
   async function launch() {
-    // 异常重建只恢复已通过 URL 策略的最后页面；不静默切回 about:blank。
-    const restoreUrl = desktopMode && lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
+    // 桌面模式的首屏永远是欢迎页：进程/窗口重建时不能把上一次的浏览地址
+    // （尤其是 127.0.0.1:8081 的云端 DSH 网页）当成浏览器首页，否则用户点
+    // “浏览器”只会看到原生网页，再也回不到欢迎页。普通模式仍恢复最后页面。
+    const restoreUrl = desktopMode && desktopStartUrl ? desktopRestoreUrl
+      : lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
     let started;
     try {
       started = await transportFactory({
@@ -520,10 +523,13 @@ export function createCloudBrowser({
   // 把应用窗口换成普通浏览器窗口：进程参数不同（去掉 --app），只能重启自有实例；
   // 页面地址沿用 lastUrl / 欢迎页，用户感知是“欢迎页变成了能上网的浏览器”。
   async function switchDesktopWindowToBrowsing() {
-    if (!desktopMode || !desktopAppWindow) return;
+    if (!desktopMode) return;
+    // 用户要的是“浏览器首页就是欢迎页”：每次从欢迎页/dock 点“浏览器”都固定回
+    // 欢迎页，不沿用上次浏览的页面。窗口已经是普通窗口时也要复位 lastUrl，
+    // 否则下一次进程重建会把 8081 这类页面当成首页。
+    if (desktopStartUrl) lastUrl = desktopRestoreUrl;
+    if (!desktopAppWindow) return;
     desktopAppWindow = false;
-    // 用户要的是“浏览器首页就是欢迎页”：切窗口时固定回欢迎页，不沿用上次浏览的页面。
-    lastUrl = desktopRestoreUrl;
     const previous = transport;
     if (transport === previous) { transport = null; targetId = null; pageSession = null; }
     if (previous) { forgetInput(previous); await previous.dispose(); }
@@ -564,7 +570,9 @@ export function createCloudBrowser({
       }
       if (!missing && desktopMode && !(await hasBrowserWindow(inspectedTarget))) missing = true;
       if (!missing) return;
-      const restoreUrl = lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
+      // 有欢迎页的桌面模式重建窗口时从欢迎页开始：8081 不能变成“首页”。
+      const restoreUrl = desktopMode && desktopStartUrl ? desktopRestoreUrl
+        : lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;
       // 只替换已关闭/正在关闭的 page，不重启 Chromium；不等待旧 close ACK。
       let opened = await createDesktopWindowTarget(restoreUrl);
       // 无窗口的浏览器上新建窗口也可能不落地（线上残留过这种状态）：确认失败

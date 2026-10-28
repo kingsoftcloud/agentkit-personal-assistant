@@ -77,6 +77,9 @@ const ensureDesktopBrowser = async (options = {}) => {
 const openDshWeb = async ({ signal } = {}) => {
   if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
   if (!dshWebUrl) throw Object.assign(new Error('云端助理网页还没准备好'), { code: 'DSH_WEB_UNAVAILABLE' });
+  // 欢迎页地址由桌面桥提供：先确保桌面（含 welcome 桥）就绪，再创建 Chromium，
+  // 否则 browserEnv 快照不到 AGENTKIT_WELCOME_URL，这个进程就永远没有首屏。
+  if (typeof desktop?.ensureDisplay === 'function') await desktop.ensureDisplay();
   const target = dshWebUrl;
   const view = await ensureDesktopBrowser({ browsing: true });
   if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
@@ -90,6 +93,7 @@ desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', work
   dshWebUrl: () => dshWebUrl, onLaunchDshWeb: openDshWeb,
   onLaunchBrowser: async ({ signal } = {}) => {
     if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
+    if (typeof desktop?.ensureDisplay === 'function') await desktop.ensureDisplay();
     // 用户主动点“浏览器”：欢迎页应用窗口切换成带地址栏的普通浏览器窗口。
     const result = await ensureDesktopBrowser({ browsing: true });
     if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });
