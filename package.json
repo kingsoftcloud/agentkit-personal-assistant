@@ -81,5 +81,11 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
-  }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "agentkit",
+    "personal-assistant",
+    "cloud-computer"
+  ]
 }
