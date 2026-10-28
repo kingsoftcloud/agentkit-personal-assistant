@@ -762,6 +762,10 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     return h('div', { style: settingsStyle.card },
       line('云端配置', h('div', { style: settingsStyle.note },
         '模型、系统提示词、运行时版本和环境变量保存在云端实例。保存时提交一次云端更新，由云端滚动应用到实例，不需要本机重启。'), true),
+      settings.detailAvailable === false
+        ? line('说明', h('div', { style: settingsStyle.note },
+            settings.detailNote || '云端平台暂时没有返回实例详情，下面显示的是本机记录的配置；环境变量详情暂时不可见。'))
+        : null,
       line('模型', h('input', { style: settingsStyle.input, value: model, disabled: settingsBusy,
         placeholder: '例如 deepseek-v4.1-flash-1017', 'aria-label': '模型名称',
         onChange: event => setModel(String(event?.target?.value ?? '')) })),
