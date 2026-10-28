@@ -19,6 +19,7 @@ export function createAssistantWorkbench({ sidebarRight, slots, panelId = ASSIST
     if (disposed) throw new Error('云电脑工作面板已关闭');
   };
   let releaseSurface, releaseTab;
+  const reveal = () => sidebarRight.openPanelTab(panelId, ASSISTANT_COMPUTER_KIND);
   const api = {
     available, unavailableReason: available ? null : unavailableReason,
     subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
@@ -29,11 +30,14 @@ export function createAssistantWorkbench({ sidebarRight, slots, panelId = ASSIST
       const changed = binding && (binding.scope.agentId !== scope.agentId || binding.scope.botId !== scope.botId);
       if (changed) { releaseSurface(); releaseSurface = sidebarRight.registerPanelSurface(panelId); }
       binding = Object.freeze({ scope: Object.freeze({ ...scope }), request }); emit();
-      api.open();
+      reveal();
     },
     open() {
       requireAvailable();
-      if (binding) sidebarRight.openPanelTab(panelId, ASSISTANT_COMPUTER_KIND);
+      if (!binding) return;
+      reveal();
+      // 用户显式打开云电脑时默认展开原生右侧栏（DSH 负责真正的全屏外观与宽度）。
+      sidebarRight.setPanelExpanded(panelId, true);
     },
     collapse() { requireAvailable(); sidebarRight.setPanelExpanded(panelId, false); },
     dispose() {
