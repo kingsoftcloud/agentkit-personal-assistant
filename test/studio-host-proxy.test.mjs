@@ -101,3 +101,46 @@ test('目录继续使用 __directory__ 只读票据，代理不授予控制', as
   assert.deepEqual(await gateway.request('personal-assistant.bots.list'), { bots: [{ botId: 'default', displayName: '默认助理' }], directoryAvailable: true });
   assert.deepEqual(issued, { agentId: 'ar-studio', botId: '__directory__', mode: 'read' });
 });
+
+test('绑定操作只把公开状态转给页面：发现、凭据恢复与创建都在 Studio 内完成', async () => {
+  const calls = [];
+  const service = {
+    async configuration() { return { configured: false }; },
+    async issueTicket() { throw new Error('not used'); },
+    async status() { return { configured: true, agentId: 'ar-studio', gatewayUrl: 'https://gw.example', reason: '', candidates: [{ agentId: 'ar-studio', name: '我的个人助理', status: 'RUNNING', createdAt: '2026-10-26T06:34:22Z', apiKey: 'never' }] }; },
+    async connect(input) { calls.push(['connect', input]); return { configured: true, agentId: 'ar-studio' }; },
+    async create(input) { calls.push(['create', input]); return { configured: true, agentId: 'ar-studio' }; },
+    async disconnect() { calls.push(['disconnect', {}]); return { configured: false }; },
+  };
+  const gateway = createPersonalAssistantHostGateway({}, { env: {}, fetchImpl: offline, getStudioDesktop: () => service });
+  const status = await gateway.request('personal-assistant.desktop.status');
+  assert.equal(status.configured, true);
+  assert.equal(status.mode, 'studio');
+  assert.equal(status.candidates.length, 1);
+  assert.equal(status.candidates[0].apiKey, undefined);
+  assert.equal(JSON.stringify(status).includes('gw.example'), false);
+  assert.deepEqual(await gateway.request('personal-assistant.desktop.connect', { agentId: 'ar-studio' }), { configured: true, agentId: 'ar-studio', mode: 'studio' });
+  assert.deepEqual(await gateway.request('personal-assistant.desktop.create'), { configured: true, agentId: 'ar-studio', mode: 'studio' });
+  assert.deepEqual(await gateway.request('personal-assistant.desktop.disconnect'), { configured: false, agentId: undefined, mode: 'studio' });
+  assert.deepEqual(calls, [['connect', { agentId: 'ar-studio' }], ['create', {}], ['disconnect', {}]]);
+});
+
+test('没有 Studio 服务时绑定操作明确报错，不会静默退回本地配置', async () => {
+  const gateway = createPersonalAssistantHostGateway({ gatewayUrl: 'https://legacy.example', agentId: 'ar-legacy', apiKey: 'legacy-secret' }, { env: {}, fetchImpl: offline });
+  await assert.rejects(gateway.request('personal-assistant.desktop.status'), { code: 'PERSONAL_ASSISTANT_STANDALONE', status: 409 });
+  await assert.rejects(gateway.request('personal-assistant.desktop.connect', { agentId: '../bad' }), { code: 'PERSONAL_ASSISTANT_AGENT_INVALID' });
+});
+
+test('Studio 绑定错误保留可读原因且不泄漏凭据', async () => {
+  const service = {
+    async configuration() { return { configured: false }; },
+    async issueTicket() { throw new Error('nope'); },
+    async status() { throw Object.assign(new Error('云端暂时无法获取连接凭证'), { status: 503, code: 'ASSISTANT_CREDENTIAL_UNAVAILABLE' }); },
+    async connect() { throw Object.assign(new Error('ak-secret-123 不可用'), { status: 503 }); },
+  };
+  const gateway = createPersonalAssistantHostGateway({}, { env: {}, fetchImpl: offline, getStudioDesktop: () => service });
+  await assert.rejects(gateway.request('personal-assistant.desktop.status'), { status: 503, code: 'ASSISTANT_CREDENTIAL_UNAVAILABLE' });
+  const error = await gateway.request('personal-assistant.desktop.connect').catch(value => value);
+  assert.equal(error.status, 503);
+  assert.equal(error.code, 'PERSONAL_ASSISTANT_BINDING_FAILED');
+});

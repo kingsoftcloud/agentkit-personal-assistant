@@ -32,7 +32,23 @@ const SESSION_OPERATIONS = Object.freeze([
   'personal-assistant.file.upload',
   'personal-assistant.file.download',
 ]);
-const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket', ...SESSION_OPERATIONS]);
+const BINDING_OPERATIONS = Object.freeze([
+  // Studio owns the cloud account, the instance selection and the credential.
+  // These operations never accept a credential from the page: they only drive
+  // discovery, credential recovery and creation inside the Studio Host.
+  'personal-assistant.desktop.status',
+  'personal-assistant.desktop.connect',
+  'personal-assistant.desktop.create',
+  'personal-assistant.desktop.disconnect',
+]);
+const BINDING_METHODS = Object.freeze({
+  'personal-assistant.desktop.status': 'status',
+  'personal-assistant.desktop.connect': 'connect',
+  'personal-assistant.desktop.create': 'create',
+  'personal-assistant.desktop.disconnect': 'disconnect',
+});
+const AGENT_ID = /^ar-[A-Za-z0-9-]{4,120}$/u;
+const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket', ...BINDING_OPERATIONS, ...SESSION_OPERATIONS]);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const safeCloseCode = value => Number.isInteger(value) && value >= 1000 && value <= 4999 ? value : undefined;
@@ -107,10 +123,47 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     issueTicket: (scope, signal) => request('personal-assistant.desktop.ticket', scope, signal),
     WebSocketImpl, ca: trustedCAs(),
   });
+  function publicBindingStatus(value) {
+    if (!plain(value) || typeof value.configured !== 'boolean') throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的绑定状态无效', 502);
+    const reason = typeof value.reason === 'string' ? value.reason.slice(0, 80) : '';
+    const candidates = Array.isArray(value.candidates) ? value.candidates.filter(row => plain(row) && typeof row.agentId === 'string' && AGENT_ID.test(row.agentId))
+      .slice(0, 20).map(row => ({ agentId: row.agentId, name: typeof row.name === 'string' ? row.name.slice(0, 80) : '',
+        status: typeof row.status === 'string' ? row.status.slice(0, 32) : '', createdAt: typeof row.createdAt === 'string' ? row.createdAt.slice(0, 40) : '' })) : [];
+    // The credential never reaches the page; only the public binding shape does.
+    return { configured: value.configured, agentId: value.configured && typeof value.agentId === 'string' ? value.agentId : undefined,
+      mode: 'studio', reason, candidates };
+  }
+  function publicBinding(value) {
+    if (!plain(value) || typeof value.configured !== 'boolean' || (value.configured && (typeof value.agentId !== 'string' || !AGENT_ID.test(value.agentId))))
+      throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的绑定结果无效', 502);
+    return { configured: value.configured, agentId: value.configured ? value.agentId : undefined, mode: 'studio' };
+  }
   async function request(operation, payload = {}, signal) {
     if (!plain(payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求参数格式错误');
     if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
     const current = await binding(signal);
+    const bindingMethod = BINDING_METHODS[operation];
+    if (bindingMethod) {
+      if (payload.agentId !== undefined && operation !== 'personal-assistant.desktop.create') {
+        if (typeof payload.agentId !== 'string' || !AGENT_ID.test(payload.agentId)) throw fail('PERSONAL_ASSISTANT_AGENT_INVALID', '云端实例标识无效');
+      }
+      const studio = current.studio;
+      if (!studio) throw fail('PERSONAL_ASSISTANT_STANDALONE', '独立安装不支持自动发现；请在 Host 配置中连接云端实例', 409);
+      if (typeof studio[bindingMethod] !== 'function') throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', '请更新 Studio 云连接服务', 503);
+      const created = operation === 'personal-assistant.desktop.create';
+      const scoped = created ? AbortSignal.timeout(360_000) : AbortSignal.timeout(15_000);
+      const deadline = signal ? AbortSignal.any([signal, scoped]) : scoped;
+      const input = !created && operation !== 'personal-assistant.desktop.status' && operation !== 'personal-assistant.desktop.disconnect' && payload.agentId
+        ? { agentId: String(payload.agentId) } : {};
+      let value;
+      try { value = await studio[bindingMethod](input, deadline); }
+      catch (error) {
+        const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 503;
+        throw fail(error?.code || 'PERSONAL_ASSISTANT_BINDING_FAILED', String(error?.message || '个人助理连接失败').slice(0, 240), status);
+      }
+      if (bindingMethod === 'status') return publicBindingStatus(value);
+      return publicBinding(value);
+    }
     if (operation === 'personal-assistant.configuration') return {
       configured: current.configured, ...(current.configured ? { agentId: current.agentId } : {}),
       ...(base ? { gatewayUrl: base.origin } : {}),

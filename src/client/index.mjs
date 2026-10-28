@@ -81,6 +81,7 @@ const ui = {
   background: 'var(--dsw-alias-bg-layer-1, #fff)', color: 'var(--dsw-alias-label-primary, #17202c)',
   border: '1px solid var(--dsw-alias-border-default, #d8dee8)',
 };
+const bindingFailure = error => typeof error?.message === 'string' && error.message && !/^(fetch failed|Failed to fetch)$/u.test(error.message) ? error.message.slice(0, 180) : '云电脑连接失败，请稍后重试';
 const failure = error => error?.code === 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' && Number(error?.status) === 409 ? '当前云端版本尚不支持助理列表，请更新云端助理后重试' : '连接暂时不可用，请稍后重试';
 const directoryUnsupported = error => Number(error?.status) === 409 && ['PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED', 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE'].includes(error?.code);
 const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
@@ -101,6 +102,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const [attempt, setAttempt] = useState(0);
   const [fps, setFps] = useState(0);
   const [controlPhase, setControlPhase] = useState('observe');
+  const [binding, setBinding] = useState(null);
+  const [busy, setBusy] = useState('');
   const [clipboardNotice, setClipboardNotice] = useState('');
   const controlRef = useRef(null);
   const clipboardRef = useRef(null), clipboardTimerRef = useRef(null);
@@ -343,13 +346,37 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       };
     } catch (error) { if (current.mounted && generation === current.generation) { setPhase('error'); setNotice(failure(error)); } }
   };
-  const refreshConnection = async signal => {
+  // Studio 负责发现实例、恢复/生成凭证；页面只读取公开状态，绝不接触凭据。
+  const bindingSnapshot = async signal => {
+    if (signal?.aborted) return null;
+    try { const value = await rpc('personal-assistant.desktop.status'); return value && typeof value === 'object' ? value : null; }
+    catch (error) {
+      if (error?.code === 'PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE' || error?.status === 404) return null;
+      return { configured: false, reason: 'unavailable', detail: bindingFailure(error), candidates: [] };
+    }
+  };
+  const bindAssistant = async action => {
+    if (busy) return;
+    setBusy(action);
+    setNotice(action === 'create' ? '正在创建个人助理，可能需要几分钟…' : '正在获取云端连接凭证…');
+    try { await rpc(`personal-assistant.desktop.${action}`); setNotice(''); await refreshConnection(); }
+    catch (error) { setNotice(bindingFailure(error)); setBinding(await bindingSnapshot().catch(() => null)); }
+    finally { setBusy(''); }
+  };
+  const refreshConnection = async (signal, retried = false) => {
     close(false); setPhase('loading'); setNotice(''); setDirectoryError(''); setDirectoryCloseCode(null);
     try {
       const value = await rpc('personal-assistant.configuration');
       if (signal?.aborted || !state.current.mounted) return;
       state.current.config = value; setConfig(value);
-      if (!value.configured) { state.current.bots = []; setBots([]); setBotId(''); setPhase('unconfigured'); return; }
+      if (!value.configured) {
+        const snapshot = await bindingSnapshot(signal);
+        if (signal?.aborted || !state.current.mounted) return;
+        state.current.bots = []; setBots([]); setBotId(''); setBinding(snapshot); setPhase('unconfigured');
+        if (snapshot?.configured && !retried) { await refreshConnection(signal, true); return; }
+        return;
+      }
+      setBinding(null);
       const result = await rpc('personal-assistant.bots.list');
       if (signal?.aborted || !state.current.mounted) return;
       if (result.directoryAvailable !== true) throw Object.assign(new Error('directory unavailable'), { code: 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', status: 409 });
@@ -412,8 +439,17 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const buttonStyle = { ...ui, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', font: 'inherit' };
   const active = ['ready', 'readonly', 'hidden', 'reconnecting', 'dormant', 'resuming'].includes(phase);
   const selectable = bots.length > 0;
-  const emptyTitle = phase === 'unconfigured' ? '开通后，在这里连接你的个人助理' : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法连接云端助理' : '正在检查助理状态';
-  const emptyDetail = phase === 'unconfigured' ? '开通完成后，即可在这里连接专属云电脑。' : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
+  const bindingReason = binding?.reason || '';
+  const candidateCount = Array.isArray(binding?.candidates) ? binding.candidates.length : 0;
+  const bindingTitle = bindingReason === 'needs-create' ? '还没有创建个人助理'
+    : bindingReason === 'credential-unavailable' ? '正在恢复个人助理的连接凭证'
+    : bindingReason === 'unavailable' ? '暂时无法自动连接个人助理' : '个人助理尚未开通';
+  const bindingDetail = bindingReason === 'needs-create' ? '云账号下还没有个人助理实例，创建后即可在这里连接专属云电脑。'
+    : bindingReason === 'credential-unavailable' ? '云端暂时没有返回连接凭证，可以重新获取。'
+    : bindingReason === 'unavailable' ? (binding?.detail || '请检查云端登录状态后重试。')
+    : '开通完成后，即可在这里连接专属云电脑。';
+  const emptyTitle = phase === 'unconfigured' ? bindingTitle : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法连接云端助理' : '正在检查助理状态';
+  const emptyDetail = phase === 'unconfigured' ? bindingDetail : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
   const computerVariant = variant === 'computer' || variant === 'native-tab';
   const stage = h('div', { ref: viewRef, 'data-personal-assistant-desktop-card': computerVariant ? 'true' : undefined, style: {
     position: 'relative', background: 'var(--dsw-alias-bg-layer-2, #f1f3f6)',
@@ -430,7 +466,11 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, padding: 16, textAlign: 'center' } },
       h('h2', { style: { margin: 0, fontSize: 18, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
       h('p', { style: { margin: 0, maxWidth: 380, lineHeight: 1.7, color: 'var(--dsw-alias-label-secondary, #536174)' } }, selectable ? notice || '连接后即可使用云端桌面，关闭面板会释放本次控制。' : emptyDetail),
-      !selectable && phase !== 'loading' ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '检查开通状态') : null) : null,
+      !selectable && phase !== 'loading' ? h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center' } },
+        phase === 'unconfigured' && bindingReason === 'needs-create' ? h('button', { style: buttonStyle, disabled: Boolean(busy), onClick: () => void bindAssistant('create') }, busy === 'create' ? '正在创建…' : '创建个人助理') : null,
+        phase === 'unconfigured' && (bindingReason === 'credential-unavailable' || candidateCount > 0) ? h('button', { style: buttonStyle, disabled: Boolean(busy), onClick: () => void bindAssistant('connect') }, busy === 'connect' ? '正在获取…' : bindingReason === 'credential-unavailable' ? '重新获取连接凭证' : '连接已发现的个人助理') : null,
+        h('button', { style: { ...buttonStyle, background: 'transparent' }, disabled: Boolean(busy), onClick: () => void refreshConnection() }, '检查开通状态'),
+        busy ? h('span', { role: 'status', style: { color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12 } }, '处理中，请稍候…') : null) : null) : null,
     h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !controlRef.current.snapshot.available && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
   const secondaryInk = 'var(--dsw-alias-label-secondary, #536174)';
   const ghostStyle = { ...buttonStyle, background: 'transparent', color: 'inherit', border: ui.border };
