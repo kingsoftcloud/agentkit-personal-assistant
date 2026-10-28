@@ -41,6 +41,11 @@ const BINDING_OPERATIONS = Object.freeze([
   'personal-assistant.desktop.create',
   'personal-assistant.desktop.disconnect',
   'personal-assistant.desktop.destroy',
+  // The Assistant's own reachable settings. The page never talks to the cloud
+  // control plane; Studio validates and submits every change.
+  'personal-assistant.settings.inspect',
+  'personal-assistant.settings.update',
+  'personal-assistant.settings.versions',
 ]);
 const BINDING_METHODS = Object.freeze({
   'personal-assistant.desktop.status': 'status',
@@ -48,6 +53,9 @@ const BINDING_METHODS = Object.freeze({
   'personal-assistant.desktop.create': 'create',
   'personal-assistant.desktop.disconnect': 'disconnect',
   'personal-assistant.desktop.destroy': 'destroy',
+  'personal-assistant.settings.inspect': 'settings',
+  'personal-assistant.settings.update': 'settingsUpdate',
+  'personal-assistant.settings.versions': 'settingsVersions',
 });
 const AGENT_ID = /^ar-[A-Za-z0-9-]{4,120}$/u;
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket', ...BINDING_OPERATIONS, ...SESSION_OPERATIONS]);
@@ -140,6 +148,42 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的绑定结果无效', 502);
     return { configured: value.configured, agentId: value.configured ? value.agentId : undefined, mode: 'studio' };
   }
+  const settingsText = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
+  /** Settings are whitelisted field by field for the same reason tickets are:
+   * the page must never receive anything the Host did not mean to publish. */
+  function publicSettings(value) {
+    if (!plain(value) || typeof value.configured !== 'boolean' || !plain(value.runtime)) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的配置格式无效', 502);
+    const environmentVariables = Array.isArray(value.environmentVariables) ? value.environmentVariables.filter(plain)
+      .filter(row => typeof row.key === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(row.key))
+      .slice(0, 64).map(row => ({ key: row.key, sensitive: row.sensitive === true,
+        value: row.sensitive === true ? '' : settingsText(row.value, 4096) })) : [];
+    return {
+      configured: value.configured,
+      agentId: value.configured && typeof value.agentId === 'string' && AGENT_ID.test(value.agentId) ? value.agentId : undefined,
+      name: settingsText(value.name, 120), description: settingsText(value.description, 300),
+      status: settingsText(value.status, 32), deploymentType: settingsText(value.deploymentType, 40),
+      runtime: { name: settingsText(value.runtime.name, 60), version: settingsText(value.runtime.version, 40),
+        imageDigest: settingsText(value.runtime.imageDigest, 200), updatedAt: settingsText(value.runtime.updatedAt, 40) },
+      model: settingsText(value.model, 120),
+      prompt: typeof value.prompt === 'string' ? value.prompt.slice(0, 8_000) : '',
+      environmentVariables,
+      recordSource: value.recordSource === 'studio' ? 'studio' : 'missing',
+    };
+  }
+  function publicSettingsVersions(value) {
+    if (!plain(value) || !Array.isArray(value.versions)) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的版本列表无效', 502);
+    const versions = value.versions.filter(plain)
+      .filter(row => typeof row.version === 'string' && /^\d+\.\d+\.\d+$/u.test(row.version))
+      .slice(0, 200).map(row => ({ version: row.version, image: settingsText(row.image, 200),
+        capabilities: Array.isArray(row.capabilities) ? row.capabilities.filter(cap => typeof cap === 'string').slice(0, 20) : [] }));
+    return { currentVersion: settingsText(value.currentVersion, 40), versions, catalogAvailable: versions.length > 0 };
+  }
+  function publicSettingsUpdate(value) {
+    if (!plain(value) || value.saved !== true) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 没有确认配置已提交，请稍后重试', 502);
+    return { configured: true, saved: true, agentId: typeof value.agentId === 'string' && AGENT_ID.test(value.agentId) ? value.agentId : undefined,
+      version: settingsText(value.version, 40), status: settingsText(value.status, 32) || 'updating' };
+  }
+
   async function request(operation, payload = {}, signal) {
     if (!plain(payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求参数格式错误');
     if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
@@ -159,12 +203,21 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         // Closing frees a paid cloud resource: never accept an implicit target.
         if (typeof confirm !== 'string' || !AGENT_ID.test(confirm)) throw fail('PERSONAL_ASSISTANT_AGENT_INVALID', '关闭个人助理需要再次确认实例标识');
       }
-      const scoped = created ? AbortSignal.timeout(360_000) : closing ? AbortSignal.timeout(120_000) : AbortSignal.timeout(15_000);
+      const settingsWrite = operation === 'personal-assistant.settings.update';
+      const settingsRead = operation === 'personal-assistant.settings.inspect' || operation === 'personal-assistant.settings.versions';
+      const scoped = created ? AbortSignal.timeout(360_000) : closing ? AbortSignal.timeout(120_000)
+        : settingsWrite ? AbortSignal.timeout(120_000) : settingsRead ? AbortSignal.timeout(30_000) : AbortSignal.timeout(15_000);
       const deadline = signal ? AbortSignal.any([signal, scoped]) : scoped;
       const input = closing
         ? { agentId: current.agentId, confirmAgentId: String(payload.confirmAgentId) }
-        : !created && operation !== 'personal-assistant.desktop.status' && operation !== 'personal-assistant.desktop.disconnect' && payload.agentId
-          ? { agentId: String(payload.agentId) } : {};
+        : settingsWrite
+          ? { model: payload.model, prompt: payload.prompt, runtimeVersion: payload.runtimeVersion,
+              environmentVariables: payload.environmentVariables, deleteKeys: payload.deleteKeys }
+          : operation === 'personal-assistant.settings.versions'
+            ? { currentVersion: payload.currentVersion }
+            : settingsRead ? {}
+              : !created && operation !== 'personal-assistant.desktop.status' && operation !== 'personal-assistant.desktop.disconnect' && payload.agentId
+                ? { agentId: String(payload.agentId) } : {};
       let value;
       try { value = await studio[bindingMethod](input, deadline); }
       catch (error) {
@@ -173,6 +226,9 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       }
       if (bindingMethod === 'status') return publicBindingStatus(value);
       if (bindingMethod === 'destroy') return { configured: false, mode: 'studio', ...(value?.closed === true ? { closed: true } : {}) };
+      if (bindingMethod === 'settings') return publicSettings(value);
+      if (bindingMethod === 'settingsVersions') return publicSettingsVersions(value);
+      if (bindingMethod === 'settingsUpdate') return publicSettingsUpdate(value);
       return publicBinding(value);
     }
     if (operation === 'personal-assistant.configuration') return {

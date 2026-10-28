@@ -582,6 +582,16 @@ const settingsStyle = {
   dangerDisabled: { ...ui, borderRadius: 8, padding: '6px 11px', cursor: 'not-allowed', font: 'inherit', fontSize: 13,
     color: '#fff', border: '1px solid color-mix(in srgb, #b42318 35%, transparent)', background: 'color-mix(in srgb, #b42318 35%, transparent)' },
   success: { color: '#067647', fontSize: 12, lineHeight: 1.7 },
+  input: { ...ui, border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 8, padding: '6px 9px',
+    font: 'inherit', fontSize: 12, width: '100%', maxWidth: 360, boxSizing: 'border-box' },
+  textarea: { ...ui, border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 8, padding: '6px 9px',
+    font: 'inherit', fontSize: 12, width: '100%', minHeight: 76, resize: 'vertical', boxSizing: 'border-box' },
+  envRow: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' },
+  envKey: { ...ui, border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 8, padding: '5px 8px',
+    font: 'inherit', fontSize: 12, width: 190, boxSizing: 'border-box' },
+  envValue: { ...ui, border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 8, padding: '5px 8px',
+    font: 'inherit', fontSize: 12, width: 220, boxSizing: 'border-box' },
+  tinyButton: { ...ui, borderRadius: 8, padding: '4px 8px', cursor: 'pointer', font: 'inherit', fontSize: 12 },
 };
 
 /** 设置页里的「个人助理」一节：状态、连接自检、能力与记忆位置。 */
@@ -598,6 +608,16 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
   const [confirmText, setConfirmText] = useState('');
   const [closing, setClosing] = useState(false);
   const [closedNotice, setClosedNotice] = useState('');
+  const [settings, setSettings] = useState(null);
+  const [versions, setVersions] = useState(null);
+  const [model, setModel] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [version, setVersion] = useState('');
+  const [envRows, setEnvRows] = useState([]);
+  const [envDeletes, setEnvDeletes] = useState([]);
+  const [settingsError, setSettingsError] = useState('');
+  const [settingsNotice, setSettingsNotice] = useState('');
+  const [settingsBusy, setSettingsBusy] = useState(false);
 
   const check = useCallback(async () => {
     setChecking(true); setError('');
@@ -608,7 +628,25 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       if (current?.configured) {
         const directory = await request('personal-assistant.bots.list');
         setBots(Array.isArray(directory?.bots) ? directory.bots : []);
-      } else { setBots([]); }
+        try {
+          const snapshot = await request('personal-assistant.settings.inspect');
+          setSettings(snapshot);
+          setModel(snapshot?.model || '');
+          setPrompt(snapshot?.prompt || '');
+          setVersion(snapshot?.runtime?.version || '');
+          setEnvRows((snapshot?.environmentVariables || []).map(row => ({ ...row, saved: true, dirty: false })));
+          setEnvDeletes([]);
+          setSettingsError('');
+          const catalog = await request('personal-assistant.settings.versions',
+            { currentVersion: snapshot?.runtime?.version || '' }).catch(reason => {
+              setSettingsError(reason?.message || '暂时读不到可升级的版本'); return null;
+            });
+          setVersions(catalog);
+        } catch (reason) {
+          setSettings(null); setVersions(null);
+          setSettingsError(reason?.message || '读取云端配置失败');
+        }
+      } else { setBots([]); setSettings(null); setVersions(null); }
       setCheckedAt(`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · ${Date.now() - started} ms`);
     } catch (reason) {
       setError(reason?.message || '连接检查失败');
@@ -633,6 +671,40 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     } finally { setClosing(false); }
   }, [agentId, canConfirm, request]);
 
+  const updateEnvRow = (index, patch) => setEnvRows(rows => rows.map((row, at) => at === index ? { ...row, ...patch, dirty: true } : row));
+  const addEnvRow = () => setEnvRows(rows => [...rows, { key: '', value: '', sensitive: false, saved: false, dirty: true }]);
+  const removeEnvRow = index => {
+    const row = envRows[index];
+    if (!row) return;
+    setEnvRows(rows => rows.filter((_, at) => at !== index));
+    if (row.saved && row.key) setEnvDeletes(keys => keys.includes(row.key) ? keys : [...keys, row.key]);
+  };
+  const editable = settings?.recordSource === 'studio';
+  const saveSettings = useCallback(async () => {
+    if (!editable || settingsBusy) return;
+    setSettingsBusy(true); setSettingsError(''); setSettingsNotice('');
+    try {
+      const environmentVariables = envRows.filter(row => row.dirty === true || row.saved !== true)
+        .map(row => ({ key: String(row.key || '').trim(), value: String(row.value || ''), sensitive: row.sensitive === true }));
+      await request('personal-assistant.settings.update', {
+        model: model.trim(), prompt, runtimeVersion: version,
+        environmentVariables, deleteKeys: envDeletes,
+      });
+      setSettingsNotice(`已提交云端更新（版本 ${version}），个人助理正在应用新配置，通常 1–2 分钟完成，期间云电脑会短暂重连。`);
+      setEnvDeletes([]);
+      try {
+        const snapshot = await request('personal-assistant.settings.inspect');
+        setSettings(snapshot);
+        setModel(snapshot?.model || '');
+        setPrompt(snapshot?.prompt || '');
+        setVersion(snapshot?.runtime?.version || version);
+        setEnvRows((snapshot?.environmentVariables || []).map(row => ({ ...row, saved: true, dirty: false })));
+      } catch { /* the submit already succeeded; the next check refreshes */ }
+    } catch (reason) {
+      setSettingsError(reason?.message || '保存配置失败，请稍后重试');
+    } finally { setSettingsBusy(false); }
+  }, [editable, envDeletes, envRows, model, prompt, request, settingsBusy, version]);
+
   useEffect(() => { void check(); }, [check]);
 
   const configured = config?.configured === true;
@@ -640,6 +712,65 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
   const statusStyle = { ...settingsStyle.badge, ...(config === null ? settingsStyle.badgeIdle : configured ? settingsStyle.badgeOk : settingsStyle.badgeIdle) };
   const line = (label, value, first = false) => h('div', { style: first ? settingsStyle.rowFirst : settingsStyle.row },
     h('div', { style: settingsStyle.label }, label), h('div', { style: settingsStyle.value }, value));
+
+  const envSensitiveStyle = { ...settingsStyle.note, display: 'inline-flex', gap: 4, alignItems: 'center' };
+  const envActionsStyle = { ...settingsStyle.actions, marginTop: 6 };
+  const saveAreaStyle = { display: 'flex', flexDirection: 'column', gap: 8 };
+  const renderSettings = () => {
+    if (!settings) {
+      return h('div', { style: settingsStyle.card },
+        line('云端配置', h('div', { style: settingsStyle.note },
+          settingsBusy ? '读取中…' : (settingsError || '暂时读不到云端配置；请点下方“检查连接”重试')), true));
+    }
+    if (settings.recordSource !== 'studio') {
+      return h('div', { style: settingsStyle.card },
+        line('云端配置', h('div', { style: settingsStyle.note },
+          '这个个人助理是用旧版 Studio 创建的，本机没有记录它的配置清单，暂时不能在线修改。可以关闭后重新创建；等云端平台提供读取接口后即可直接编辑。'), true));
+    }
+    const versionControl = versions && versions.catalogAvailable
+      ? h('select', { style: settingsStyle.input, value: version, disabled: settingsBusy, 'aria-label': '运行时版本',
+          onChange: event => setVersion(String(event?.target?.value ?? '')) },
+          versions.versions.map(item => h('option', { key: item.version, value: item.version },
+            item.version === settings.runtime?.version ? `${item.version}（当前）` : item.version)))
+      : h('div', { style: settingsStyle.note },
+          `${settings.runtime?.version || version || '未知版本'} · 云端还没有发布可升级版本`);
+    const envEditor = h('div', null,
+      envRows.length
+        ? envRows.map((row, index) => h('div', { key: `env-${index}`, style: settingsStyle.envRow },
+            h('input', { style: settingsStyle.envKey, value: row.key, placeholder: 'KEY', 'aria-label': '环境变量名',
+              disabled: settingsBusy || row.saved === true,
+              onChange: event => updateEnvRow(index, { key: String(event?.target?.value ?? '') }) }),
+            h('input', { style: settingsStyle.envValue, value: row.value, 'aria-label': '环境变量值',
+              type: row.sensitive === true ? 'password' : 'text', disabled: settingsBusy,
+              placeholder: row.saved === true && row.sensitive === true ? '已保存（留空不修改）' : 'VALUE',
+              onChange: event => updateEnvRow(index, { value: String(event?.target?.value ?? '') }) }),
+            h('label', { style: envSensitiveStyle },
+              h('input', { type: 'checkbox', checked: row.sensitive === true, disabled: settingsBusy,
+                onChange: event => updateEnvRow(index, { sensitive: event?.target?.checked === true }) }), '敏感'),
+            h('button', { style: settingsStyle.tinyButton, disabled: settingsBusy, onClick: () => removeEnvRow(index) }, '删除')))
+        : h('div', { style: settingsStyle.note }, '还没有配置环境变量'),
+      h('div', { style: envActionsStyle },
+        h('button', { style: settingsStyle.tinyButton, disabled: settingsBusy, onClick: addEnvRow }, '添加变量'),
+        h('span', { style: settingsStyle.note }, '已保存的敏感值不会回显，留空表示不修改；删除后保存生效')));
+    const saveArea = h('div', { style: saveAreaStyle },
+      settingsNotice ? h('div', { style: settingsStyle.success }, settingsNotice) : null,
+      settingsError ? h('div', { style: { ...settingsStyle.note, color: '#b42318' } }, settingsError) : null,
+      h('div', { style: settingsStyle.actions },
+        h('button', { style: settingsStyle.button, disabled: settingsBusy, onClick: () => void saveSettings() },
+          settingsBusy ? '正在保存…' : '保存配置'),
+        h('span', { style: settingsStyle.note }, '保存会提交一次云端更新，由云端滚动应用')));
+    return h('div', { style: settingsStyle.card },
+      line('云端配置', h('div', { style: settingsStyle.note },
+        '模型、系统提示词、运行时版本和环境变量保存在云端实例。保存时提交一次云端更新，由云端滚动应用到实例，不需要本机重启。'), true),
+      line('模型', h('input', { style: settingsStyle.input, value: model, disabled: settingsBusy,
+        placeholder: '例如 deepseek-v4.1-flash-1017', 'aria-label': '模型名称',
+        onChange: event => setModel(String(event?.target?.value ?? '')) })),
+      line('系统提示词', h('textarea', { style: settingsStyle.textarea, value: prompt, disabled: settingsBusy,
+        'aria-label': '系统提示词', onChange: event => setPrompt(String(event?.target?.value ?? '')) })),
+      line('运行时版本', versionControl),
+      line('环境变量', envEditor),
+      line('保存', saveArea));
+  };
 
   return h('section', { 'data-personal-assistant-settings': 'true', style: settingsStyle.page },
     h('div', null,
@@ -657,6 +788,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
         h('div', null, '默认开启：云端命令执行、云端浏览器'),
         h('div', { style: settingsStyle.note }, '都跑在隔离工作区：读不到本机文件与凭证，不能访问内网与本机地址；敏感操作会先请你确认'))),
       line('插件版本', h('span', { style: settingsStyle.note }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`))),
+    configured ? renderSettings() : null,
     configured || closedNotice ? h('div', { style: settingsStyle.card },
       line('关闭个人助理', h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
         h('div', { style: settingsStyle.note }, '关闭会删除云端实例（云电脑 Pod）和云端助理数据，并释放关联的云资源订单；本机绑定也会一并清除，之后可重新创建。'),

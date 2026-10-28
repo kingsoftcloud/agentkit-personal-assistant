@@ -164,3 +164,41 @@ test('关闭个人助理必须由页面确认实例标识，且只关闭当前�
   assert.equal(seen[0].signal instanceof AbortSignal, true);
   assert.equal(JSON.stringify(closed).includes('must-stay-in-studio'), false);
 });
+
+test('设置读写经 Studio Host 转发，页面参数被收敛且凭据不出 Host', async () => {
+  const seen = [];
+  const service = {
+    configuration: async () => status('ar-studio'),
+    issueTicket: async () => { throw new Error('unused'); },
+    settings: async input => { seen.push(['settings', input]); return { configured: true, agentId: 'ar-studio', recordSource: 'studio',
+      model: 'deepseek-v4.1-flash-1017', prompt: 'p', runtime: { name: 'personal-assistant', version: '0.1.37' },
+      environmentVariables: [{ key: 'OPENAI_API_KEY', value: '', sensitive: true }] }; },
+    settingsUpdate: async input => { seen.push(['update', input]); return { configured: true, agentId: 'ar-studio', saved: true, version: '0.1.37' }; },
+    settingsVersions: async input => { seen.push(['versions', input]); return { currentVersion: '0.1.37', versions: [], catalogAvailable: false }; },
+  };
+  const gateway = createPersonalAssistantHostGateway({}, { env: {}, fetchImpl: offline, getStudioDesktop: () => service });
+  const inspected = await gateway.request('personal-assistant.settings.inspect', {});
+  assert.equal(inspected.model, 'deepseek-v4.1-flash-1017');
+  assert.deepEqual(seen[0], ['settings', {}]);
+  const updated = await gateway.request('personal-assistant.settings.update', {
+    model: 'deepseek-v4.1-flash-1017', prompt: '新提示词', runtimeVersion: '0.1.37',
+    environmentVariables: [{ key: 'FLAG', value: '1' }], deleteKeys: ['OLD'],
+    apiKey: 'page-secret', gatewayUrl: 'https://evil.example',
+  });
+  assert.equal(updated.saved, true);
+  assert.deepEqual(seen[1], ['update', { model: 'deepseek-v4.1-flash-1017', prompt: '新提示词', runtimeVersion: '0.1.37',
+    environmentVariables: [{ key: 'FLAG', value: '1' }], deleteKeys: ['OLD'] }]);
+  const versions = await gateway.request('personal-assistant.settings.versions', { currentVersion: '0.1.37', agentId: 'ar-studio' });
+  assert.equal(versions.currentVersion, '0.1.37');
+  assert.deepEqual(seen[2], ['versions', { currentVersion: '0.1.37' }]);
+});
+
+test('设置写入的云端拒绝保留可读错误码，不把原始异常暴露为成功', async () => {
+  const gateway = createPersonalAssistantHostGateway({}, { env: {}, fetchImpl: offline, getStudioDesktop: () => ({
+    configuration: async () => status('ar-studio'),
+    issueTicket: async () => { throw new Error('unused'); },
+    settingsUpdate: async () => { throw Object.assign(new Error('当前云端平台版本还不支持个人助理的配置更新'), { code: 'ASSISTANT_SETTINGS_UNSUPPORTED', status: 409 }); },
+  }) });
+  await assert.rejects(() => gateway.request('personal-assistant.settings.update', { model: 'm' }),
+    error => error.code === 'ASSISTANT_SETTINGS_UNSUPPORTED' && error.status === 409 && /不支持/u.test(error.message));
+});
