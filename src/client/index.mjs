@@ -571,6 +571,17 @@ const settingsStyle = {
   badgeOk: { background: 'color-mix(in srgb, #067647 12%, transparent)', color: '#067647' },
   badgeIdle: { background: 'color-mix(in srgb, #946200 14%, transparent)', color: '#946200' },
   badgeError: { background: 'color-mix(in srgb, #b42318 12%, transparent)', color: '#b42318' },
+  dangerButton: { ...ui, borderRadius: 8, padding: '6px 11px', cursor: 'pointer', font: 'inherit', fontSize: 13,
+    color: '#b42318', border: '1px solid color-mix(in srgb, #b42318 35%, transparent)', background: 'transparent' },
+  confirmBox: { border: '1px solid color-mix(in srgb, #b42318 30%, transparent)', borderRadius: 12, padding: '12px 14px',
+    display: 'flex', flexDirection: 'column', gap: 10, background: 'color-mix(in srgb, #b42318 4%, transparent)' },
+  dangerInput: { ...ui, border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 8, padding: '6px 9px',
+    font: 'inherit', fontSize: 12, width: '100%', maxWidth: 360, boxSizing: 'border-box' },
+  danger: { ...ui, borderRadius: 8, padding: '6px 11px', cursor: 'pointer', font: 'inherit', fontSize: 13,
+    color: '#fff', border: '1px solid #b42318', background: '#b42318' },
+  dangerDisabled: { ...ui, borderRadius: 8, padding: '6px 11px', cursor: 'not-allowed', font: 'inherit', fontSize: 13,
+    color: '#fff', border: '1px solid color-mix(in srgb, #b42318 35%, transparent)', background: 'color-mix(in srgb, #b42318 35%, transparent)' },
+  success: { color: '#067647', fontSize: 12, lineHeight: 1.7 },
 };
 
 /** 设置页里的「个人助理」一节：状态、连接自检、能力与记忆位置。 */
@@ -583,6 +594,10 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
   const [error, setError] = useState('');
   const [checking, setChecking] = useState(false);
   const [checkedAt, setCheckedAt] = useState('');
+  const [confirming, setConfirming] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
+  const [closing, setClosing] = useState(false);
+  const [closedNotice, setClosedNotice] = useState('');
 
   const check = useCallback(async () => {
     setChecking(true); setError('');
@@ -600,6 +615,23 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       setCheckedAt(`${new Date().toLocaleTimeString('zh-CN', { hour12: false })} · 失败`);
     } finally { setChecking(false); }
   }, [request]);
+
+  const agentId = config?.agentId || '';
+  const canConfirm = Boolean(agentId) && confirmText.trim() === agentId;
+  const closeAssistant = useCallback(async () => {
+    if (!canConfirm) return;
+    setClosing(true); setError('');
+    try {
+      await request('personal-assistant.desktop.destroy', { confirmAgentId: agentId });
+      setConfirming(false); setConfirmText('');
+      setClosedNotice('个人助理已关闭：云端实例已删除，关联的云资源订单正在释放，本机绑定已清除。');
+      setConfig({ configured: false }); setBots([]);
+      setCheckedAt('');
+    } catch (reason) {
+      const message = String(reason?.message || '');
+      setError(/更新 Studio|云连接服务/iu.test(message) ? '当前 Studio 版本还不支持关闭个人助理，请更新 Studio 后重试。' : (message || '关闭个人助理失败，请稍后重试'));
+    } finally { setClosing(false); }
+  }, [agentId, canConfirm, request]);
 
   useEffect(() => { void check(); }, [check]);
 
@@ -625,6 +657,25 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
         h('div', null, '默认开启：云端命令执行、云端浏览器'),
         h('div', { style: settingsStyle.note }, '都跑在隔离工作区：读不到本机文件与凭证，不能访问内网与本机地址；敏感操作会先请你确认'))),
       line('插件版本', h('span', { style: settingsStyle.note }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`))),
+    configured || closedNotice ? h('div', { style: settingsStyle.card },
+      line('关闭个人助理', h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+        h('div', { style: settingsStyle.note }, '关闭会删除云端实例（云电脑 Pod）和云端助理数据，并释放关联的云资源订单；本机绑定也会一并清除，之后可重新创建。'),
+        closedNotice ? h('div', { style: settingsStyle.success }, closedNotice) : null,
+        confirming
+          ? h('div', { style: settingsStyle.confirmBox },
+            h('div', { style: { ...settingsStyle.note, color: '#b42318' } }, '此操作不可撤销。请输入上方「云端实例」的标识以确认关闭：'),
+            h('input', {
+              style: settingsStyle.dangerInput, value: confirmText, placeholder: agentId || 'ar-…',
+              'aria-label': '输入云端实例标识以确认关闭', disabled: closing,
+              onChange: event => setConfirmText(String(event?.target?.value ?? '')),
+            }),
+            h('div', { style: settingsStyle.actions },
+              h('button', { style: canConfirm && !closing ? settingsStyle.danger : settingsStyle.dangerDisabled, disabled: !canConfirm || closing, onClick: () => void closeAssistant() },
+                closing ? '正在关闭…' : '确认关闭个人助理'),
+              h('button', { style: settingsStyle.button, disabled: closing, onClick: () => { setConfirming(false); setConfirmText(''); } }, '取消')))
+          : h('div', { style: settingsStyle.actions },
+            h('button', { style: settingsStyle.dangerButton, disabled: !configured || closing, onClick: () => { setConfirming(true); setConfirmText(''); setClosedNotice(''); } }, '关闭个人助理'),
+            h('span', { style: settingsStyle.note }, configured ? '需要输入实例标识二次确认' : '当前没有已开通的个人助理'))), true)) : null,
     h('div', { style: settingsStyle.actions },
       h('button', { style: settingsStyle.button, disabled: checking, onClick: () => void check() }, checking ? '正在检查…' : '检查连接'),
       h('span', { style: settingsStyle.note }, '检查会读取开通状态并拉取一次助理列表，不会启动云电脑')));

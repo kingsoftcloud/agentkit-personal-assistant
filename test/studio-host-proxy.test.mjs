@@ -144,3 +144,23 @@ test('Studio 绑定错误保留可读原因且不泄漏凭据', async () => {
   assert.equal(error.status, 503);
   assert.equal(error.code, 'PERSONAL_ASSISTANT_BINDING_FAILED');
 });
+
+
+test('关闭个人助理必须由页面确认实例标识，且只关闭当前绑定', async () => {
+  const seen = [];
+  const gateway = createPersonalAssistantHostGateway({}, { env: {}, fetchImpl: offline,
+    getStudioDesktop: () => ({
+      configuration: async () => status(),
+      issueTicket: async input => grant(input),
+      destroy: async (input, signal) => { seen.push({ input, signal }); return { configured: false, agentId: input.agentId, closed: true }; },
+    }),
+  });
+  await assert.rejects(gateway.request('personal-assistant.desktop.destroy'), { code: 'PERSONAL_ASSISTANT_AGENT_INVALID' });
+  await assert.rejects(gateway.request('personal-assistant.desktop.destroy', { confirmAgentId: 'bad id' }), { code: 'PERSONAL_ASSISTANT_AGENT_INVALID' });
+  const closed = await gateway.request('personal-assistant.desktop.destroy', { confirmAgentId: 'ar-studio' });
+  assert.deepEqual(closed, { configured: false, mode: 'studio', closed: true });
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0].input, { agentId: 'ar-studio', confirmAgentId: 'ar-studio' });
+  assert.equal(seen[0].signal instanceof AbortSignal, true);
+  assert.equal(JSON.stringify(closed).includes('must-stay-in-studio'), false);
+});

@@ -40,12 +40,14 @@ const BINDING_OPERATIONS = Object.freeze([
   'personal-assistant.desktop.connect',
   'personal-assistant.desktop.create',
   'personal-assistant.desktop.disconnect',
+  'personal-assistant.desktop.destroy',
 ]);
 const BINDING_METHODS = Object.freeze({
   'personal-assistant.desktop.status': 'status',
   'personal-assistant.desktop.connect': 'connect',
   'personal-assistant.desktop.create': 'create',
   'personal-assistant.desktop.disconnect': 'disconnect',
+  'personal-assistant.desktop.destroy': 'destroy',
 });
 const AGENT_ID = /^ar-[A-Za-z0-9-]{4,120}$/u;
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket', ...BINDING_OPERATIONS, ...SESSION_OPERATIONS]);
@@ -151,10 +153,18 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       if (!studio) throw fail('PERSONAL_ASSISTANT_STANDALONE', '独立安装不支持自动发现；请在 Host 配置中连接云端实例', 409);
       if (typeof studio[bindingMethod] !== 'function') throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', '请更新 Studio 云连接服务', 503);
       const created = operation === 'personal-assistant.desktop.create';
-      const scoped = created ? AbortSignal.timeout(360_000) : AbortSignal.timeout(15_000);
+      const closing = operation === 'personal-assistant.desktop.destroy';
+      if (closing) {
+        const confirm = payload.confirmAgentId;
+        // Closing frees a paid cloud resource: never accept an implicit target.
+        if (typeof confirm !== 'string' || !AGENT_ID.test(confirm)) throw fail('PERSONAL_ASSISTANT_AGENT_INVALID', '关闭个人助理需要再次确认实例标识');
+      }
+      const scoped = created ? AbortSignal.timeout(360_000) : closing ? AbortSignal.timeout(120_000) : AbortSignal.timeout(15_000);
       const deadline = signal ? AbortSignal.any([signal, scoped]) : scoped;
-      const input = !created && operation !== 'personal-assistant.desktop.status' && operation !== 'personal-assistant.desktop.disconnect' && payload.agentId
-        ? { agentId: String(payload.agentId) } : {};
+      const input = closing
+        ? { agentId: current.agentId, confirmAgentId: String(payload.confirmAgentId) }
+        : !created && operation !== 'personal-assistant.desktop.status' && operation !== 'personal-assistant.desktop.disconnect' && payload.agentId
+          ? { agentId: String(payload.agentId) } : {};
       let value;
       try { value = await studio[bindingMethod](input, deadline); }
       catch (error) {
@@ -162,6 +172,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         throw fail(error?.code || 'PERSONAL_ASSISTANT_BINDING_FAILED', String(error?.message || '个人助理连接失败').slice(0, 240), status);
       }
       if (bindingMethod === 'status') return publicBindingStatus(value);
+      if (bindingMethod === 'destroy') return { configured: false, mode: 'studio', ...(value?.closed === true ? { closed: true } : {}) };
       return publicBinding(value);
     }
     if (operation === 'personal-assistant.configuration') return {
