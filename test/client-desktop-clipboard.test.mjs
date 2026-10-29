@@ -10,13 +10,11 @@ import {
   clipboardTextOf,
   copyCloudClipboard,
   createClipboardChannel,
-  isControlError,
   isCopyShortcut,
   isPasteShortcut,
   pasteShortcutEvents,
   pasteToCloud,
   readLocalClipboard,
-  withDesktopControl,
   writeLocalClipboard,
 } from '../src/client/components/desktop-clipboard.mjs';
 
@@ -241,111 +239,4 @@ test('⌘C / Ctrl+C 只处理组合键，裸 c、Shift、输入法组合都不�
   assert.equal(isCopyShortcut({ key: 'c', ctrlKey: true, shiftKey: true }), false);
   assert.equal(isCopyShortcut({ key: 'c', ctrlKey: true, isComposing: true }), false);
   assert.equal(isCopyShortcut({ key: 'v', ctrlKey: true }), false);
-});
-
-test('旁观态先接管云电脑：available 时 acquire 并等待控制就绪', async () => {
-  const calls = [];
-  const result = await withDesktopControl({
-    snapshot: { phase: 'observe', readOnly: true, available: true },
-    acquire: () => { calls.push('acquire'); },
-    waitForControl: async () => { calls.push('wait'); return true; },
-    notify: message => calls.push(['notify', message]),
-  });
-  assert.deepEqual(result, { ok: true, acquired: true });
-  assert.deepEqual(calls, ['acquire', 'wait']);
-});
-
-test('已持有控制权时不再重复接管', async () => {
-  let acquired = 0;
-  const result = await withDesktopControl({ snapshot: { phase: 'controlling', readOnly: false, available: true }, acquire: () => { acquired += 1; }, waitForControl: async () => true });
-  assert.deepEqual(result, { ok: true, acquired: false });
-  assert.equal(acquired, 0);
-});
-
-test('不可接管时明确提示先点画面，不发注定失败的请求', async () => {
-  const messages = [];
-  let acquired = 0;
-  const result = await withDesktopControl({
-    snapshot: { phase: 'observe', readOnly: true, available: false },
-    acquire: () => { acquired += 1; },
-    waitForControl: async () => true,
-    notify: message => messages.push(message),
-  });
-  assert.deepEqual(result, { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' });
-  assert.equal(acquired, 0);
-  assert.deepEqual(messages, ['需要先点画面接管云电脑，才能读写云端剪贴板']);
-});
-
-test('接管等不到控制就绪就给超时提示，不假装成功', async () => {
-  const messages = [];
-  const result = await withDesktopControl({ snapshot: { phase: 'observe', readOnly: true, available: true }, acquire: () => {}, waitForControl: async () => false, notify: message => messages.push(message) });
-  assert.deepEqual(result, { ok: false, code: 'CLIPBOARD_CONTROL_TIMEOUT' });
-  assert.deepEqual(messages, ['正在接管云电脑，请稍候再试']);
-});
-
-test('控制类错误判定：错误码或 409 都算', () => {
-  for (const code of ['COMPUTER_LEASE_REQUIRED', 'DESKTOP_READ_ONLY', 'DESKTOP_CONTROL_EPOCH_CHANGED', 'DESKTOP_CONTROL_GRANT_REQUIRED']) {
-    assert.equal(isControlError({ code }), true, code);
-  }
-  assert.equal(isControlError({ status: 409 }), true);
-  assert.equal(isControlError({ code: 'CLIPBOARD_TIMEOUT' }), false);
-  assert.equal(isControlError({ status: 500 }), false);
-  assert.equal(isControlError(undefined), false);
-});
-
-test('粘贴先确保控制权再写云端；409 时接管并重试一次', async () => {
-  const calls = [];
-  let attempts = 0;
-  const result = await pasteToCloud({
-    readLocal: async () => '视图切换前的文字',
-    ensureControl: async () => { calls.push('ensure'); return { ok: true }; },
-    writeCloud: async text => {
-      attempts += 1;
-      calls.push(['writeCloud', attempts, text]);
-      if (attempts === 1) throw Object.assign(new Error('控制权已变更'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED' });
-      return { written: true };
-    },
-    sendKeys: events => { calls.push(['sendKeys', events.length]); return true; },
-    notify: message => calls.push(['notify', message]),
-  });
-  assert.deepEqual(result, { ok: true });
-  assert.deepEqual(calls, [
-    'ensure',
-    ['writeCloud', 1, '视图切换前的文字'],
-    'ensure',
-    ['writeCloud', 2, '视图切换前的文字'],
-    ['sendKeys', 4],
-    ['notify', '已粘贴到云电脑'],
-  ]);
-});
-
-test('接管不成功时不写云端剪贴板，也不合成按键', async () => {
-  const calls = [];
-  const result = await pasteToCloud({
-    readLocal: async () => 'x',
-    ensureControl: async () => ({ ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' }),
-    writeCloud: async () => { calls.push('writeCloud'); },
-    sendKeys: () => { calls.push('sendKeys'); return true; },
-    notify: () => {},
-  });
-  assert.deepEqual(result, { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' });
-  assert.deepEqual(calls, []);
-});
-
-test('复制也先确保控制权；409 时接管后重试读云端', async () => {
-  const calls = [];
-  let reads = 0;
-  const result = await copyCloudClipboard({
-    ensureControl: async () => { calls.push('ensure'); return { ok: true }; },
-    readCloud: async () => {
-      reads += 1;
-      calls.push(['readCloud', reads]);
-      if (reads === 1) throw Object.assign(new Error('需要先接管'), { status: 409 });
-      return { text: '云端文字' };
-    },
-    writeLocal: async text => { calls.push(['writeLocal', text]); },
-    notify: message => calls.push(['notify', message]),
-  });
-  assert.deepEqual(result, { ok: true, text: '云端文字' });
-  assert.deepEqual(calls, ['ensure', ['readCloud', 1], 'ensure', ['readCloud', 2], ['writeLocal', '云端文字'], ['notify', '已复制到本地']]);
 });

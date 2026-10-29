@@ -69,7 +69,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard, withDesktopControl, writeLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -262,25 +262,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
     clipboardTimerRef.current = setTimeout(() => { if (state.current.mounted) setClipboardNotice(''); }, 4000);
   };
-  // 剪贴板通道在 handoff 会话里跟 input 一样要求「已持有控制租约」。面板默认是
-  // 旁观态（助理正在使用），旁观点 ⌘C/⌘V 必须先接管，否则云端一律 409。
-  const waitForControl = (timeoutMs = 3000, stepMs = 25) => new Promise(resolve => {
-    const startedAt = Date.now();
-    const check = () => {
-      const current = state.current;
-      if (!current.mounted) return resolve(false);
-      if (controlRef.current?.snapshot?.phase === 'controlling' || current.readOnly === false) return resolve(true);
-      if (Date.now() - startedAt >= timeoutMs) return resolve(false);
-      setTimeout(check, stepMs);
-    };
-    check();
-  });
-  const ensureClipboardControl = () => withDesktopControl({
-    snapshot: controlRef.current?.snapshot || {},
-    acquire: () => controlRef.current.acquire(),
-    waitForControl: () => waitForControl(),
-    notify: clipboardNotify,
-  });
   // 合成按键走现有桌面输入通道：只读旁观时 input() 会拒发并返回 false，由粘贴流程提示先接管。
   const sendDesktopKeys = events => {
     let sent = false;
@@ -303,7 +284,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         await new Promise(resolve => setTimeout(resolve, 150));
       } finally { state.current.pressed.delete('_copyShortcut'); }
     }
-    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify, ensureControl: ensureClipboardControl });
+    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
   };
   // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
   // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。
@@ -324,7 +305,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     writeCloud: text => clipboardRef.current.write(text),
     sendKeys: sendDesktopKeys,
     notify: clipboardNotify,
-    ensureControl: ensureClipboardControl,
   });
   // paste 事件兜底：macOS 上 Electron 的编辑菜单可能先把 ⌘V 吃掉，但浏览器仍会把
   // 剪贴板内容作为 paste 事件交给聚焦的输入框，这里直接把文本写进云电脑剪贴板。
@@ -333,7 +313,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     writeCloud: value => clipboardRef.current.write(value),
     sendKeys: sendDesktopKeys,
     notify: clipboardNotify,
-    ensureControl: ensureClipboardControl,
   });
   const drawLatest = async () => {
     const current = state.current;

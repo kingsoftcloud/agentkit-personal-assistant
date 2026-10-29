@@ -57,55 +57,10 @@ export function pasteShortcutEvents() {
   ]);
 }
 
-/** 云端把"没有控制权"归到这几类错误上；剪贴板入口据此自动接管并重试一次。 */
-export const CONTROL_ERROR_CODES = Object.freeze(['COMPUTER_LEASE_REQUIRED', 'DESKTOP_CONTROL_GRANT_REQUIRED', 'DESKTOP_READ_ONLY', 'DESKTOP_CONTROL_EPOCH_CHANGED']);
-
-export function isControlError(error) {
-  if (CONTROL_ERROR_CODES.includes(String(error?.code || ''))) return true;
-  return Number(error?.status || error?.statusCode || error?.httpStatus) === 409;
-}
-
-/**
- * 剪贴板入口在发请求前确保拿到控制权。
- *
- * 云端 runtime 的剪贴板分支与 input 一样要求 handoff 会话已持有控制租约，而面板默认
- * 是"助理正在使用"的旁观态；旁观点 ⌘C/⌘V 时如果不先接管就只能拿到 409。
- * 拿不到可接管的控制权时给一句能照做的提示，不要发注定失败的请求。
- */
-export async function withDesktopControl({ snapshot, acquire, waitForControl, notify = () => {} } = {}) {
-  const current = (typeof snapshot === 'function' ? snapshot() : snapshot) || {};
-  if (current.phase === 'controlling' || current.readOnly === false) return { ok: true, acquired: false };
-  if (current.available !== true) {
-    notify('需要先点画面接管云电脑，才能读写云端剪贴板');
-    return { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' };
-  }
-  try { await acquire?.(); }
-  catch (error) { notify(clipboardFriendlyError(error)); return { ok: false, code: 'CLIPBOARD_CONTROL_FAILED', error }; }
-  const ready = typeof waitForControl === 'function' ? await waitForControl() : true;
-  if (!ready) { notify('正在接管云电脑，请稍候再试'); return { ok: false, code: 'CLIPBOARD_CONTROL_TIMEOUT' }; }
-  return { ok: true, acquired: true };
-}
-
-/** 先确保控制权再执行；遇到控制类错误（epoch 变了/租约没拿到）时自动接管并重试一次。 */
-async function runWithControl({ run, ensureControl }) {
-  if (typeof ensureControl === 'function') {
-    const ensured = await ensureControl();
-    if (ensured && ensured.ok === false) return ensured;
-  }
-  try { return { ok: true, value: await run() }; }
-  catch (error) {
-    if (typeof ensureControl !== 'function' || !isControlError(error)) return { ok: false, error };
-    const forced = await ensureControl();
-    if (forced && forced.ok === false) return forced;
-    try { return { ok: true, value: await run() }; }
-    catch (second) { return { ok: false, error: second }; }
-  }
-}
-
 /** 把云端的错误码翻成用户能照做的中文；英文原文只作为兜底。 */
 export function clipboardFriendlyError(error) {
   const code = String(error?.code || '');
-  if (CONTROL_ERROR_CODES.includes(code)) {
+  if (['COMPUTER_LEASE_REQUIRED', 'DESKTOP_CONTROL_GRANT_REQUIRED', 'DESKTOP_READ_ONLY', 'DESKTOP_CONTROL_EPOCH_CHANGED'].includes(code)) {
     return '需要先点画面接管云电脑，才能读写云端剪贴板';
   }
   if (['DESKTOP_SESSION_IDLE', 'DESKTOP_SESSION_NOT_FOUND', 'CLIPBOARD_CLOSED'].includes(code)) {
@@ -204,20 +159,15 @@ export function isCopyShortcut(event) {
  * 粘贴：本地剪贴板 → 云电脑剪贴板 → 云桌面 Ctrl+V。
  * notify 负责把结果写进面板上的轻提示；返回结构化结果方便调用方/测试断言。
  */
-export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = () => {}, ensureControl } = {}) {
+export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = () => {} } = {}) {
   const read = readLocal || (() => readLocalClipboard());
   let text = '';
   try { text = await read(); }
   catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许读取剪贴板，请按 ⌘V / Ctrl+V 再试'); return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' }; }
   if (!text) { notify('本地剪贴板是空的，没有可粘贴的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
   if (byteLength(text) > MAX_CLIPBOARD_BYTES) { notify('剪贴板内容超过 64 KiB，云电脑剪贴板放不下'); return { ok: false, code: 'CLIPBOARD_TOO_LARGE' }; }
-  // 旁观态先接管：云端剪贴板要求已持有控制租约，否则必然 409。
-  const written = await runWithControl({ run: () => writeCloud(text), ensureControl });
-  if (!written.ok) {
-    if (written.code) return written;
-    notify(clipboardFriendlyError(written.error) || '写入云电脑剪贴板失败，请重试');
-    return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' };
-  }
+  try { await writeCloud(text); }
+  catch (error) { notify(clipboardFriendlyError(error) || '写入云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
   if (typeof sendKeys === 'function') {
     let sent = false;
     try { sent = sendKeys(pasteShortcutEvents()) !== false; }
@@ -230,16 +180,12 @@ export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = (
 }
 
 /** 复制：云电脑剪贴板 → 本地剪贴板。 */
-export async function copyCloudClipboard({ readCloud, writeLocal, notify = () => {}, ensureControl } = {}) {
+export async function copyCloudClipboard({ readCloud, writeLocal, notify = () => {} } = {}) {
   const write = writeLocal || (text => writeLocalClipboard(text));
-  // 读云端剪贴板同样要求控制租约：旁观态先接管，409 时再接管重试一次。
-  const read = await runWithControl({ run: () => readCloud(), ensureControl });
-  if (!read.ok) {
-    if (read.code) return read;
-    notify(clipboardFriendlyError(read.error) || '读取云电脑剪贴板失败，请重试');
-    return { ok: false, code: 'CLIPBOARD_READ_FAILED' };
-  }
-  const text = clipboardTextOf(read.value);
+  let value;
+  try { value = await readCloud(); }
+  catch (error) { notify(clipboardFriendlyError(error) || '读取云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_READ_FAILED' }; }
+  const text = clipboardTextOf(value);
   if (!text) { notify('云电脑剪贴板是空的，没有可复制的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
   try { await write(text); }
   catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许写入剪贴板，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
