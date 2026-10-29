@@ -226,6 +226,8 @@ function panelHarness(t, options = {}) {
     requests.push({ operation, payload });
     if (operation.endsWith('.configuration')) return { configured: options.configured !== false, agentId: 'ar-test' };
     if (operation.endsWith('.bots.list')) { if (options.directoryError) throw options.directoryError; return { features: options.features || [], bots: options.bots || [{ botId: 'writer', displayName: '写作助理' }], directoryAvailable: true }; }
+    if (operation.endsWith('.clipboard.read')) return options.clipboard === undefined ? {} : { text: options.clipboard };
+    if (operation.endsWith('.clipboard.write')) return { written: true };
     return { ticket: 'short-lived-ticket', wsUrl: 'wss://gateway.invalid/desktop' };
   };
   const fakeReact = {
@@ -336,6 +338,66 @@ test('量不出可用区时退回 CSS 等比宽度，面板照常渲染', async 
   assert.equal(card.props.style.width, '100%');
   assert.equal(card.props.style.aspectRatio, '1280 / 800');
   assert.equal(card.props.style.height, undefined);
+});
+
+test('滚轮按动画帧合并：一帧只发一条 wheel，碎事件不再逐个打成远端滚动', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'] }); await flush();
+  const viewer = panel.sockets.at(-1); viewer.open();
+  viewer.message({ type: 'ready', sessionId: 'viewer', readOnly: false, display: { width: 1280, height: 800 } });
+  viewer.message({ type: 'control', readOnly: false, controlAvailable: true, controlEpoch: 1 });
+  viewer.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); viewer.message(new ArrayBuffer(8)); await flush();
+  const canvas = panel.nodes().find(node => node.type === 'canvas');
+  const wheelMessages = () => viewer.sent.filter(value => value.type === 'input' && value.event.type === 'wheel');
+  const before = wheelMessages().length;
+  // 同一动画帧内 5 个 40px 的碎事件（合计 200px = 2 格）：不能逐个发出去。
+  for (let index = 0; index < 5; index += 1) canvas.props.onWheel({ deltaY: 40, deltaX: 0, preventDefault() {} });
+  assert.equal(wheelMessages().length, before, '同一帧内合并，不边滚边发');
+  t.mock.timers.tick(16); await flush();
+  assert.equal(wheelMessages().length, before + 1, '一帧只发一条 wheel');
+  assert.deepEqual(wheelMessages().at(-1).event, { type: 'wheel', deltaX: 0, deltaY: 2 });
+  // 60px 不够一格：不发；再补 40px 凑满一格：只发 1。
+  canvas.props.onWheel({ deltaY: 60, deltaX: 0, preventDefault() {} });
+  t.mock.timers.tick(16); await flush();
+  assert.equal(wheelMessages().length, before + 1, '不足一格不发，避免远端白跑一次 xdotool');
+  canvas.props.onWheel({ deltaY: 40, deltaX: 0, preventDefault() {} });
+  t.mock.timers.tick(16); await flush();
+  assert.equal(wheelMessages().length, before + 2);
+  assert.deepEqual(wheelMessages().at(-1).event, { type: 'wheel', deltaX: 0, deltaY: 1 });
+});
+
+test('旁观态按 ⌘V 先接管云电脑，再用最新 controlEpoch 写云端剪贴板并合成 Ctrl+V', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'], clipboard: '来自本机的文字' }); await flush();
+  const viewer = panel.sockets.at(-1); viewer.open();
+  viewer.message({ type: 'ready', sessionId: 'viewer', readOnly: true, controlAvailable: true, controlEpoch: 0, display: { width: 1280, height: 800 } });
+  viewer.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); viewer.message(new ArrayBuffer(8)); await flush();
+  const canvas = panel.nodes().find(node => node.type === 'canvas');
+  canvas.props.onKeyDown({ type: 'keydown', key: 'v', metaKey: true, preventDefault() {} });
+  await flush();
+  assert.equal(viewer.sent.filter(value => value.type === 'control.acquire').length, 1, '旁观态按 ⌘V 应先申请接管');
+  assert.equal(viewer.sent.some(value => value.type === 'clipboard.write'), false, '还没拿到控制权时不该先写云端剪贴板');
+  viewer.message({ type: 'control', readOnly: false, controlAvailable: true, controlEpoch: 1 }); await flush();
+  t.mock.timers.tick(25); await flush();
+  const write = viewer.sent.find(value => value.type === 'clipboard.write');
+  assert.ok(write, '接管完成后应写云端剪贴板');
+  assert.equal(write.text, '来自本机的文字');
+  assert.equal(write.controlEpoch, 1, '必须带接管后的最新 controlEpoch，不能是连接时的旧值');
+  viewer.message({ type: 'clipboard.response', requestId: write.requestId, ok: true, value: { written: true } }); await flush();
+  const keys = viewer.sent.filter(value => value.type === 'input').map(value => value.event).filter(value => value.type === 'key').map(value => `${value.action}:${value.key}`);
+  assert.deepEqual(keys, ['down:Control_L', 'down:v', 'up:v', 'up:Control_L']);
+  assert.match(panel.text(), /已粘贴到云电脑/u);
+});
+
+test('旁观且不可接管时按 ⌘V 只提示，不发剪贴板请求也不合成按键', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'], clipboard: 'x' }); await flush();
+  const viewer = panel.sockets.at(-1); viewer.open();
+  viewer.message({ type: 'ready', sessionId: 'viewer', readOnly: true, controlAvailable: false, controlEpoch: 0, display: { width: 1280, height: 800 } });
+  viewer.message({ type: 'frame', seq: 1, width: 1280, height: 800 }); viewer.message(new ArrayBuffer(8)); await flush();
+  const canvas = panel.nodes().find(node => node.type === 'canvas');
+  canvas.props.onKeyDown({ type: 'keydown', key: 'v', metaKey: true, preventDefault() {} });
+  await flush();
+  assert.equal(viewer.sent.some(value => value.type === 'clipboard.write'), false);
+  assert.equal(viewer.sent.some(value => value.type === 'input'), false);
+  assert.match(panel.text(), /需要先点画面接管云电脑/u);
 });
 
 test('窄卡片首击与原生全屏缩放仍按实际显示rect映射，ResizeObserver重画完整帧', async t => {

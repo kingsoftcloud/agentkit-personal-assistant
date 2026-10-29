@@ -67,9 +67,9 @@ export const inject = Object.freeze(['slots', 'connection', 'sidebarRight']);
 export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
 export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false, autoConnect: false });
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
-import { fitDesktopBox, mapDisplayPoint, normalizeDisplay } from './desktop-view.mjs';
+import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard, withDesktopControl, writeLocalClipboard } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -176,7 +176,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const clipboardRef = useRef(null), clipboardTimerRef = useRef(null);
   const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null), stageAreaRef = useRef(null);
   const fullscreenRef = useRef(nativeFullscreen); fullscreenRef.current = nativeFullscreen;
-  const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false });
+  const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false });
   state.current.botId = botId;
   const rpc = async (operation, payload = {}) => {
     if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
@@ -262,6 +262,25 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     if (clipboardTimerRef.current) clearTimeout(clipboardTimerRef.current);
     clipboardTimerRef.current = setTimeout(() => { if (state.current.mounted) setClipboardNotice(''); }, 4000);
   };
+  // 剪贴板通道在 handoff 会话里跟 input 一样要求「已持有控制租约」。面板默认是
+  // 旁观态（助理正在使用），旁观点 ⌘C/⌘V 必须先接管，否则云端一律 409。
+  const waitForControl = (timeoutMs = 3000, stepMs = 25) => new Promise(resolve => {
+    const startedAt = Date.now();
+    const check = () => {
+      const current = state.current;
+      if (!current.mounted) return resolve(false);
+      if (controlRef.current?.snapshot?.phase === 'controlling' || current.readOnly === false) return resolve(true);
+      if (Date.now() - startedAt >= timeoutMs) return resolve(false);
+      setTimeout(check, stepMs);
+    };
+    check();
+  });
+  const ensureClipboardControl = () => withDesktopControl({
+    snapshot: controlRef.current?.snapshot || {},
+    acquire: () => controlRef.current.acquire(),
+    waitForControl: () => waitForControl(),
+    notify: clipboardNotify,
+  });
   // 合成按键走现有桌面输入通道：只读旁观时 input() 会拒发并返回 false，由粘贴流程提示先接管。
   const sendDesktopKeys = events => {
     let sent = false;
@@ -284,7 +303,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         await new Promise(resolve => setTimeout(resolve, 150));
       } finally { state.current.pressed.delete('_copyShortcut'); }
     }
-    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
+    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify, ensureControl: ensureClipboardControl });
   };
   // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
   // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。
@@ -305,6 +324,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     writeCloud: text => clipboardRef.current.write(text),
     sendKeys: sendDesktopKeys,
     notify: clipboardNotify,
+    ensureControl: ensureClipboardControl,
   });
   // paste 事件兜底：macOS 上 Electron 的编辑菜单可能先把 ⌘V 吃掉，但浏览器仍会把
   // 剪贴板内容作为 paste 事件交给聚焦的输入框，这里直接把文本写进云电脑剪贴板。
@@ -313,6 +333,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     writeCloud: value => clipboardRef.current.write(value),
     sendKeys: sendDesktopKeys,
     notify: clipboardNotify,
+    ensureControl: ensureClipboardControl,
   });
   const drawLatest = async () => {
     const current = state.current;
@@ -507,9 +528,28 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const blur = () => releaseControl();
     const outside = event => { if (!viewRef.current?.contains(event.target)) releaseControl(); };
     document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('pointerdown', outside, true);
-    return () => { current.mounted = false; observer?.disconnect(); if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame); controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true); };
+    return () => { current.mounted = false; observer?.disconnect(); if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame); if (current.wheelFrame) cancelAnimationFrame(current.wheelFrame); controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true); };
   }, [request]);
   const point = event => mapDisplayPoint({ clientX: event.clientX, clientY: event.clientY, rect: canvasRef.current.getBoundingClientRect(), display: state.current.display });
+  // 触控板一次滑动手势会推几十上百个 wheel 事件。以前每个事件都发一条 input，
+  // 云端每个都要跑一次 xdotool 且顺带触发一次抓帧，滚起来就明显迟滞；这里按动画帧
+  // 合并：像素累计够一格才发一条 wheel（余数跨帧保留），鼠标一格 = 一次滚动，触控板
+  // 按累计距离滚动，消息数和远端开销都降一个数量级。
+  const wheel = event => {
+    event.preventDefault();
+    const current = state.current;
+    const pending = current.wheelPending || (current.wheelPending = { x: 0, y: 0 });
+    current.wheelPending = { x: pending.x + (Number(event.deltaX) || 0), y: pending.y + (Number(event.deltaY) || 0) };
+    if (current.wheelFrame) return;
+    current.wheelFrame = requestAnimationFrame(() => {
+      current.wheelFrame = 0;
+      if (!current.mounted) return;
+      const merged = mergeWheel(current.wheelPending);
+      current.wheelPending = merged.pending;
+      if (!merged.clicks.deltaX && !merged.clicks.deltaY) return;
+      input({ type: 'wheel', deltaX: merged.clicks.deltaX, deltaY: merged.clicks.deltaY });
+    });
+  };
   const pointer = event => {
     event.preventDefault(); const current = state.current, button = [1, 2, 3][event.button] || 1;
     if (event.type === 'pointerdown') { inputRef.current?.focus(); canvasRef.current?.setPointerCapture(event.pointerId); if (input({ type: 'button', action: 'down', button, ...point(event) })) current.buttons.add(button); }
@@ -601,7 +641,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       if (cursorRef.current) { const rect = canvasRef.current.getBoundingClientRect(); cursorRef.current.style.transform = `translate(${latest.clientX - rect.left}px, ${latest.clientY - rect.top}px)`; cursorRef.current.style.visibility = current.readOnly ? 'hidden' : 'visible'; }
       current.lastPointer = point(latest);
       if (!current.pointerFrame) current.pointerFrame = requestAnimationFrame(() => { if (current.mounted) flushPointer(); });
-    }, onContextMenu: event => event.preventDefault(), onWheel: event => { event.preventDefault(); input({ type: 'wheel', deltaY: event.deltaY / 100, deltaX: event.deltaX / 100 }); }, onKeyDown: key, onKeyUp: key, style: { ...(computerVariant ? { position: 'absolute', inset: 0 } : {}), width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'none' } }),
+    }, onContextMenu: event => event.preventDefault(), onWheel: wheel, onKeyDown: key, onKeyUp: key, style: { ...(computerVariant ? { position: 'absolute', inset: 0 } : {}), width: '100%', height: '100%', display: 'block', visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none', touchAction: 'none', cursor: readOnly ? 'default' : 'none' } }),
     h('div', { ref: cursorRef, 'aria-hidden': true, style: { position: 'absolute', top: 0, left: 0, pointerEvents: 'none', visibility: 'hidden', zIndex: 2, width: 18, height: 22 } }, h('svg', { viewBox: '0 0 18 22', width: 18, height: 22 }, h('path', { d: 'M1 1v16l4-4 3 7 3-1-3-7h6z', fill: '#fff', stroke: '#162033', strokeWidth: 1.2 }))),
     !active ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10, padding: 16, textAlign: 'center' } },
       h('h2', { style: { margin: 0, fontSize: 18, fontWeight: 500 } }, selectable ? stateText : emptyTitle),
