@@ -645,9 +645,15 @@ export function createDesktopController({
       return runXdotool(['click', String(button)]);
     }
     if (type === 'wheel') {
-      const amount = clamp(event.deltaY || event.delta || 0, -20, 20);
-      const button = amount < 0 ? 4 : 5;
-      return runXdotool(['click', '--repeat', String(Math.max(1, Math.min(20, Math.abs(amount)))), String(button)]);
+      // 面板已把原生滚动按像素合并成「刻度」再发来；X11 里 button 4/5 是纵向、
+      // 6/7 是横向。旧实现只读 deltaY，纯横向滚动会落成 deltaY=0 → button 5，
+      // 表现为横滑却向下滚一格；两个轴都是 0 时干脆不发，别白跑一次 xdotool。
+      const clicks = value => String(Math.max(1, Math.min(20, Math.abs(value))));
+      const deltaY = clamp(event.deltaY || event.delta || 0, -20, 20);
+      if (deltaY) return runXdotool(['click', '--repeat', clicks(deltaY), String(deltaY < 0 ? 4 : 5)]);
+      const deltaX = clamp(event.deltaX || 0, -20, 20);
+      if (deltaX) return runXdotool(['click', '--repeat', clicks(deltaX), String(deltaX < 0 ? 6 : 7)]);
+      return undefined;
     }
     if (type === 'text') {
       const text = safeText(event.text, 'event.text', 16 * 1024);
