@@ -30,6 +30,22 @@ export function mapDisplayPoint({ clientX, clientY, rect, display = DEFAULT_DESK
   return { x, y };
 }
 
+/**
+ * 把远端桌面按 contain 方式装进可用区域：同时受可用宽、可用高与 maxWidth 约束，
+ * 保证整幅画面（含顶部输入条）永远完整可见，永远不会被容器或滚动位置切掉。
+ * 与 mapDisplayPoint 使用同一套 contain 数学，因此点击映射始终按真实 rect 计算。
+ */
+export function fitDesktopBox({ availableWidth, availableHeight, display = DEFAULT_DESKTOP_DISPLAY, maxWidth = Number.POSITIVE_INFINITY } = {}) {
+  const target = normalizeDisplay(display);
+  const width = Number(availableWidth) > 0 ? Number(availableWidth) : 0;
+  const height = Number(availableHeight) > 0 ? Number(availableHeight) : 0;
+  const cap = Number(maxWidth) > 0 ? Number(maxWidth) : Number.POSITIVE_INFINITY;
+  if (!width || !height) return { width: 0, height: 0 };
+  const boxWidth = Math.min(width, cap, height * (target.width / target.height));
+  const round = value => Math.round(value * 100) / 100;
+  return { width: round(boxWidth), height: round(boxWidth * (target.height / target.width)) };
+}
+
 export function framePayload(frame) {
   if (!frame || typeof frame !== 'object') return null;
   const seq = Number(frame.seq);

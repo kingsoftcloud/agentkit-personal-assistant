@@ -221,7 +221,7 @@ function panelHarness(t, options = {}) {
     close(code = 1000) { this.closed(code); }
   }
   class ResizeObserver { constructor(callback) { this.callback = callback; observers.push(this); } observe() {} disconnect() {} }
-  Object.assign(globalThis, { document, window, WebSocket, ResizeObserver, requestAnimationFrame: callback => setTimeout(callback, 16), cancelAnimationFrame: clearTimeout, createImageBitmap: async () => ({ close() {} }) });
+  Object.assign(globalThis, { document, window, WebSocket, ResizeObserver: options.resizeObserver === false ? undefined : ResizeObserver, requestAnimationFrame: callback => setTimeout(callback, 16), cancelAnimationFrame: clearTimeout, createImageBitmap: async () => ({ close() {} }) });
   const request = async (operation, payload) => {
     requests.push({ operation, payload });
     if (operation.endsWith('.configuration')) return { configured: options.configured !== false, agentId: 'ar-test' };
@@ -297,8 +297,9 @@ test('原生全屏 Escape 交给宿主，不注入远端，也不自绘断开或
   assert.equal(panel.nodes().some(node => node.type === 'button' && /全屏|断开/.test(node.children.join(''))), false);
 });
 
-test('原生桌面以等比圆角卡片占满可用宽度，控制胶囊在卡片下方正常流', async t => {
-  const panel = panelHarness(t, { variant: 'native-tab' }); await flush();
+test('原生桌面卡片同时受可用宽高约束，全屏不滚动、胶囊与诊断不挤压画面', async t => {
+  // 可用区取"全屏侧栏"的真实量级：宽度够、高度不够（1187x741.88 → 1280:800 含入后正好 1187x741.88）。
+  const panel = panelHarness(t, { variant: 'native-tab', rect: { left: 0, top: 0, width: 1187, height: 741.88 } }); await flush();
   const socket = panel.sockets.at(-1); socket.open();
   socket.message({ type: 'ready', sessionId: 'viewer', readOnly: true, display: { width: 1280, height: 800 } });
   socket.message({ type: 'frame', seq: 1 }); socket.message(new ArrayBuffer(8)); await flush();
@@ -308,16 +309,33 @@ test('原生桌面以等比圆角卡片占满可用宽度，控制胶囊在卡�
   const card = nodes.find(node => node.props['data-personal-assistant-desktop-card']);
   const capsule = nodes.find(node => node.props['data-personal-assistant-control-capsule']);
   assert.match(root.props.style.background, /--dsw-alias-bg-base/);
-  assert.equal(layout.props.style.overflow, 'auto', '矮栏滚动，不压缩或裁切完整桌面');
+  assert.equal(layout.props.style.overflow, 'hidden', '不再用滚动兜底，否则滚到底会把画面顶部推出可视区');
   assert.equal(stack.props.style.width, '100%'); assert.equal(stack.props.style.maxWidth, 1280);
-  assert.equal(card.props.style.aspectRatio, '1280 / 800'); assert.equal(card.props.style.width, '100%');
-  assert.equal(card.props.style.height, undefined); assert.equal(card.props.style.minHeight, undefined);
+  assert.equal(stack.props.style.flex, '1 1 auto'); assert.equal(stack.props.style.minHeight, 0);
+  // 卡片尺寸由量出的可用区决定：按 1280:800 等比含入，绝不超出可用宽高。
+  const width = Number.parseFloat(card.props.style.width), height = Number.parseFloat(card.props.style.height);
+  assert.ok(Number.isFinite(width) && Number.isFinite(height), `卡片应带像素尺寸，实际 ${card.props.style.width} x ${card.props.style.height}`);
+  assert.ok(width <= 1187 + 0.5 && height <= 741.88 + 0.5, `卡片不得超出可用区，实际 ${width}x${height}`);
+  assert.ok(Math.abs(width / height - 1280 / 800) < 0.01, '卡片保持远端桌面的宽高比');
   assert.ok(card.props.style.borderRadius > 0); assert.equal(card.props.style.padding, undefined);
-  assert.equal(stack.children[0], card); assert.equal(stack.children[1], capsule);
+  assert.equal(stack.children.length, 1); assert.equal(stack.children[0], card, 'stack 只包画面，胶囊不再参与画面高度预算');
+  assert.ok(capsule, '控制胶囊仍然渲染');
   assert.equal(capsule.props.style.position, undefined); assert.equal(capsule.props.style.transform, undefined);
   assert.ok(nodes.some(node => node.props.role === 'alert' && /只读旁观/.test(node.children.join(''))));
   assert.equal(nodes.filter(node => node.type === 'canvas').length, 1);
   assert.equal(nodes.some(node => node.props.style?.position === 'fixed'), false);
+});
+
+test('量不出可用区时退回 CSS 等比宽度，面板照常渲染', async t => {
+  // 没有 ResizeObserver、且量出来是 0x0（面板被隐藏/尚未布局）时必须退回旧行为，不能把画面缩成 0。
+  const panel = panelHarness(t, { variant: 'native-tab', resizeObserver: false, rect: { left: 0, top: 0, width: 0, height: 0 } }); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  socket.message({ type: 'ready', sessionId: 'viewer', readOnly: true, display: { width: 1280, height: 800 } });
+  socket.message({ type: 'frame', seq: 1 }); socket.message(new ArrayBuffer(8)); await flush();
+  const card = panel.nodes().find(node => node.props['data-personal-assistant-desktop-card']);
+  assert.equal(card.props.style.width, '100%');
+  assert.equal(card.props.style.aspectRatio, '1280 / 800');
+  assert.equal(card.props.style.height, undefined);
 });
 
 test('窄卡片首击与原生全屏缩放仍按实际显示rect映射，ResizeObserver重画完整帧', async t => {
