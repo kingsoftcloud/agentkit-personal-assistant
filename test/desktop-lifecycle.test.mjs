@@ -554,14 +554,16 @@ test('panel releases held inputs on a terminal close and cancels in-flight frame
 });
 
 
-test('未开通/空目录只展示一个检查入口，没有凭据字段或可手填的助理标识', async t => {
+test('未开通给出开通引导，空目录只展示一个检查入口，没有凭据字段或可手填的助理标识', async t => {
   for (const options of [{ configured: false }, { bots: [] }]) {
     await t.test(JSON.stringify(options), async child => {
     const panel = panelHarness(child, options); await flush();
     const nodes = panel.nodes();
     assert.equal(nodes.some(node => node.type === 'select'), false);
     assert.equal(nodes.some(node => node.type === 'input' && node.props['aria-label'] === 'Bot ID'), false);
-    assert.equal(nodes.filter(node => node.type === 'button').length, 1);
+    // 未开通时是引导页：开通 + 检查两个入口；已开通但目录为空时只需要重新检查。
+    assert.equal(nodes.filter(node => node.type === 'button').length, options.configured === false ? 2 : 1);
+    if (options.configured === false) assert.equal(nodes.some(node => node.props['data-personal-assistant-onboarding'] === 'true'), true);
     assert.match(panel.text(), /检查开通状态/u);
     assert.doesNotMatch(panel.visibleText(), /API Key|Personal Assistant|Bot ID|配置云网关|0 fps/u);
     assert.equal(panel.sockets.length, 0);
