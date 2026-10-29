@@ -93,29 +93,42 @@ export async function publishDshWebUrl({ brokerUrl, url, fetchImpl = globalThis.
 
 /**
  * 后台把地址推给云电脑：日志可能比宿主就绪晚出现，所以隔一会儿重试几次；
- * 地址不变就只推一次。任何失败都只记日志，不影响宿主启动。
+ * 找到地址后还要周期性重推 —— 云电脑容器（agentd）可以单独重启，重启后
+ * 内存里的 dshWebUrl 会丢，只推一次会让欢迎页的「云助理」一直 404。
+ * 任何失败都只记日志，不影响宿主启动。
  */
-export function startDshWebBridge({ env = process.env, brokerUrl, intervalMs = 5000, attempts = 24, timers = { setTimeout, clearTimeout }, logger = console, findUrl = findDshWebUrl, publish = publishDshWebUrl } = {}) {
+export function startDshWebBridge({ env = process.env, brokerUrl, intervalMs = 5000, attempts = 24, republishMs = 30000, timers = { setTimeout, clearTimeout }, logger = console, findUrl = findDshWebUrl, publish = publishDshWebUrl } = {}) {
   const endpoint = brokerUrl || env.COMPUTER_BROKER_URL || env.AGENTKIT_COMPUTER_URL;
   const dshHome = env.DSH_HOME;
   let stopped = false;
   let timer = null;
   let lastPublished = null;
+  let lastPublishedAt = 0;
   let remaining = attempts;
   const run = async () => {
     if (stopped) return;
+    let url = null;
     try {
-      const url = await readDshWebUrlFile({ file: env.AGENTKIT_DSH_WEB_URL_FILE })
+      url = await readDshWebUrlFile({ file: env.AGENTKIT_DSH_WEB_URL_FILE })
         || await findUrl({ dshHome, readdir: (await import('node:fs/promises')).readdir, stat: (await import('node:fs/promises')).stat, readFile: (await import('node:fs/promises')).readFile });
-      if (url && url !== lastPublished) {
-        await publish({ brokerUrl: endpoint, url });
-        lastPublished = url;
-        logger.info(JSON.stringify({ event: 'personal-assistant.dsh-web.registered', host: new URL(url).hostname, port: new URL(url).port }));
-        return;
-      }
-      if (url && url === lastPublished) return;
     } catch (error) {
       logger.warn(JSON.stringify({ event: 'personal-assistant.dsh-web.unavailable', code: error?.code || 'DSH_WEB_LOOKUP_FAILED' }));
+    }
+    if (url) {
+      const changed = url !== lastPublished;
+      if (changed || Date.now() - lastPublishedAt >= republishMs) {
+        try {
+          await publish({ brokerUrl: endpoint, url });
+          lastPublished = url; lastPublishedAt = Date.now();
+          remaining = attempts;
+          if (changed) logger.info(JSON.stringify({ event: 'personal-assistant.dsh-web.registered', host: new URL(url).hostname, port: new URL(url).port }));
+        } catch (error) {
+          logger.warn(JSON.stringify({ event: 'personal-assistant.dsh-web.publish-retry', code: error?.code || 'DSH_WEB_PUBLISH_FAILED' }));
+        }
+      }
+      timer = timers.setTimeout(() => { void run(); }, intervalMs);
+      timer?.unref?.();
+      return;
     }
     remaining -= 1;
     if (remaining <= 0 || stopped) return;

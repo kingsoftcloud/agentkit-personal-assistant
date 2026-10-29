@@ -252,13 +252,30 @@
   }
 
   // 云端 DSH 网页由同一 Pod 内的 127.0.0.1:8081 提供，地址由本机桥转发给桌面重新导航。
-  function openDsh(btn) {
+  // runtime 可能比欢迎页晚就绪（云电脑容器先重启时尤其明显），/dsh-web.json 会先 404
+  // 后 200，因此这里轮询探测，点击时再重试若干次，避免永远停在「还在启动」。
+  var dshWebUrl = null;
+  function refreshDshWeb() {
+    return fetch('/dsh-web.json', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (info) {
+      dshWebUrl = info && info.url ? info.url : null;
+      return dshWebUrl;
+    }).catch(function () { return dshWebUrl; });
+  }
+  refreshDshWeb();
+  setInterval(refreshDshWeb, 2000);
+
+  function openDsh(btn, attempt) {
     if (btn) btn.disabled = true;
-    fetch('/dsh-web.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (info) {
-      if (!info || !info.url) { toast('云端助理网页还在启动，请稍后再试'); return; }
-      return launch('dsh').then(function (res) {
-        if (!res || res.ok !== true) toast('打开失败：' + ((res && res.code) || '未知错误'));
-      });
+    var tries = attempt || 0;
+    fetch('/dsh-web.json', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (info) {
+      if (info && info.url) {
+        dshWebUrl = info.url;
+        return launch('dsh').then(function (res) {
+          if (!res || res.ok !== true) toast('打开失败：' + ((res && res.code) || '未知错误'));
+        });
+      }
+      if (tries < 10) return new Promise(function (resolve) { setTimeout(resolve, 800); }).then(function () { return openDsh(btn, tries + 1); });
+      toast('云端助理网页还在启动，请稍后再试');
     }).catch(function () {
       toast('云端助理网页暂时不可用');
     }).then(function () {

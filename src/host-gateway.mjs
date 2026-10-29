@@ -1,5 +1,7 @@
 /** 通过 DSH 已鉴权 Connection RPC 转接到固定云网关；凭据始终留在 Host。 */
 import { createRequire } from 'node:module';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from './client/bot-directory.mjs';
 import { createCloudSessionTransport } from './cloud-session-transport.mjs';
 /**
@@ -58,9 +60,69 @@ const BINDING_METHODS = Object.freeze({
   'personal-assistant.settings.versions': 'settingsVersions',
 });
 const AGENT_ID = /^ar-[A-Za-z0-9-]{4,120}$/u;
-const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket', ...BINDING_OPERATIONS, ...SESSION_OPERATIONS]);
+const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket',
+  // 本机剪贴板只能由 Host 进程读写：Studio 的 Electron 渲染器没有 clipboard-read/
+  // clipboard-write 权限，navigator.clipboard 在面板里一律被拒，⌘C/⌘V 就成了空操作。
+  'personal-assistant.clipboard.read', 'personal-assistant.clipboard.write',
+  ...BINDING_OPERATIONS, ...SESSION_OPERATIONS]);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
+const CLIPBOARD_MAX_BYTES = 64 * 1024;
+const CLIPBOARD_TIMEOUT_MS = 2000;
+const runClipboardReader = promisify(execFile);
+/** Host 是普通 Node 进程：直接调系统剪贴板命令，不依赖浏览器权限。 */
+async function readHostClipboard({ execFileImpl = runClipboardReader } = {}) {
+  const options = { timeout: CLIPBOARD_TIMEOUT_MS, maxBuffer: CLIPBOARD_MAX_BYTES, windowsHide: true };
+  try {
+    if (process.platform === 'darwin') {
+      const { stdout } = await execFileImpl('/usr/bin/pbpaste', [], options);
+      return { text: String(stdout ?? '') };
+    }
+    if (process.platform === 'win32') {
+      const { stdout } = await execFileImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Clipboard -Raw'], options);
+      return { text: String(stdout ?? '').replace(/\r\n$/u, '') };
+    }
+    try {
+      const { stdout } = await execFileImpl('wl-paste', ['--no-newline'], options);
+      return { text: String(stdout ?? '') };
+    } catch {
+      const { stdout } = await execFileImpl('xclip', ['-selection', 'clipboard', '-o'], options);
+      return { text: String(stdout ?? '') };
+    }
+  } catch {
+    throw fail('PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE', '本机剪贴板暂时不可用', 503);
+  }
+}
+function pipeToClipboardWriter(command, args, value) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = error => { if (settled) return; settled = true; clearTimeout(timer); if (error) reject(error); else resolve(); };
+    const timer = setTimeout(() => { child.kill?.('SIGKILL'); finish(new Error('clipboard write timeout')); }, CLIPBOARD_TIMEOUT_MS);
+    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
+    child.once('error', error => finish(error));
+    child.once('exit', code => finish(code === 0 ? null : new Error(`clipboard writer exited ${code}`)));
+    child.stdin?.end(value);
+  });
+}
+async function writeHostClipboard(text, { execFileImpl = runClipboardReader } = {}) {
+  const value = String(text ?? '');
+  if (Buffer.byteLength(value, 'utf8') > CLIPBOARD_MAX_BYTES) throw fail('PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE', '剪贴板内容超过 64 KiB', 413);
+  try {
+    if (process.platform === 'darwin') return await pipeToClipboardWriter('/usr/bin/pbcopy', [], value);
+    if (process.platform === 'win32') {
+      await execFileImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Set-Clipboard -Value ${JSON.stringify(value)}`],
+        { timeout: CLIPBOARD_TIMEOUT_MS, windowsHide: true });
+      return;
+    }
+    try {
+      return await pipeToClipboardWriter('wl-copy', [], value);
+    } catch {
+      return await pipeToClipboardWriter('xclip', ['-selection', 'clipboard'], value);
+    }
+  } catch {
+    throw fail('PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE', '本机剪贴板暂时不可用', 503);
+  }
+}
 const safeCloseCode = value => Number.isInteger(value) && value >= 1000 && value <= 4999 ? value : undefined;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const requireSessionId = value => {
@@ -187,6 +249,13 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
   async function request(operation, payload = {}, signal) {
     if (!plain(payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求参数格式错误');
     if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
+    // 本机剪贴板不依赖云端绑定，先于 binding() 处理：面板刚打开、账号还没绑定时也能用。
+    if (operation === 'personal-assistant.clipboard.read') return readHostClipboard();
+    if (operation === 'personal-assistant.clipboard.write') {
+      if (typeof payload.text !== 'string') throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '剪贴板内容格式错误');
+      await writeHostClipboard(payload.text);
+      return { written: true };
+    }
     const current = await binding(signal);
     const bindingMethod = BINDING_METHODS[operation];
     if (bindingMethod) {

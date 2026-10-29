@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.1.11 — 2026-10-29（云电脑桌面体验修复）
+
+- 云电脑默认不再预开终端窗口：欢迎页和 dock 仍可按需打开终端，开机时先把整屏欢迎页交给用户。
+- 欢迎页浏览器窗口改为整屏：`--app` 首屏使用 `--kiosk` 铺满 1280×800，普通浏览器窗口启动即最大化（旧实现是 740×620 固定在右下角）。
+- 云助理入口不再卡在「还在启动」：runtime 找到本机 DSH 网页后周期性重推地址（云电脑容器单独重启后也能恢复），欢迎页轮询 `/dsh-web.json` 并在点击时重试。
+- 复制/粘贴快捷键可用：本机剪贴板改由 Host 进程（macOS `pbpaste`/`pbcopy`，Linux `wl-clipboard`/`xclip`，Windows `Get-Clipboard`/`Set-Clipboard`）读写，绕开 Studio 渲染器没有 `navigator.clipboard` 权限的问题；并保留输入框 `paste` 事件兜底。
+
+
 ## 0.1.10 — 2026-10-28（云电脑默认展开）
 
 - 用户显式打开云电脑时默认展开原生右侧栏（`sidebarRight.setPanelExpanded(panelId, true)`）；绑定会话只切换 tab，不抢占布局。

@@ -300,6 +300,13 @@ test('桌面浏览器固定使用简体中文界面与页面语言偏好', async
   assert.ok(desktop.includes('--test-type'), '必须抑制 --no-sandbox 的无支持命令行提示栏');
   assert.ok(desktop.includes('--hide-crash-restore-bubble'), '切换窗口后不能再弹“Chromium 未正确关闭”气泡');
   assert.ok(desktop.some(arg => arg.startsWith('--app=http://127.0.0.1:1234/welcome.html')));
+  // 欢迎页是云电脑门面：必须整屏（--kiosk），不能再是 740x620 缩在右下角。
+  assert.ok(desktop.includes('--kiosk'), '欢迎页应用窗口必须全屏');
+  assert.ok(desktop.includes('--window-size=1280,800'), '窗口尺寸要匹配 1280x800 虚拟屏');
+  assert.equal(desktop.includes('--window-position=520,90'), false, '欢迎页不能再带旧偏移');
+  const browsing = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: true, openUrl: 'https://example.com/' });
+  assert.ok(browsing.includes('--start-maximized'), '普通浏览器窗口打开即最大化');
+  assert.equal(browsing.includes('--kiosk'), false, '普通浏览器窗口不能进 kiosk');
   const headless = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: false });
   assert.equal(headless.includes('--lang=zh-CN'), false, '无头模式不改语言口径');
 });

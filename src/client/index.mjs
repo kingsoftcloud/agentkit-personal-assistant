@@ -69,7 +69,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { mapDisplayPoint, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -217,11 +217,33 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         await new Promise(resolve => setTimeout(resolve, 150));
       } finally { state.current.pressed.delete('_copyShortcut'); }
     }
-    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), notify: clipboardNotify });
+    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
+  };
+  // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
+  // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。
+  const readHostClipboard = async () => {
+    try {
+      const value = await rpc('personal-assistant.clipboard.read');
+      if (typeof value?.text === 'string') return value.text;
+    } catch { /* 旧 Host 没有剪贴板 RPC，退回浏览器剪贴板 */ }
+    return readLocalClipboard();
+  };
+  const writeHostClipboard = async text => {
+    try { await rpc('personal-assistant.clipboard.write', { text: String(text ?? '') }); return; }
+    catch { /* 同上 */ }
+    await writeLocalClipboard(String(text ?? ''));
   };
   const pasteLocalClipboardToCloud = () => pasteToCloud({
-    readLocal: () => readLocalClipboard(),
+    readLocal: () => readHostClipboard(),
     writeCloud: text => clipboardRef.current.write(text),
+    sendKeys: sendDesktopKeys,
+    notify: clipboardNotify,
+  });
+  // paste 事件兜底：macOS 上 Electron 的编辑菜单可能先把 ⌘V 吃掉，但浏览器仍会把
+  // 剪贴板内容作为 paste 事件交给聚焦的输入框，这里直接把文本写进云电脑剪贴板。
+  const pasteTextToCloud = text => pasteToCloud({
+    readLocal: async () => String(text ?? ''),
+    writeCloud: value => clipboardRef.current.write(value),
     sendKeys: sendDesktopKeys,
     notify: clipboardNotify,
   });
@@ -471,7 +493,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         phase === 'unconfigured' && (bindingReason === 'credential-unavailable' || candidateCount > 0) ? h('button', { style: buttonStyle, disabled: Boolean(busy), onClick: () => void bindAssistant('connect') }, busy === 'connect' ? '正在获取…' : bindingReason === 'credential-unavailable' ? '重新获取连接凭证' : '连接已发现的个人助理') : null,
         h('button', { style: { ...buttonStyle, background: 'transparent' }, disabled: Boolean(busy), onClick: () => void refreshConnection() }, '检查开通状态'),
         busy ? h('span', { role: 'status', style: { color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12 } }, '处理中，请稍候…') : null) : null) : null,
-    h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !controlRef.current.snapshot.available && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
+    h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !controlRef.current.snapshot.available && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onPaste: event => { const text = event.clipboardData?.getData?.('text/plain') ?? ''; if (!text) return; event.preventDefault(); void pasteTextToCloud(text); }, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
   const secondaryInk = 'var(--dsw-alias-label-secondary, #536174)';
   const ghostStyle = { ...buttonStyle, background: 'transparent', color: 'inherit', border: ui.border };
   const pillStyle = { ...buttonStyle, borderRadius: 999, padding: '7px 16px', border: 'none', fontWeight: 500, background: 'var(--dsw-alias-label-primary, #17202c)', color: 'var(--dsw-alias-bg-layer-1, #fff)' };

@@ -29,16 +29,18 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  */
 export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl, openUrl }) {
   return [
-    ...(desktop ? ['--ozone-platform=x11', '--window-position=520,90', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh', '--class=Chromium', '--hide-crash-restore-bubble'] : ['--headless=new']),
-    // 应用窗口承载首屏：没有地址栏、没有多余标签条。
-    ...(desktop && startUrl ? [`--app=${startUrl}`] : []),
-    // 普通窗口模式：把首页作为位置参数交给 Chromium，避免先出一个空白标签再补一个页面。
-    ...(desktop && !startUrl && openUrl ? [openUrl] : []),
+    ...(desktop ? ['--ozone-platform=x11', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh', '--class=Chromium', '--hide-crash-restore-bubble'] : ['--headless=new']),
+    // 欢迎页是云电脑的门面，必须铺满整块 1280x800 屏幕：`--app` 无地址栏 +
+    // `--kiosk` 全屏（旧实现是 740x620 固定窗口偏在右下角，四圈都是灰底）。
+    ...(desktop && startUrl ? [`--app=${startUrl}`, '--kiosk', '--window-position=0,0'] : []),
+    // 普通窗口模式：把首页作为位置参数交给 Chromium，避免先出一个空白标签再补一个页面；同时最大化。
+    ...(desktop && !startUrl && openUrl ? ['--window-position=0,0', '--start-maximized', openUrl] : []),
+    ...(desktop && !startUrl && !openUrl ? ['--window-position=0,0', '--start-maximized'] : []),
     '--disable-gpu', '--disable-dev-shm-usage', '--no-sandbox',
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync',
     '--disable-background-networking', '--disable-breakpad', '--disable-crash-reporter',
     '--disable-translate', '--mute-audio', '--hide-scrollbars',
-    `--window-size=${desktop ? '740,620' : windowSize}`,
+    `--window-size=${desktop ? '1280,800' : windowSize}`,
     '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${userDataDir}`,
     `--proxy-server=${proxy}`,

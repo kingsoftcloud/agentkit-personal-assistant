@@ -92,3 +92,20 @@ test('日志还没出现时后台重试，出现后只推一次', async () => {
   assert.ok(logs.every(message => !message.includes(TOKEN)), '日志里不能出现 token');
   assert.ok(logs.some(message => message.includes('personal-assistant.dsh-web.registered')));
 });
+
+test('云电脑容器重启后周期性重推地址，云助理能自己恢复', async () => {
+  const published = [];
+  const bridge = startDshWebBridge({
+    env: { COMPUTER_BROKER_URL: 'http://127.0.0.1:8787/' },
+    attempts: 5,
+    intervalMs: 1,
+    republishMs: 0,
+    logger: { info: () => {}, warn: () => {} },
+    findUrl: async () => `http://127.0.0.1:8081/?token=${TOKEN}`,
+    publish: async ({ url }) => { published.push(url); return { published: true }; },
+  });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  bridge.stop();
+  assert.ok(published.length >= 2, '同一地址也要周期性重推，否则 agentd 重启后 /dsh-web.json 一直 404');
+  assert.ok(published.every(url => url === `http://127.0.0.1:8081/?token=${TOKEN}`));
+});

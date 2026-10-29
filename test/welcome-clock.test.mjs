@@ -75,6 +75,8 @@ test('欢迎页有云助理磁贴：先确认地址就绪，再让 launcher 打�
   const html = await readFile(join(webDir, 'welcome.html'), 'utf8');
   assert.match(html, /data-action="dsh"/u);
   assert.match(html, /云助理/u);
-  assert.match(html, /fetch\('\/dsh-web\.json'\)/u);
+  assert.match(html, /fetch\('\/dsh-web\.json'/u);
   assert.match(html, /launch\('dsh'\)/u);
+  // runtime 晚于欢迎页就绪时要轮询重试，不能只弹一次「还在启动」。
+  assert.match(html, /setInterval\(refreshDshWeb, 2000\)/u);
 });
