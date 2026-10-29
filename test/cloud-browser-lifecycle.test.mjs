@@ -5,11 +5,19 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createCloudBrowser } from '../runtime/cloud-browser.mjs';
+import {
+  DESKTOP_DECORATION_HORIZONTAL, DESKTOP_DECORATION_VERTICAL, DESKTOP_DOCK_HEIGHT, DESKTOP_SCREEN_HEIGHT,
+  DESKTOP_SCREEN_WIDTH, chromiumArgs, desktopWindowClientSize,
+} from '../runtime/cloud-browser-cdp.mjs';
+import { DESKTOP_HEIGHT, DESKTOP_WIDTH } from '../runtime/desktop-session.mjs';
 
 async function fixture(t, options = {}) {
   const workspace = await mkdtemp(join(tmpdir(), 'pa-browser-lifecycle-'));
   const transports = [], commands = [];
   let targetNumber = 0;
+  // 桌面窗口几何状态：初始默认是已经按工作区最大化后的样子，个别用例传入
+  // 线上实测的越界几何（top 为负）来验证自动纠正。
+  const windowBounds = { ...(options.windowBounds || { left: 0, top: 0, width: 1280, height: 732, windowState: 'maximized' }) };
   const transportFactory = async (launchOptions = {}) => {
     const page = { url: 'about:blank', title: 'Example Domain' };
     const targets = new Set();
@@ -32,6 +40,13 @@ async function fixture(t, options = {}) {
           if (transports.length <= (options.windowlessTransports || 0)) throw Object.assign(new Error('Target does not have a browser window'), { code: 'ASSISTANT_BROWSER_CDP_ERROR' });
           return { windowId: 1, bounds: { left: 520, top: 90, width: 740, height: 620, windowState: options.windowState || 'normal' } };
         }
+        if (method === 'Browser.getWindowBounds') return { bounds: { ...windowBounds } };
+        if (method === 'Browser.setWindowBounds') {
+          // ignoreMaximize 模拟“WM 拒绝最大化”的桌面，用来验证几何兜底。
+          if (params.bounds?.windowState) { if (!options.ignoreMaximize) Object.assign(windowBounds, { left: 0, top: 0, width: 1280, height: 732, windowState: params.bounds.windowState }); }
+          else Object.assign(windowBounds, params.bounds, { windowState: 'normal' });
+          return {};
+        }
         if (method === 'Page.navigate') { page.url = params.url; return {}; }
         if (method === 'Runtime.evaluate') return { result: { value: params.expression === 'document.readyState' ? 'complete'
           : params.expression.includes('performance.getEntries') ? []
@@ -42,9 +57,12 @@ async function fixture(t, options = {}) {
     }, async dispose() { this.disposed = true; this.connection.closed = true; } };
     transports.push(transport); return transport;
   };
-  const browser = createCloudBrowser({ workspace, env: { AGENTKIT_CHROMIUM: process.execPath, AGENTKIT_DESKTOP_MODE: '1' }, transportFactory, ...options });
+  // options.env 仍然整体覆盖默认的桌面环境（既有用例用它切到非桌面模式）。
+  const browser = createCloudBrowser({ workspace, transportFactory, ...options,
+    env: options.env ? { AGENTKIT_CHROMIUM: process.execPath, ...options.env }
+      : { AGENTKIT_CHROMIUM: process.execPath, AGENTKIT_DESKTOP_MODE: '1' } });
   t.after(async () => { await browser.dispose(); await rm(workspace, { recursive: true, force: true }); });
-  return { browser, transports, commands };
+  return { browser, transports, commands, windowBounds };
 }
 
 test('可见桌面十二分钟无 CDP 操作后仍保留浏览器和最后页面', async t => {
@@ -300,6 +318,15 @@ test('桌面浏览器固定使用简体中文界面与页面语言偏好', async
   assert.ok(desktop.includes('--test-type'), '必须抑制 --no-sandbox 的无支持命令行提示栏');
   assert.ok(desktop.includes('--hide-crash-restore-bubble'), '切换窗口后不能再弹“Chromium 未正确关闭”气泡');
   assert.ok(desktop.some(arg => arg.startsWith('--app=http://127.0.0.1:1234/welcome.html')));
+  // 欢迎页是云电脑门面：必须整屏（--kiosk），不能再是 740x620 缩在右下角。
+  assert.ok(desktop.includes('--kiosk'), '欢迎页应用窗口必须全屏');
+  // 客户区要扣掉 fluxbox 的标题栏 28 + 手柄 3 + 上下边框 2，否则 frame 1280x833
+  // 比 1280x800 屏幕还高，WM 会把窗口放到屏幕外（top<0）。
+  assert.ok(desktop.includes('--window-size=1278,699'), '客户区尺寸必须让 frame 落在工作区(1280x732)内');
+  assert.equal(desktop.includes('--window-position=520,90'), false, '欢迎页不能再带旧偏移');
+  const browsing = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: true, openUrl: 'https://example.com/' });
+  assert.ok(browsing.includes('--start-maximized'), '普通浏览器窗口打开即最大化');
+  assert.equal(browsing.includes('--kiosk'), false, '普通浏览器窗口不能进 kiosk');
   const headless = chromiumArgs({ userDataDir: '/tmp/pa-args', proxy: 'socks5://127.0.0.1:8899', desktop: false });
   assert.equal(headless.includes('--lang=zh-CN'), false, '无头模式不改语言口径');
 });
@@ -417,4 +444,81 @@ test('桌面浏览器能打开同一 Pod 内的本机服务（云端 DSH 网页�
     await assert.rejects(browser.navigate('http://example.com:8081/'), error => error.code === 'ASSISTANT_BROWSER_URL_REFUSED',
       '外网端口仍要被拒绝，本机回环是例外而不是放开策略');
   } finally { await browser.dispose(); await rm(workspace, { recursive: true, force: true }); }
+});
+
+test('desktop 普通窗口的 frame 必须完整落在 1280x800 屏幕内', () => {
+  // 数字来源（2026-10-29，本机 docker 跑 0.1.23 运行镜像，QEMU/amd64，Xvfb :99）：
+  //   xprop -root _NET_WORKAREA => 0,0,1280,732（tint2 dock 占 68px：panel_size 56 + panel_margin 12，带 strut）
+  //   Chromium 窗口 _NET_FRAME_EXTENTS => 0,0,0,0（标签栏与 —□✕ 由 Chromium 自绘，没有 WM 装饰）；
+  //     fluxbox 只给普通 X11 客户端加装饰（xterm 实测 1,1,30,5），所以下面的 33px 是保守余量。
+  //   对照实验（都不带 --start-maximized，只改 --window-size）：
+  //     1280,800 => xwininfo 0,-67 1279x799（底边正好是工作区底边 732，顶部 67px 在屏幕外）
+  //     1278,699 => xwininfo 0,0   1278x699（完整可见）
+  //   同一路径的 CDP 观测：Browser.getWindowBounds => top:-67, 1279x799, normal；
+  //     setWindowBounds({windowState:'maximized'}) 后 => 0,0,1280,732, maximized
+  // 结论：客户区(800) 比工作区(732) 高，fluxbox 把窗口底边贴住工作区底边、顶部推出屏外，
+  // 于是标题栏（自绘标签栏）和页面底部一起被裁 —— 不是“最大化”本身的问题。
+  const client = desktopWindowClientSize();
+  assert.deepEqual(client, { width: 1278, height: 699 }, '客户区要扣掉 dock(68)、装饰余量(33) 与左右边框(2)');
+  assert.equal(client.height + DESKTOP_DECORATION_VERTICAL + DESKTOP_DOCK_HEIGHT, DESKTOP_SCREEN_HEIGHT, '客户区+装饰余量+dock 必须正好等于屏幕高度');
+  assert.equal(client.width + DESKTOP_DECORATION_HORIZONTAL, DESKTOP_SCREEN_WIDTH, '客户区+装饰余量必须正好等于屏幕宽度');
+  // Xvfb 分辨率与窗口几何预算必须是同一事实，避免以后只改一边。
+  assert.equal(DESKTOP_SCREEN_WIDTH, DESKTOP_WIDTH, 'cloud-browser-cdp 与 desktop-session 的桌面宽度必须一致');
+  assert.equal(DESKTOP_SCREEN_HEIGHT, DESKTOP_HEIGHT, 'cloud-browser-cdp 与 desktop-session 的桌面高度必须一致');
+  // 客户区尺寸写进启动参数，否则任何没被最大化的窗口都会越界。
+  const desktopArgs = chromiumArgs({ userDataDir: '/tmp/profile', proxy: 'socks5://127.0.0.1:8899', desktop: true });
+  assert.ok(desktopArgs.includes('--window-size=1278,699'));
+  assert.equal(desktopArgs.includes('--window-size=1280,800'), false, 'desktop 模式不能再直接用 1280x800 客户区');
+  // 普通窗口仍交给 WM 最大化；kiosk 欢迎页仍然全屏铺满；headless 视口尺寸不受影响。
+  assert.ok(desktopArgs.includes('--start-maximized'));
+  const kioskArgs = chromiumArgs({ userDataDir: '/tmp/profile', proxy: 'socks5://127.0.0.1:8899', desktop: true, startUrl: 'http://127.0.0.1:4321/' });
+  assert.ok(kioskArgs.includes('--kiosk') && kioskArgs.includes('--app=http://127.0.0.1:4321/'));
+  assert.ok(chromiumArgs({ userDataDir: '/tmp/profile', proxy: 'socks5://127.0.0.1:8899' }).includes('--window-size=1280,800'));
+});
+
+test('越界的桌面窗口按工作区最大化，frame 回到 1280x800 内', async t => {
+  // 线上实测的坏几何：窗口 1279x799 被放在 top:-67，标题栏和页面顶部在屏幕外。
+  const bounds = { left: 0, top: -67, width: 1279, height: 799, windowState: 'normal' };
+  const { browser, commands, windowBounds } = await fixture(t, { windowBounds: bounds });
+  await browser.openDesktopWindow();
+  assert.ok(commands.some(command => command.method === 'Browser.setWindowBounds' && command.params.bounds?.windowState === 'maximized'),
+    '越界窗口必须交给 WM 按工作区最大化');
+  assert.equal(windowBounds.windowState, 'maximized');
+  assert.ok(windowBounds.left >= 0 && windowBounds.top >= 0
+    && windowBounds.left + windowBounds.width <= DESKTOP_SCREEN_WIDTH
+    && windowBounds.top + windowBounds.height <= DESKTOP_SCREEN_HEIGHT, 'frame 必须落在屏幕内');
+});
+
+test('欢迎页 kiosk 窗口不参与最大化，保持 --kiosk 全屏铺满', async t => {
+  const { browser, commands, windowBounds } = await fixture(t, {
+    env: { AGENTKIT_DESKTOP_MODE: '1', AGENTKIT_WELCOME_URL: 'http://127.0.0.1:4321/' },
+    windowBounds: { left: 0, top: 0, width: 1280, height: 800, windowState: 'normal' },
+  });
+  await browser.openDesktopWindow();
+  assert.equal(commands.some(command => command.method === 'Browser.setWindowBounds'), false, 'kiosk 全屏窗口不能被改成最大化窗口');
+  assert.equal(windowBounds.windowState, 'normal');
+  assert.equal(windowBounds.top + windowBounds.height, DESKTOP_SCREEN_HEIGHT);
+});
+
+test('补开的浏览器窗口（拿不到 --start-maximized）也会被最大化到工作区', async t => {
+  const { browser, commands, windowBounds } = await fixture(t, { windowlessTransports: 1 });
+  await browser.openDesktopWindow();
+  const maximized = commands.filter(command => command.method === 'Browser.setWindowBounds' && command.params.bounds?.windowState === 'maximized');
+  assert.ok(maximized.length >= 2, '新建窗口出现后必须显式最大化，而不是只依赖启动参数');
+  assert.equal(windowBounds.windowState, 'maximized');
+  assert.ok(windowBounds.top + windowBounds.height <= DESKTOP_SCREEN_HEIGHT);
+});
+
+test('WM 拒绝最大化时兜底钳到工作区客户区，frame 底边停在 dock 上方', async t => {
+  // 与线上实测同一个坏几何（top:-67），但这次 WM 不服从最大化：必须退到显式
+  // 客户区 1278x699，使 frame 恰好 1280x732，不能落到 800 让 tint2 dock 盖住页面底部。
+  const { browser, windowBounds } = await fixture(t, {
+    windowBounds: { left: 0, top: -67, width: 1279, height: 799, windowState: 'normal' },
+    ignoreMaximize: true,
+  });
+  await browser.openDesktopWindow();
+  assert.deepEqual({ left: windowBounds.left, top: windowBounds.top, width: windowBounds.width, height: windowBounds.height },
+    { left: 0, top: 0, width: 1278, height: 699 });
+  assert.equal(windowBounds.top + windowBounds.height + DESKTOP_DECORATION_VERTICAL, DESKTOP_SCREEN_HEIGHT - DESKTOP_DOCK_HEIGHT,
+    '窗口底边+装饰余量必须停在 dock 上方（732），不能被 dock 压住');
 });

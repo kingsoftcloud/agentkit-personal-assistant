@@ -90,6 +90,9 @@ const openDshWeb = async ({ signal } = {}) => {
   return { ...view, ...page };
 };
 desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', workspace,
+  // 默认不预开终端窗口：欢迎页/dock 已经能按需启动终端，开机就弹一个
+  // xterm 会盖住欢迎页。排障或旧行为可用 AGENTKIT_DESKTOP_TERMINAL=1 打开。
+  terminal: env.AGENTKIT_DESKTOP_TERMINAL === '1',
   dshWebUrl: () => dshWebUrl, onLaunchDshWeb: openDshWeb,
   onLaunchBrowser: async ({ signal } = {}) => {
     if (closing || signal?.aborted) throw Object.assign(new Error('桌面入口已停止'), { code: 'DESKTOP_LAUNCH_CLOSED' });

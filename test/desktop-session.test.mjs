@@ -632,3 +632,24 @@ test('桌面所有子进程继承统一时区，避免 dock/终端与浏览器�
     await controller.dispose();
   }
 });
+
+test('滚轮：纵向映射 button 4/5、横向映射 6/7，零位移不再误发向下 1 格', async () => {
+  const calls = [];
+  const controller = createDesktopController({ spawn: () => fakeProcess(), exec: async (file, args) => { calls.push([file, ...args]); return { stdout: '' }; } });
+  try {
+    const session = await controller.openSession({ identity: {}, controllable: true, leaseId: 'l' });
+    calls.length = 0;
+    const wheel = event => controller.input({ sessionId: session.sessionId, event: { type: 'wheel', ...event } });
+    await wheel({ deltaY: -3 }); // 向上
+    await wheel({ deltaY: 2 }); // 向下
+    await wheel({ deltaX: 4 }); // 纯横向向右：button 7
+    await wheel({ deltaX: -5 }); // 纯横向向左：button 6
+    await wheel({ deltaY: 0, deltaX: 0 }); // 零位移不发
+    assert.deepEqual(calls.filter(call => call[0] === 'xdotool'), [
+      ['xdotool', 'click', '--repeat', '3', '4'],
+      ['xdotool', 'click', '--repeat', '2', '5'],
+      ['xdotool', 'click', '--repeat', '4', '7'],
+      ['xdotool', 'click', '--repeat', '5', '6'],
+    ]);
+  } finally { await controller.dispose(); }
+});

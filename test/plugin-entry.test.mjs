@@ -14,7 +14,7 @@ import {
   PERSONAL_ASSISTANT_PANEL_ID,
   inject as clientInject,
 } from '../src/client/index.mjs';
-import { mapDisplayPoint, nextPollDelay, framePayload, isInputEventWritable } from '../src/client/desktop-view.mjs';
+import { mapDisplayPoint, nextPollDelay, framePayload, isInputEventWritable, mergeWheel, WHEEL_PIXEL_STEP } from '../src/client/desktop-view.mjs';
 
 test('host entry is disabled and has no implicit Computer connection', () => {
   const runtime = apply({ kind: 'test-context' }, { bots: [{ botId: 'writer', systemPromptRevision: 'w1' }] });
@@ -216,4 +216,24 @@ test('个人助理侧栏图标是SVG，两条路径，不退回纯文本占位',
     assert.equal(icon.type, 'svg'); assert.equal(icon.props.viewBox, '0 0 16 16'); assert.equal(icon.props.width, 20);
     assert.equal(icon.children.length, 2); assert.ok(icon.children.every(child => child.type === 'path'));
   } finally { setClientReactRuntime(undefined); }
+});
+
+test('滚轮按像素累计成刻度：鼠标一格 = 1 次滚动，余数跨帧保留', () => {
+  const notch = mergeWheel({ x: 0, y: 0 }, { deltaY: WHEEL_PIXEL_STEP });
+  assert.deepEqual(notch.clicks, { deltaX: 0, deltaY: 1 });
+  assert.deepEqual(notch.pending, { x: 0, y: 0 });
+  // 触控板碎事件：40 + 40 + 40 → 只有第三次凑满一格才发 1 次，余数 20 留到下一帧。
+  let pending = { x: 0, y: 0 };
+  const clicks = [];
+  for (const deltaY of [40, 40, 40]) { const merged = mergeWheel(pending, { deltaY }); pending = merged.pending; clicks.push(merged.clicks.deltaY); }
+  assert.deepEqual(clicks, [0, 0, 1]);
+  assert.deepEqual(pending, { x: 0, y: 20 });
+  // 反向滚动按负刻度发，方向不丢。
+  const up = mergeWheel({ x: 0, y: 0 }, { deltaY: -250 });
+  assert.deepEqual(up.clicks, { deltaX: 0, deltaY: -2 });
+  assert.deepEqual(up.pending, { x: 0, y: -50 });
+  // 水平滚轮同样累计；没有像素时不产生滚动。
+  assert.deepEqual(mergeWheel({ x: 0, y: 0 }, { deltaX: 120 }).clicks, { deltaX: 1, deltaY: 0 });
+  assert.deepEqual(mergeWheel({ x: 0, y: 0 }, {}).clicks, { deltaX: 0, deltaY: 0 });
+  assert.deepEqual(mergeWheel().clicks, { deltaX: 0, deltaY: 0 });
 });

@@ -38,6 +38,7 @@ test('唯一云端绑定传入原生工作面板，重开与收起只操作同�
     { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
     { panelId: 'personal-assistant', expanded: false },
     { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
+    { panelId: 'personal-assistant', expanded: true },
   ]);
   h.workbench.dispose();
 });

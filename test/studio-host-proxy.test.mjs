@@ -21,7 +21,8 @@ test('空插件配置通过 Studio Host 出票，RPC 只返回公开绑定与短
     get(name) { assert.equal(name, 'studioPersonalAssistantDesktop'); return service; },
     connection: { fetch: { register(value) { route = value; return () => {}; } } },
   };
-  registerPersonalAssistantHostGateway(ctx, {});
+  // config 优先于环境变量：固定一个示例网关，避免开发机上的 AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL 影响断言。
+  registerPersonalAssistantHostGateway(ctx, { gatewayUrl: "https://gateway.example" });
   const rpc = async (operation, payload = {}) => {
     const response = await route.fetch(new Request('https://studio.example/api/personal-assistant', {
       method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal,
@@ -29,7 +30,7 @@ test('空插件配置通过 Studio Host 出票，RPC 只返回公开绑定与短
     }));
     return (await response.json()).result;
   };
-  assert.deepEqual(await rpc('personal-assistant.configuration'), { ok: true, value: { configured: true, agentId: 'ar-studio' } });
+  assert.deepEqual(await rpc('personal-assistant.configuration'), { ok: true, value: { configured: true, agentId: 'ar-studio', gatewayUrl: 'https://gateway.example' } });
   const result = await rpc('personal-assistant.desktop.ticket', { botId: 'default', mode: 'read', leaseId: 'lease-owned' });
   assert.equal(result.ok, true);
   assert.deepEqual(seen, { agentId: 'ar-studio', botId: 'default', mode: 'read', leaseId: 'lease-owned' });

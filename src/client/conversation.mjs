@@ -26,6 +26,33 @@
 
 import { renderMarkdown } from './markdown.mjs';
 
+/**
+ * 宿主 DSH 的 MarkdownText 需要的 chrome 文案（代码块复制/折行、脚注）。
+ * 结构对齐 ui-chat 的 markdownLabels()：缺了 code 会在遇到代码块时直接抛错。
+ */
+const MARKDOWN_LABELS = {
+  code: {
+    copyLabel: '复制',
+    copiedLabel: '已复制',
+    toolbarLabels: { codeLabel: '代码', wrapLabel: '自动换行', unwrapLabel: '取消换行' },
+  },
+  footnotes: '脚注',
+};
+
+/**
+ * 渲染助理消息正文。
+ *
+ * 优先用宿主 DSH 暴露的原生 MarkdownText：micromark 解析 + DSH 原生 .markdown 样式，
+ * 表格、标题层级、代码高亮、链接行为与 DSH 会话一致，插件不再自己维护解析器。
+ * 宿主没有这个模块（老版本）时退回本目录 markdown.mjs 的极简渲染。
+ */
+export function renderAssistantBody(h, text, styles, markdown) {
+  const MarkdownText = markdown?.MarkdownText;
+  const source = typeof text === 'string' ? text : '';
+  if (typeof MarkdownText === 'function') return h(MarkdownText, { text: source, labels: MARKDOWN_LABELS });
+  return renderMarkdown(h, source, styles) || '…';
+}
+
 const EMPTY_HINT = '有什么可以帮你？';
 /** 这两类失败是“消息根本没开始跑”的瞬时状态：云端现在会按会话排队重试，
  * 历史会话里残留的记录不再渲染成任务失败，避免对话结束后一直显示红色失败。 */
@@ -167,7 +194,7 @@ const plusGlyph = h => h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', f
 const closeGlyph = h => h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', 'aria-hidden': true },
   h('path', { d: 'M6 6l12 12M18 6L6 18' }));
 
-export function PersonalAssistantConversation({ React: R, request, scope, onOpenComputer = null } = {}) {
+export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null } = {}) {
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
   const [phase, setPhase] = useState('loading');
@@ -488,11 +515,12 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
     return () => window.removeEventListener('beforeunload', warn);
   }, [queue.length]);
 
-  const header = h('header', { style: styles.header },
+  // Studio(macOS) 的拖拽区靠 data-window-drag 标记：PA 页面没有外壳 tab strip，需要自己的头部行。
+  const header = h('header', { style: styles.header, 'data-window-drag': '' },
     h('h1', { style: styles.title }, '个人助理'),
     h('span', { style: styles.status }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
     h('span', { style: styles.spacer }),
-    onOpenComputer ? h('button', { type: 'button', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
+    onOpenComputer ? h('button', { type: 'button', 'data-window-drag-recall': '', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
 
   return h('section', { 'data-personal-assistant-conversation': 'true', style: styles.page, onClick: async event => {
     const link = event.target.closest?.('a[href^="cloud-file:"]');
@@ -524,7 +552,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, onOpen
           return h('div', { key: message.id, style: mine ? styles.rowUser : styles.row },
             h('span', { style: styles.who }, mine ? '你' : '助理'),
             h('div', { style: mine ? styles.bubbleUser : styles.bubble },
-              mine ? (message.text || '…') : (renderMarkdown(h, message.text || '', styles) || '…')),
+              mine ? (message.text || '…') : renderAssistantBody(h, message.text, styles, markdown)),
             message.status === 'failed' ? h('button', { onClick: () => void submit(outboxRef.current.get(message.clientTurnId)), disabled: sending }, `${message.failure} · 重试发送`) : null);
         }),
         awaiting ? h('div', { key: 'awaiting', style: styles.row },
