@@ -18,36 +18,42 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
 /**
  * 桌面窗口几何预算（均为实测值，改动前先看 test/cloud-browser-lifecycle.test.mjs 的注释）：
  *  - 屏幕 1280x800（runtime/desktop-session.mjs 的 DESKTOP_WIDTH/HEIGHT，Xvfb 分辨率）
- *  - fluxbox（同文件的 style）给每个窗口加装饰：标题栏 28（window.title.height）
- *    + 下边框手柄 3（window.handleWidth）+ 边框 1×2（window.borderWidth）= 竖向 33 / 横向 2
- *  - 底部 tint2 dock 占 68px（panel_size 56 + panel_margin 12），它带 strut，
- *    所以 `xprop -root _NET_WORKAREA` = 0,0,1280,732，窗口真正可见的高度只有 732
- * Chromium 的 `--window-size` 是**客户区**尺寸，不含 WM 装饰：客户区 1280x800 的
- * frame 是 1280x833，比屏幕还高，fluxbox 只能把窗口往屏幕外放——本地 0.1.23 镜像里
- * 用 CDP 新建窗口实测 `Browser.getWindowBounds` = {left:0, top:-67, width:1279,
- * height:799, windowState:'normal'}，标题栏（28）连同页面顶部一起被裁，页面底部又
- * 压在 dock 底下，用户看到的就是“标题栏/输入框只剩一半”。
- * 因此客户区按「工作区 - 装饰」反推：1280-2=1278、732-33=699，这样即使窗口没被
- * WM 最大化，frame 也完整落在可见工作区内；能最大化时再交给 WM 铺满 1280x732。
+ *  - 底部 tint2 dock 占 68px（panel_size 56 + panel_margin 12）且带 strut，因此
+ *    `xprop -root _NET_WORKAREA` = 0,0,1280,732：窗口真正可见的高度只有 732
+ *  - Chromium 窗口不带 WM 装饰（实测 `_NET_FRAME_EXTENTS` = 0,0,0,0，标签栏和 —□✕
+ *    都是 Chromium 自绘）；fluxbox 只给普通 X11 客户端加装饰（xterm 实测 1,1,30,5）。
+ *    这里预留的 33px 是装饰保守余量，不是 Chromium 当前的实际开销。
+ *
+ * Chromium 的 `--window-size` 是客户区（无装饰时即整个窗口）尺寸：客户区 800 比工作区
+ * 732 高 68px，fluxbox 会把窗口底边贴到工作区底边、把顶部推出屏幕。0.1.23 镜像里不带
+ * --start-maximized 的对照实测：
+ *   --window-size=1280,800 → xwininfo 0,-67 1279x799（底边正好 732，顶部 67px 在屏外）
+ *   --window-size=1278,699 → xwininfo 0,0   1278x699（完整可见）
+ * CDP 侧同一个现象：旧参数下 Browser.getWindowBounds = {left:0, top:-67, width:1279,
+ * height:799, windowState:'normal'}，setWindowBounds({windowState:'maximized'}) 后立刻
+ * 变成 {0,0,1280x732, maximized}。用户看到的就是“标题栏（自绘标签栏）在屏幕外 +
+ * 页面底部被 dock 压住”。
  */
 export const DESKTOP_SCREEN_WIDTH = 1280;
 export const DESKTOP_SCREEN_HEIGHT = 800;
 /** tint2 dock 占用的底部高度（带 strut，扣掉后才是可用工作区高度 732）。 */
 export const DESKTOP_DOCK_HEIGHT = 68;
-export const DESKTOP_FRAME_TITLE_HEIGHT = 28;
-export const DESKTOP_FRAME_HANDLE_HEIGHT = 3;
-export const DESKTOP_FRAME_BORDER_WIDTH = 1;
-/** frame 竖向占用：标题栏 + 手柄 + 上下边框。 */
-export const DESKTOP_FRAME_VERTICAL = DESKTOP_FRAME_TITLE_HEIGHT + DESKTOP_FRAME_HANDLE_HEIGHT + 2 * DESKTOP_FRAME_BORDER_WIDTH;
-/** frame 横向占用：左右边框。 */
-export const DESKTOP_FRAME_HORIZONTAL = 2 * DESKTOP_FRAME_BORDER_WIDTH;
+/**
+ * 装饰保守余量：fluxbox 对普通 X11 客户端实测 `_NET_FRAME_EXTENTS` = 1,1,30,5
+ * （左右 1、上 30、下 5，即竖向 35 / 横向 2）；Chromium 自绘窗口实测 0,0,0,0。
+ * 这里按竖向 33 / 横向 2 预留，属于"未来换成带 WM 装饰的 Chromium 也不越界"的
+ * 保守预算——窗口实际会比预算更矮，不会超出可见区。
+ */
+export const DESKTOP_DECORATION_HORIZONTAL = 2;
+export const DESKTOP_DECORATION_VERTICAL = 33;
 
 /**
- * 让 frame 完整落在「屏幕 - 底部 dock」可见区内的客户区尺寸：1278x699。
+ * 让窗口完整落在「屏幕 - 底部 dock」可见区内的客户区尺寸：1278x699。
  * 不传参时按整屏扣掉 dock 高度计算；调用方也可以显式给可用高度。
+ * 其中 33px 是装饰保守余量（见上面的几何预算说明）。
  */
 export function desktopWindowClientSize({ width = DESKTOP_SCREEN_WIDTH, height = DESKTOP_SCREEN_HEIGHT - DESKTOP_DOCK_HEIGHT } = {}) {
-  return { width: width - DESKTOP_FRAME_HORIZONTAL, height: height - DESKTOP_FRAME_VERTICAL };
+  return { width: width - DESKTOP_DECORATION_HORIZONTAL, height: height - DESKTOP_DECORATION_VERTICAL };
 }
 
 /**

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createCloudBrowser } from '../runtime/cloud-browser.mjs';
 import {
-  DESKTOP_DOCK_HEIGHT, DESKTOP_FRAME_HORIZONTAL, DESKTOP_FRAME_VERTICAL, DESKTOP_SCREEN_HEIGHT,
+  DESKTOP_DECORATION_HORIZONTAL, DESKTOP_DECORATION_VERTICAL, DESKTOP_DOCK_HEIGHT, DESKTOP_SCREEN_HEIGHT,
   DESKTOP_SCREEN_WIDTH, chromiumArgs, desktopWindowClientSize,
 } from '../runtime/cloud-browser-cdp.mjs';
 import { DESKTOP_HEIGHT, DESKTOP_WIDTH } from '../runtime/desktop-session.mjs';
@@ -447,17 +447,21 @@ test('桌面浏览器能打开同一 Pod 内的本机服务（云端 DSH 网页�
 });
 
 test('desktop 普通窗口的 frame 必须完整落在 1280x800 屏幕内', () => {
-  // 数字来源（2026-10-29，本机 docker 跑 0.1.23 运行镜像，QEMU/amd64）：
-  //   xprop -root _NET_WORKAREA                    => 0,0,1280,732（tint2 dock 占 68px：panel_size 56 + panel_margin 12）
-  //   xdpyinfo | grep dimensions                   => 1280x800
-  //   旧参数（--window-size=1280,800 客户区）下 CDP 新建窗口 Browser.getWindowBounds => top:-67, 1279x799, normal
-  //   Browser.setWindowBounds({windowState:'maximized'}) 后 => 0,0,1280,732, maximized
-  // 所以 fluxbox 的窗口装饰是：标题栏 28 + 下边框手柄 3 + 边框 1×2 = 竖向 33 / 横向 2；
-  // 客户区 1280x800 + 33 = 833 > 800，WM 只能把窗口放成 top<0（标题栏与页面底部被裁）。
+  // 数字来源（2026-10-29，本机 docker 跑 0.1.23 运行镜像，QEMU/amd64，Xvfb :99）：
+  //   xprop -root _NET_WORKAREA => 0,0,1280,732（tint2 dock 占 68px：panel_size 56 + panel_margin 12，带 strut）
+  //   Chromium 窗口 _NET_FRAME_EXTENTS => 0,0,0,0（标签栏与 —□✕ 由 Chromium 自绘，没有 WM 装饰）；
+  //     fluxbox 只给普通 X11 客户端加装饰（xterm 实测 1,1,30,5），所以下面的 33px 是保守余量。
+  //   对照实验（都不带 --start-maximized，只改 --window-size）：
+  //     1280,800 => xwininfo 0,-67 1279x799（底边正好是工作区底边 732，顶部 67px 在屏幕外）
+  //     1278,699 => xwininfo 0,0   1278x699（完整可见）
+  //   同一路径的 CDP 观测：Browser.getWindowBounds => top:-67, 1279x799, normal；
+  //     setWindowBounds({windowState:'maximized'}) 后 => 0,0,1280,732, maximized
+  // 结论：客户区(800) 比工作区(732) 高，fluxbox 把窗口底边贴住工作区底边、顶部推出屏外，
+  // 于是标题栏（自绘标签栏）和页面底部一起被裁 —— 不是“最大化”本身的问题。
   const client = desktopWindowClientSize();
-  assert.deepEqual(client, { width: 1278, height: 699 }, '客户区要扣掉边框(2)与 dock(68)+装饰(33)');
-  assert.equal(client.height + DESKTOP_FRAME_VERTICAL + DESKTOP_DOCK_HEIGHT, DESKTOP_SCREEN_HEIGHT, '客户区+装饰+dock 必须正好等于屏幕高度');
-  assert.equal(client.width + DESKTOP_FRAME_HORIZONTAL, DESKTOP_SCREEN_WIDTH, '客户区+左右边框必须正好等于屏幕宽度');
+  assert.deepEqual(client, { width: 1278, height: 699 }, '客户区要扣掉 dock(68)、装饰余量(33) 与左右边框(2)');
+  assert.equal(client.height + DESKTOP_DECORATION_VERTICAL + DESKTOP_DOCK_HEIGHT, DESKTOP_SCREEN_HEIGHT, '客户区+装饰余量+dock 必须正好等于屏幕高度');
+  assert.equal(client.width + DESKTOP_DECORATION_HORIZONTAL, DESKTOP_SCREEN_WIDTH, '客户区+装饰余量必须正好等于屏幕宽度');
   // Xvfb 分辨率与窗口几何预算必须是同一事实，避免以后只改一边。
   assert.equal(DESKTOP_SCREEN_WIDTH, DESKTOP_WIDTH, 'cloud-browser-cdp 与 desktop-session 的桌面宽度必须一致');
   assert.equal(DESKTOP_SCREEN_HEIGHT, DESKTOP_HEIGHT, 'cloud-browser-cdp 与 desktop-session 的桌面高度必须一致');
@@ -515,6 +519,6 @@ test('WM 拒绝最大化时兜底钳到工作区客户区，frame 底边停在 d
   await browser.openDesktopWindow();
   assert.deepEqual({ left: windowBounds.left, top: windowBounds.top, width: windowBounds.width, height: windowBounds.height },
     { left: 0, top: 0, width: 1278, height: 699 });
-  assert.equal(windowBounds.top + windowBounds.height + DESKTOP_FRAME_VERTICAL, DESKTOP_SCREEN_HEIGHT - DESKTOP_DOCK_HEIGHT,
-    'frame 底边必须停在 dock 上方（732），不能被 dock 压住');
+  assert.equal(windowBounds.top + windowBounds.height + DESKTOP_DECORATION_VERTICAL, DESKTOP_SCREEN_HEIGHT - DESKTOP_DOCK_HEIGHT,
+    '窗口底边+装饰余量必须停在 dock 上方（732），不能被 dock 压住');
 });
