@@ -3,7 +3,10 @@ import { spawn as spawnChild } from 'node:child_process';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { CDP_COMMAND_TIMEOUT_MS, DEVTOOLS_LAUNCH_TIMEOUT_MS, startCdpTransport } from './cloud-browser-cdp.mjs';
+import {
+  CDP_COMMAND_TIMEOUT_MS, DESKTOP_SCREEN_HEIGHT, DESKTOP_SCREEN_WIDTH, DEVTOOLS_LAUNCH_TIMEOUT_MS,
+  desktopWindowClientSize, startCdpTransport,
+} from './cloud-browser-cdp.mjs';
 
 export const BROWSER_TOOLS = Object.freeze([
   'cloud_browser_open', 'cloud_browser_snapshot', 'cloud_browser_click', 'cloud_browser_type',
@@ -475,6 +478,9 @@ export function createCloudBrowser({
         { width: VIEWPORT.width, height: VIEWPORT.height, deviceScaleFactor: 1, mobile: false }, { sessionId: pageSession, timeoutMs: commandMs });
       await started.connection.send('Browser.setDownloadBehavior', { behavior: 'deny' }, { timeoutMs: commandMs });
       transport = started;
+      // 普通桌面窗口补一次显式最大化：`--start-maximized` 由 WM 处理，换成浏览窗口
+      // 或进程重建时 WM 未必照做，这里按工作区几何统一兜底。
+      if (desktopMode && !desktopAppWindow) await fitDesktopWindow(targetId, { maximize: true });
       return transport;
     } catch (error) {
       if (started) {
@@ -485,6 +491,30 @@ export function createCloudBrowser({
       if (typeof error?.code === 'string' && error.code.startsWith('ASSISTANT_BROWSER_')) throw error;
       throw fail(`云端浏览器启动失败: ${error?.code || 'launch-error'}`, 'ASSISTANT_BROWSER_LAUNCH_FAILED');
     }
+  }
+
+  // Chromium 的 `--window-size` 只作用于「初始窗口」，`--start-maximized` 也只对首个
+  // 窗口生效：之后通过 CDP `Target.createTarget({newWindow:true})` 补开的窗口会退回
+  // 默认客户区尺寸。客户区 1280x800 加上 fluxbox 的标题栏 28 + 手柄 3 + 边框 2 就是
+  // 1280x833 的 frame，比 1280x800 的屏幕还高，WM 只能把窗口往屏幕外放
+  // （实测 windowBounds = top:-67），用户看到标题栏和页面底部被裁一半。
+  // 所以桌面窗口每次出现都要按工作区（1280x732，已扣 tint2 dock 的 68px strut）最大化，
+  // WM 不配合时再兜底钳到“连装饰一起也放得下”的客户区尺寸。
+  async function fitDesktopWindow(target, { maximize = false } = {}) {
+    if (!desktopMode || !target) return;
+    const overflows = bounds => !bounds
+      || bounds.left < 0 || bounds.top < 0
+      || bounds.left + bounds.width > DESKTOP_SCREEN_WIDTH || bounds.top + bounds.height > DESKTOP_SCREEN_HEIGHT;
+    try {
+      const { windowId } = await browserCommand('Browser.getWindowForTarget', { targetId: target });
+      if (!Number.isInteger(windowId)) return;
+      if (!maximize && !overflows((await browserCommand('Browser.getWindowBounds', { windowId }))?.bounds)) return;
+      await browserCommand('Browser.setWindowBounds', { windowId, bounds: { windowState: 'maximized' } });
+      if (!overflows((await browserCommand('Browser.getWindowBounds', { windowId }))?.bounds)) return;
+      const client = desktopWindowClientSize();
+      await browserCommand('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+      await browserCommand('Browser.setWindowBounds', { windowId, bounds: { left: 0, top: 0, width: client.width, height: client.height } });
+    } catch { /* 窗口可能正在销毁；几何兜底失败不该阻断打开 */ }
   }
 
   // CDP 里有页面目标不等于桌面上还有窗口：窗口被关掉或收起、进程仍活着时
@@ -508,6 +538,9 @@ export function createCloudBrowser({
     const attached = await browserCommand('Target.attachToTarget', { targetId: created.targetId, flatten: true });
     if (!attached?.sessionId) throw fail('Chromium 没有返回替代页面会话', 'ASSISTANT_BROWSER_TARGET_UNAVAILABLE');
     await browserCommand('Target.activateTarget', { targetId: created.targetId });
+    // 补开的窗口拿不到 `--start-maximized`，必须在窗口出现后按工作区最大化，
+    // 否则客户区 1280x800 + 装饰 33 的 frame 会被 WM 放到屏幕外。
+    await fitDesktopWindow(created.targetId, { maximize: true });
     return { targetId: created.targetId, pageSession: attached.sessionId };
   }
 
@@ -569,7 +602,12 @@ export function createCloudBrowser({
         }
       }
       if (!missing && desktopMode && !(await hasBrowserWindow(inspectedTarget))) missing = true;
-      if (!missing) return;
+      if (!missing) {
+        // 窗口已存在：只在几何越界（历史窗口/被拖出屏幕）时纠正，不强制最大化，
+        // 避免把用户手动调整过的窗口大小改掉。
+        await fitDesktopWindow(inspectedTarget);
+        return;
+      }
       // 有欢迎页的桌面模式重建窗口时从欢迎页开始：8081 不能变成“首页”。
       const restoreUrl = desktopMode && desktopStartUrl ? desktopRestoreUrl
         : lastUrl && lastUrl !== 'about:blank' ? desktopPolicy(lastUrl).href : desktopRestoreUrl;

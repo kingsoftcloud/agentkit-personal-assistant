@@ -16,6 +16,41 @@ const fail = (message, code = 'ASSISTANT_BROWSER_CDP_UNAVAILABLE') => Object.ass
 const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms));
 
 /**
+ * 桌面窗口几何预算（均为实测值，改动前先看 test/cloud-browser-lifecycle.test.mjs 的注释）：
+ *  - 屏幕 1280x800（runtime/desktop-session.mjs 的 DESKTOP_WIDTH/HEIGHT，Xvfb 分辨率）
+ *  - fluxbox（同文件的 style）给每个窗口加装饰：标题栏 28（window.title.height）
+ *    + 下边框手柄 3（window.handleWidth）+ 边框 1×2（window.borderWidth）= 竖向 33 / 横向 2
+ *  - 底部 tint2 dock 占 68px（panel_size 56 + panel_margin 12），它带 strut，
+ *    所以 `xprop -root _NET_WORKAREA` = 0,0,1280,732，窗口真正可见的高度只有 732
+ * Chromium 的 `--window-size` 是**客户区**尺寸，不含 WM 装饰：客户区 1280x800 的
+ * frame 是 1280x833，比屏幕还高，fluxbox 只能把窗口往屏幕外放——本地 0.1.23 镜像里
+ * 用 CDP 新建窗口实测 `Browser.getWindowBounds` = {left:0, top:-67, width:1279,
+ * height:799, windowState:'normal'}，标题栏（28）连同页面顶部一起被裁，页面底部又
+ * 压在 dock 底下，用户看到的就是“标题栏/输入框只剩一半”。
+ * 因此客户区按「工作区 - 装饰」反推：1280-2=1278、732-33=699，这样即使窗口没被
+ * WM 最大化，frame 也完整落在可见工作区内；能最大化时再交给 WM 铺满 1280x732。
+ */
+export const DESKTOP_SCREEN_WIDTH = 1280;
+export const DESKTOP_SCREEN_HEIGHT = 800;
+/** tint2 dock 占用的底部高度（带 strut，扣掉后才是可用工作区高度 732）。 */
+export const DESKTOP_DOCK_HEIGHT = 68;
+export const DESKTOP_FRAME_TITLE_HEIGHT = 28;
+export const DESKTOP_FRAME_HANDLE_HEIGHT = 3;
+export const DESKTOP_FRAME_BORDER_WIDTH = 1;
+/** frame 竖向占用：标题栏 + 手柄 + 上下边框。 */
+export const DESKTOP_FRAME_VERTICAL = DESKTOP_FRAME_TITLE_HEIGHT + DESKTOP_FRAME_HANDLE_HEIGHT + 2 * DESKTOP_FRAME_BORDER_WIDTH;
+/** frame 横向占用：左右边框。 */
+export const DESKTOP_FRAME_HORIZONTAL = 2 * DESKTOP_FRAME_BORDER_WIDTH;
+
+/**
+ * 让 frame 完整落在「屏幕 - 底部 dock」可见区内的客户区尺寸：1278x699。
+ * 不传参时按整屏扣掉 dock 高度计算；调用方也可以显式给可用高度。
+ */
+export function desktopWindowClientSize({ width = DESKTOP_SCREEN_WIDTH, height = DESKTOP_SCREEN_HEIGHT - DESKTOP_DOCK_HEIGHT } = {}) {
+  return { width: width - DESKTOP_FRAME_HORIZONTAL, height: height - DESKTOP_FRAME_VERTICAL };
+}
+
+/**
  * Chromium flags for the managed image. Chromium's own sandbox is unavailable in
  * most managed containers, so the egress proxy stays authoritative for network
  * policy; `--proxy-bypass-list=<-loopback>` keeps loopback inside the proxy too.
@@ -28,6 +63,7 @@ const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms)
  * 不改变 CDP/自动化语义，也不影响页面能力。
  */
 export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desktop = false, startUrl, openUrl }) {
+  const desktopClient = desktop ? desktopWindowClientSize() : null;
   return [
     ...(desktop ? ['--ozone-platform=x11', '--test-type', '--lang=zh-CN', '--accept-lang=zh-CN,zh', '--class=Chromium', '--hide-crash-restore-bubble'] : ['--headless=new']),
     // 欢迎页是云电脑的门面，必须铺满整块 1280x800 屏幕：`--app` 无地址栏 +
@@ -40,7 +76,8 @@ export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desk
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync',
     '--disable-background-networking', '--disable-breakpad', '--disable-crash-reporter',
     '--disable-translate', '--mute-audio', '--hide-scrollbars',
-    `--window-size=${desktop ? '1280,800' : windowSize}`,
+    // 客户区尺寸必须扣掉 WM 装饰（见上面的 DESKTOP_FRAME_* 注释），否则 frame 超出屏幕。
+    `--window-size=${desktopClient ? `${desktopClient.width},${desktopClient.height}` : windowSize}`,
     '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${userDataDir}`,
     `--proxy-server=${proxy}`,
