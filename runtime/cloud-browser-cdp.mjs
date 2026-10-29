@@ -82,7 +82,7 @@ export function chromiumArgs({ userDataDir, proxy, windowSize = '1280,800', desk
     '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync',
     '--disable-background-networking', '--disable-breakpad', '--disable-crash-reporter',
     '--disable-translate', '--mute-audio', '--hide-scrollbars',
-    // 客户区尺寸必须扣掉 WM 装饰（见上面的 DESKTOP_FRAME_* 注释），否则 frame 超出屏幕。
+    // 客户区尺寸必须扣掉可用的装饰余量（见上面的几何预算注释），否则窗口会高于工作区。
     `--window-size=${desktopClient ? `${desktopClient.width},${desktopClient.height}` : windowSize}`,
     '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${userDataDir}`,
