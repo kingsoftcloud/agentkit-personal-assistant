@@ -57,15 +57,36 @@ export function pasteShortcutEvents() {
   ]);
 }
 
+/**
+ * 云端桌面里的复制快捷键也始终是 Linux 的 Control+C。
+ * 宿主是 macOS 时，页面收到的是 ⌘C，但不能把 Super_L 发给 X11；
+ * Super_L+C 不会触发大多数 Linux 应用的复制动作。
+ */
+export function copyShortcutEvents() {
+  return Object.freeze([
+    Object.freeze({ type: 'key', action: 'down', key: 'Control_L' }),
+    Object.freeze({ type: 'key', action: 'down', key: 'c' }),
+    Object.freeze({ type: 'key', action: 'up', key: 'c' }),
+    Object.freeze({ type: 'key', action: 'up', key: 'Control_L' }),
+  ]);
+}
+
 /** 把云端的错误码翻成用户能照做的中文；英文原文只作为兜底。 */
 export function clipboardFriendlyError(error) {
   const code = String(error?.code || '');
+  if (code === 'COMPUTER_USER_CONTROLLED') return '当前有人正在操作云电脑，请等对方交还后再复制或粘贴';
+  if (code === 'COMPUTER_LEASE_CONFLICT') return '云电脑正在被其他任务使用，请稍后再复制或粘贴';
   if (['COMPUTER_LEASE_REQUIRED', 'DESKTOP_CONTROL_GRANT_REQUIRED', 'DESKTOP_READ_ONLY', 'DESKTOP_CONTROL_EPOCH_CHANGED'].includes(code)) {
     return '需要先点画面接管云电脑，才能读写云端剪贴板';
   }
   if (['DESKTOP_SESSION_IDLE', 'DESKTOP_SESSION_NOT_FOUND', 'CLIPBOARD_CLOSED'].includes(code)) {
     return '云电脑已空闲或断开，请先恢复画面再试';
   }
+  if (code === 'CLIPBOARD_UPGRADE_REQUIRED') return '当前云端版本尚不支持剪贴板，请更新云端助理后重试';
+  if (code === 'CLIPBOARD_CONTROL_REQUIRED') return '需要先接管云电脑，才能读写云端剪贴板';
+  if (code === 'CLIPBOARD_RESPONSE_INVALID') return '云端没有确认剪贴板操作成功，请重试';
+  if (code === 'CLIPBOARD_TIMEOUT') return '云端剪贴板响应超时，请检查连接后重试';
+  if (code === 'CLIPBOARD_UNAVAILABLE') return '云电脑尚未连接，请恢复画面后重试';
   if (code === 'CLIPBOARD_TEXT_TOO_LARGE') return '剪贴板内容超过 64 KiB，云电脑剪贴板放不下';
   if (['DESKTOP_UNAVAILABLE', 'DESKTOP_FRAME_FAILED', 'DESKTOP_SESSION_FAILED'].includes(code)) return '云电脑暂时不可用，请稍后重试';
   if (['CLIPBOARD_FAILED', 'CLOUD_SESSION_FAILED'].includes(code)) return '剪贴板操作失败，请重试';
@@ -86,12 +107,17 @@ const nextRequestId = () => {
  * 云端契约（runtime/desktop-ws.mjs）：
  *   发 `{ type: 'clipboard.read' | 'clipboard.write', requestId, text? }`
  *   收 `{ type: 'clipboard.response', requestId, ok, value | error }`
- * 超时是必需的：旧版云端会直接回 DESKTOP_MESSAGE_UNSUPPORTED（不带 requestId），
- * 没有超时按钮就会一直转圈，所以这里超时即明确提示"云端待更新"。
+ * 旧版云端的 DESKTOP_MESSAGE_UNSUPPORTED 没有 requestId，收到后立即结束
+ * 在途请求；没有任何响应时只报告超时，不凭网络延迟猜测版本。
  */
 export function createClipboardChannel({ send, timeoutMs = 5000, controlEpoch, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   const pending = new Map();
+  const epochOf = () => {
+    try { return typeof controlEpoch === 'function' ? controlEpoch() : undefined; }
+    catch { return undefined; }
+  };
   const settle = (entry, settleWith) => {
+    if (!entry || !pending.has(entry.id)) return;
     pending.delete(entry.id);
     clearTimer(entry.timer);
     settleWith();
@@ -101,33 +127,46 @@ export function createClipboardChannel({ send, timeoutMs = 5000, controlEpoch, s
     const timer = setTimer(() => {
       const entry = pending.get(id);
       if (!entry) return;
-      settle(entry, () => reject(clipError('CLIPBOARD_TIMEOUT', '云端助理版本较旧，剪贴板通道未启用（重新部署后可用）')));
+      settle(entry, () => reject(clipError('CLIPBOARD_TIMEOUT', '云端剪贴板响应超时，请检查连接后重试')));
     }, timeoutMs);
+    const epoch = epochOf();
     pending.set(id, {
-      id, timer, resolve,
+      id, timer, type, epoch, resolve,
       reject: error => reject(error),
     });
     let sent = false;
     // handoff 会话里云端要求与 input 一样带 controlEpoch；非 handoff 会话会忽略它。
-    let epoch;
-    try { epoch = typeof controlEpoch === 'function' ? controlEpoch() : undefined; }
-    catch { epoch = undefined; }
     try { sent = send({ type, requestId: id, ...(Number.isSafeInteger(epoch) ? { controlEpoch: epoch } : {}), ...extra }) !== false; }
     catch (error) { settle(pending.get(id), () => reject(clipError('CLIPBOARD_UNAVAILABLE', '云电脑尚未连接，剪贴板暂不可用', error))); return; }
     // send() 返回 false 表示 socket 不在 OPEN：立刻失败，别让用户白等 5 秒。
     if (!sent) settle(pending.get(id), () => reject(clipError('CLIPBOARD_UNAVAILABLE', '云电脑尚未连接，剪贴板暂不可用')));
   });
-  return Object.freeze({
+  const channel = Object.freeze({
     read: () => request('clipboard.read').then(value => ({ text: clipboardTextOf(value) })),
-    write: text => request('clipboard.write', { text: String(text) }).then(value => ({ written: value?.written !== false })),
+    write: text => request('clipboard.write', { text: String(text) }).then(() => ({ written: true })),
     /** socket.onmessage 里把 clipboard.response 交给它；返回是否消费了这条消息。 */
     accept(message) {
+      if (message?.type === 'error' && message.code === 'DESKTOP_MESSAGE_UNSUPPORTED' && pending.size > 0) {
+        channel.rejectAll(clipError('CLIPBOARD_UPGRADE_REQUIRED', '当前云端版本尚不支持剪贴板，请更新云端助理后重试'));
+        return true;
+      }
       if (!message || message.type !== 'clipboard.response') return false;
       const entry = pending.get(String(message.requestId || ''));
       if (!entry) return false;
       settle(entry, () => {
-        if (message.ok !== false) entry.resolve(message.value);
-        else entry.reject(clipError(message.error?.code || 'CLIPBOARD_FAILED', message.error?.message || '', message.error));
+        if (Number.isSafeInteger(entry.epoch) && entry.epoch !== epochOf()) {
+          entry.reject(clipError('DESKTOP_CONTROL_EPOCH_CHANGED', '云电脑控制权已改变，本次剪贴板操作未完成')); return;
+        }
+        if (message.ok === false) {
+          entry.reject(clipError(message.error?.code || 'CLIPBOARD_FAILED', message.error?.message || '', message.error)); return;
+        }
+        const valid = entry.type === 'clipboard.read'
+          ? typeof message.value === 'string' || typeof message.value?.text === 'string'
+          : message.value?.written === true;
+        if (message.ok !== true || !valid) {
+          entry.reject(clipError('CLIPBOARD_RESPONSE_INVALID', '云端没有确认剪贴板操作成功，请重试')); return;
+        }
+        entry.resolve(message.value);
       });
       return true;
     },
@@ -137,6 +176,7 @@ export function createClipboardChannel({ send, timeoutMs = 5000, controlEpoch, s
     },
     get size() { return pending.size; },
   });
+  return channel;
 }
 
 /** 画布上的 ⌘V / Ctrl+V 是否该走"本地→云端"的粘贴流程（而不是把按键原样转给云桌面）。 */
@@ -159,14 +199,25 @@ export function isCopyShortcut(event) {
  * 粘贴：本地剪贴板 → 云电脑剪贴板 → 云桌面 Ctrl+V。
  * notify 负责把结果写进面板上的轻提示；返回结构化结果方便调用方/测试断言。
  */
-export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = () => {} } = {}) {
+export async function pasteToCloud({ readLocal, writeCloud, sendKeys, ensureControl, notify = () => {} } = {}) {
   const read = readLocal || (() => readLocalClipboard());
   let text = '';
   try { text = await read(); }
   catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许读取剪贴板，请按 ⌘V / Ctrl+V 再试'); return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' }; }
   if (!text) { notify('本地剪贴板是空的，没有可粘贴的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
   if (byteLength(text) > MAX_CLIPBOARD_BYTES) { notify('剪贴板内容超过 64 KiB，云电脑剪贴板放不下'); return { ok: false, code: 'CLIPBOARD_TOO_LARGE' }; }
-  try { await writeCloud(text); }
+  if (typeof ensureControl === 'function') {
+    try {
+      if (!await ensureControl()) { notify('需要先接管云电脑，才能粘贴到云电脑'); return { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' }; }
+    } catch (error) {
+      notify(clipboardFriendlyError(error) || '接管云电脑失败，请重试');
+      return { ok: false, code: error?.code || 'CLIPBOARD_CONTROL_REQUIRED' };
+    }
+  }
+  try {
+    const result = await writeCloud(text);
+    if (result?.written !== true) throw clipError('CLIPBOARD_RESPONSE_INVALID', '云端没有确认剪贴板写入成功，请重试');
+  }
   catch (error) { notify(clipboardFriendlyError(error) || '写入云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
   if (typeof sendKeys === 'function') {
     let sent = false;
@@ -180,8 +231,16 @@ export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = (
 }
 
 /** 复制：云电脑剪贴板 → 本地剪贴板。 */
-export async function copyCloudClipboard({ readCloud, writeLocal, notify = () => {} } = {}) {
+export async function copyCloudClipboard({ readCloud, writeLocal, ensureControl, notify = () => {} } = {}) {
   const write = writeLocal || (text => writeLocalClipboard(text));
+  if (typeof ensureControl === 'function') {
+    try {
+      if (!await ensureControl()) { notify('需要先接管云电脑，才能复制云电脑内容'); return { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' }; }
+    } catch (error) {
+      notify(clipboardFriendlyError(error) || '接管云电脑失败，请重试');
+      return { ok: false, code: error?.code || 'CLIPBOARD_CONTROL_REQUIRED' };
+    }
+  }
   let value;
   try { value = await readCloud(); }
   catch (error) { notify(clipboardFriendlyError(error) || '读取云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_READ_FAILED' }; }

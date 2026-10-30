@@ -13,15 +13,18 @@ function permit(mode = 'control', botId = 'bot') {
   const body = Buffer.from(JSON.stringify({ iss: 'agentengine-server', aud: 'agentkit-personal-assistant-desktop', scope: 'desktop', agentId: 'a', botId, mode, iat: now, exp: now + 60, jti: randomUUID() })).toString('base64url');
   return `${header}.${body}.${sign(null, Buffer.from(`${header}.${body}`), privateKey).toString('base64url')}`;
 }
-async function fixture(t, { browserFactory, onInput, executorFactory } = {}) {
+async function fixture(t, { browserFactory, onInput, executorFactory, desktopMode = '0' } = {}) {
   const sessions = new Map(), inputs = [];
+  const clipboard = { text: '云电脑控制台剪贴板', writes: [] };
   const view = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controlEpoch: session.controlEpoch, idleMode: 'retain-desktop' });
-  const service = createComputerAgentServer({ env, executorFactory, browserFactory: browserFactory || (() => ({ available: true, openDesktopWindow: async () => ({}), dispose: async () => {} })), desktopFactory: () => ({
+  const service = createComputerAgentServer({ env: { ...env, ...(desktopMode === '1' ? { AGENTKIT_DESKTOP_MODE: '1' } : {}) }, executorFactory, browserFactory: browserFactory || (() => ({ available: true, openDesktopWindow: async () => ({}), dispose: async () => {} })), desktopFactory: () => ({
     ensureDisplay: async () => {},
     openSession: async value => { const session = { ...value, sessionId: randomUUID(), controlEpoch: 0 }; sessions.set(session.sessionId, session); return view(session); },
     getSession: id => sessions.get(id),
     setSessionControl: async ({ sessionId, controllable, leaseId, taskId }) => { const session = sessions.get(sessionId); Object.assign(session, { controllable, leaseId, taskId, controlEpoch: session.controlEpoch + 1 }); return view(session); },
     input: async value => { inputs.push(value); await onInput?.(value); return { accepted: true }; },
+    readClipboard: async () => clipboard.text,
+    writeClipboard: async value => { clipboard.writes.push(value); clipboard.text = value; return { written: true }; },
     closeSessionsForLease: leaseId => { for (const [id, session] of sessions) if (session.leaseId === leaseId) sessions.delete(id); },
     closeSession: id => sessions.delete(id),
     stats: () => ({ sessions: sessions.size }), dispose: async () => {},
@@ -31,7 +34,7 @@ async function fixture(t, { browserFactory, onInput, executorFactory } = {}) {
   }) });
   service.listen(); await once(service.server, 'listening'); t.after(() => service.close());
   const post = async (path, body = {}, options = {}) => { const response = await fetch(`http://127.0.0.1:${service.server.address().port}/broker/${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ userId: 'u', assistantId: 'a', computerId: 'c', botId: 'bot', taskId: 'human', ...body }), ...options }); return { status: response.status, value: await response.json() }; };
-  return { post, sessions, inputs };
+  return { post, sessions, inputs, clipboard };
 }
 
 test('human control requires a signed control grant; read/forged/replayed grants never acquire', async t => {
@@ -97,6 +100,27 @@ test('human takeover preserves video session, fences old input, rejects second c
   assert.equal(sessions.has(sessionId), true);
   assert.equal((await post('lease/acquire', { botId: 'other', taskId: 'other' })).status, 200);
   assert.equal((await post('desktop/input', { sessionId, leaseId, controlEpoch: 1, event: { type: 'text', text: 'stale' } })).status, 409);
+});
+
+test('已接管桌面会话的 human 租约可以安全读写剪贴板，普通 action 仍拒绝 human 租约', async t => {
+  const { post, clipboard } = await fixture(t, { desktopMode: '1' });
+  const opened = (await post('desktop/session', { mode: 'observe', controlPermit: permit() })).value;
+  const acquired = await post('desktop/control/acquire', { sessionId: opened.sessionId, controlEpoch: 0 });
+  assert.equal(acquired.status, 200);
+  const identity = { sessionId: opened.sessionId, leaseId: acquired.value.lease.leaseId, controlEpoch: acquired.value.controlEpoch };
+  const read = await post('action', { ...identity, action: 'clipboard.read', args: {} });
+  assert.equal(read.status, 200);
+  assert.deepEqual(read.value, { text: '云电脑控制台剪贴板' });
+  const write = await post('action', { ...identity, action: 'clipboard.write', args: { text: '面板复制到云电脑' } });
+  assert.equal(write.status, 200);
+  assert.deepEqual(write.value, { written: true });
+  assert.deepEqual(clipboard.writes, ['面板复制到云电脑']);
+  const stale = await post('action', { ...identity, controlEpoch: identity.controlEpoch - 1, action: 'clipboard.read', args: {} });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.value.error, 'DESKTOP_CONTROL_EPOCH_CHANGED');
+  const ordinary = await post('action', { ...identity, action: 'desktop.windows', args: {} });
+  assert.equal(ordinary.status, 409);
+  assert.equal(ordinary.value.error, 'COMPUTER_USER_CONTROLLED');
 });
 
 test('an agent CDP command already waiting cannot mutate after human takeover', async t => {

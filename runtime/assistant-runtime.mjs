@@ -35,6 +35,7 @@ const workspace = values.get('workspace') || env.WORKSPACE_PATH || env.AGENTKIT_
 const artifacts = values.get('artifacts') || env.AGENTKIT_ARTIFACTS_DIR || `${workspace}/files`;
 const state = values.get('state') || env.ASSISTANT_STATE_PATH || env.AGENTKIT_STATE_DIR || `${workspace}/.agentkit/state`;
 const runtimeToken = env.AGENTKIT_RUNTIME_TOKEN || '';
+const runtimeInstanceId = randomUUID();
 const registryPath = values.get('bot-registry') || env.BOT_REGISTRY_PATH;
 await mkdir(workspace, { recursive: true, mode: 0o700 });
 await mkdir(artifacts, { recursive: true, mode: 0o750 });
@@ -360,7 +361,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles }) });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles }) });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
 return { server, stateStore, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }

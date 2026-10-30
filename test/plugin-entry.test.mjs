@@ -102,7 +102,7 @@ test('client maps durable session, memory, and schedule operations to the public
   await client.listSchedules();
   await client.deleteSchedule('review');
   assert.deepEqual(requests.map(item => item.operation), [
-    'personal-assistant.sessions.create', 'personal-assistant.sessions.list',
+    'personal-assistant.session.create', 'personal-assistant.sessions.list',
     'personal-assistant.sessions.messages.list', 'personal-assistant.sessions.messages.append',
     'personal-assistant.sessions.turns.list', 'personal-assistant.sessions.turns.submit',
     'personal-assistant.memory.upsert', 'personal-assistant.memory.search',

@@ -285,6 +285,26 @@ test('原生云电脑自动旁观；首击等待控制确认再注入，点外�
   assert.match(panel.text(), /点画面即可接管/u);
 });
 
+test('面板粘贴先等待 human 控制回执，再写剪贴板和发送 Ctrl+V', async t => {
+  const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'] }); await flush();
+  const socket = panel.sockets.at(-1); socket.open();
+  socket.message({ type: 'ready', sessionId: 'viewer', readOnly: true, controlAvailable: true, controlEpoch: 0, display: { width: 1280, height: 800 } });
+  socket.message({ type: 'frame', seq: 1 }); socket.message(new ArrayBuffer(8)); await flush();
+  const input = panel.nodes().find(node => node.type === 'input' && node.props['aria-label'] === '云电脑文本输入');
+  input.props.onPaste({ clipboardData: { getData: () => '面板粘贴内容' }, preventDefault() {} }); await flush();
+  assert.equal(socket.sent.at(-1).type, 'control.acquire');
+  assert.equal(socket.sent.some(value => value.type === 'clipboard.write' || value.type === 'input'), false);
+  socket.message({ type: 'control', readOnly: false, controlAvailable: true, controlEpoch: 1 });
+  t.mock.timers.tick(50); await flush();
+  const write = socket.sent.at(-1);
+  assert.equal(write.type, 'clipboard.write'); assert.equal(write.controlEpoch, 1); assert.equal(write.text, '面板粘贴内容');
+  socket.message({ type: 'clipboard.response', requestId: write.requestId, ok: true, value: { written: true } }); await flush();
+  assert.deepEqual(socket.sent.filter(value => value.type === 'input').map(value => value.event), [
+    { type: 'key', action: 'down', key: 'Control_L' }, { type: 'key', action: 'down', key: 'v' },
+    { type: 'key', action: 'up', key: 'v' }, { type: 'key', action: 'up', key: 'Control_L' },
+  ]);
+});
+
 test('原生全屏 Escape 交给宿主，不注入远端，也不自绘断开或全屏按钮', async t => {
   const panel = panelHarness(t, { variant: 'native-tab', nativeFullscreen: true }); await flush();
   const socket = panel.sockets.at(-1); socket.open();

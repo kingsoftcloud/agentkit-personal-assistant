@@ -163,9 +163,30 @@ function leaseFor(body) {
   if (!leaseIdentityMatches(lease, body)) throw Object.assign(new Error(lease?.kind === 'human' ? '用户正在操作云电脑，请等待交还后继续' : 'COMPUTER_LEASE_REQUIRED'), { code: lease?.kind === 'human' ? 'COMPUTER_USER_CONTROLLED' : 'COMPUTER_LEASE_REQUIRED', status: 409 });
   return lease;
 }
+/**
+ * 剪贴板既由云端 Agent 工具使用，也由已接管桌面的 Studio 面板使用。
+ * 后者持有的是 human 控制租约，不能沿用普通 Agent action 的校验；只对
+ * 当前 desktop session、控制代次和控制授权全部匹配的读写放行，其他 action
+ * 仍然严格拒绝 human 租约。
+ */
+function assertClipboardLease(body) {
+  const lease = leaseFor(body);
+  if (lease.kind !== 'human') return lease;
+  const sessionId = String(body.sessionId || '');
+  const session = sessionId ? desktop?.getSession(sessionId) : undefined;
+  if (!session || !controlGrants.has(sessionId) || session.leaseId !== lease.leaseId
+    || session.botId !== body.botId || session.taskId !== body.taskId || !session.controllable) {
+    throw Object.assign(new Error('剪贴板未绑定当前桌面控制会话'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+  }
+  if (!Number.isSafeInteger(body.controlEpoch) || body.controlEpoch !== session.controlEpoch) {
+    throw Object.assign(new Error('桌面控制代次已改变'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
+  }
+  return lease;
+}
 async function action(body, { signal } = {}) {
   signal?.throwIfAborted();
-  const lease = assertAgentLease(body);
+  const clipboardAction = body.action === 'clipboard.read' || body.action === 'clipboard.write';
+  const lease = clipboardAction ? assertClipboardLease(body) : assertAgentLease(body);
   return actionContext.run({ ...body, leaseId: lease.leaseId, signal }, async () => {
   const args = body.args || {};
   if (body.action.startsWith('desktop.')) {
