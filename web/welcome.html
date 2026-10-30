@@ -56,7 +56,7 @@
 
   /* 应用栅格 */
   .grid{
-    margin-top:34px; display:grid; grid-template-columns:repeat(4,84px);
+    margin-top:34px; display:grid; grid-template-columns:repeat(5,84px);
     gap:22px 18px; justify-items:center;
   }
   .app{
@@ -74,22 +74,6 @@
   .app:focus-visible .app__icon{outline:2px solid var(--accent); outline-offset:2px}
   .app__icon svg{width:26px; height:26px}
   .app__label{font-size:11.5px; color:#555; letter-spacing:.2px}
-
-  /* 底部 dock */
-  .dock{
-    position:absolute; bottom:20px; left:50%; transform:translateX(-50%);
-    display:flex; align-items:center; gap:8px;
-    padding:8px 10px; border-radius:26px;
-    background:rgba(255,255,255,.72); border:1px solid rgba(0,0,0,.06);
-    box-shadow:0 6px 20px rgba(15,15,15,.10);
-    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
-  }
-  .dock button{
-    width:40px; height:40px; border:0; border-radius:12px; cursor:pointer;
-    background:transparent; display:flex; align-items:center; justify-content:center;
-  }
-  .dock button:hover{background:rgba(0,0,0,.05)}
-  .dock button svg{width:22px; height:22px}
 
   /* 提示条 */
   .toast{
@@ -173,18 +157,6 @@
       <span class="app__label">工作区</span>
     </button>
   </div>
-</div>
-
-<div class="dock" aria-label="快捷入口">
-  <button data-action="browser" title="浏览器" aria-label="浏览器">
-    <svg viewBox="0 0 24 24" fill="none" stroke="#2f6bff" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><path d="M4 12h16"/></svg>
-  </button>
-  <button data-action="terminal" title="终端" aria-label="终端">
-    <svg viewBox="0 0 24 24" fill="none" stroke="#2b2b2b" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M7.5 10l2.8 2-2.8 2"/><path d="M12.5 14h3.5"/></svg>
-  </button>
-  <button data-action="files" title="文件" aria-label="文件">
-    <svg viewBox="0 0 24 24" fill="none" stroke="#e39a1f" stroke-width="1.8" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2.4h7a2 2 0 0 1 2 2v7.6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>
-  </button>
 </div>
 
 <div class="toast" id="toast"></div>

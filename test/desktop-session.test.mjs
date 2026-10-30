@@ -155,6 +155,7 @@ test('窗口管理器逐字复制系统默认绑定，并使用独立 HOME 而�
     assert.equal(launched.options.env.LANG, 'zh_CN.UTF-8');
     assert.equal(launched.options.env.LANGUAGE, 'zh_CN:zh');
     assert.equal(launched.options.env.LC_ALL, undefined);
+    assert.equal(launched.options.env.LC_CTYPE, 'C.UTF-8');
     controller.closeSession(first.sessionId);
     await controller.openSession({ identity: {} });
     assert.equal(reads, 1, '同一桌面启动期间不重复准备窗口管理器');
@@ -217,6 +218,7 @@ test('真实应用底栏只启动固定程序、复用窗口，关闭观察不�
     // 三个图标之外不留空白：面板宽度随内容收缩。
     assert.match(dock, /panel_size = 0 56/u);
     assert.match(dock, /panel_shrink = 1/u);
+    assert.match(dock, /^panel_position = bottom center horizontal$/mu);
     assert.equal(dock.includes('time1_format'), false);
     assert.equal(dock.includes('clock_'), false);
     assert.equal(dock.includes('taskbar_'), false);
@@ -373,6 +375,7 @@ test('旁观三分钟不休眠、关闭观察后十二分钟再开仍复用 X11 
     assert.equal(terminal.options.env.LANG, 'zh_CN.UTF-8');
     assert.equal(terminal.options.env.LANGUAGE, 'zh_CN:zh');
     assert.equal(terminal.options.env.LC_ALL, undefined);
+    assert.equal(terminal.options.env.LC_CTYPE, 'C.UTF-8');
   } finally { await controller.dispose(); }
 });
 

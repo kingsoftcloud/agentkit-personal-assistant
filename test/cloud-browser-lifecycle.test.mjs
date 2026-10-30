@@ -334,12 +334,13 @@ test('桌面浏览器固定使用简体中文界面与页面语言偏好', async
 test('桌面浏览器进程使用中文 locale，无头模式仍是 C.UTF-8', async () => {
   const { readFile } = await import('node:fs/promises');
   const source = await readFile(new URL('../runtime/cloud-browser-cdp.mjs', import.meta.url), 'utf8');
-  assert.match(source, /LANG: 'zh_CN\.UTF-8', LANGUAGE: 'zh_CN:zh'/u);
+  assert.match(source, /LANG: 'zh_CN\.UTF-8', LANGUAGE: 'zh_CN:zh', LC_CTYPE: 'C\.UTF-8'/u);
   assert.match(source, /LANG: 'C\.UTF-8', LC_ALL: 'C\.UTF-8'/u);
   // LC_ALL 会盖过 LANG：桌面模式的分支里不能再出现 LC_ALL。
-  const desktopBranch = source.match(/desktop\s*\n?\s*\? \{ LANG: '([^']+)', LANGUAGE: '([^']+)' \}/u);
+  const desktopBranch = source.match(/desktop\s*\n?\s*\? \{ LANG: '([^']+)', LANGUAGE: '([^']+)', LC_CTYPE: '([^']+)' \}/u);
   assert.ok(desktopBranch, '桌面分支必须显式给 LANG/LANGUAGE');
   assert.equal(desktopBranch[1], 'zh_CN.UTF-8');
+  assert.equal(desktopBranch[3], 'C.UTF-8');
 });
 
 

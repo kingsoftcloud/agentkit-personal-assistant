@@ -164,7 +164,7 @@ export function createDesktopController({
     : String(process.env.AGENTKIT_DESKTOP_TIME_ZONE || 'Asia/Shanghai');
   // 桌面面向中文用户：终端、文件管理器、窗口管理器都用简体中文（LC_ALL 会盖过 LANG）。
   // 清掉继承来的 LC_ALL；它会覆盖 LANG，导致中文桌面和 xclip 的字符集行为随宿主漂移。
-  const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'zh_CN.UTF-8', LANGUAGE: 'zh_CN:zh', LC_ALL: undefined, TZ: timeZone });
+  const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'zh_CN.UTF-8', LANGUAGE: 'zh_CN:zh', LC_ALL: undefined, LC_CTYPE: 'C.UTF-8', TZ: timeZone });
   const trackStartupProcess = (name, child) => {
     const diagnostic = { stderr: '', exitCode: null, signal: null };
     processDiagnostics.set(name, diagnostic);
