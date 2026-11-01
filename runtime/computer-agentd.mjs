@@ -7,6 +7,7 @@ import { verifyDesktopPermit } from './desktop-permit.mjs';
 import { createCloudBrowser } from './cloud-browser.mjs';
 import { createCloudExecutor } from './cloud-execution.mjs';
 import { createDesktopController, DESKTOP_CLIPBOARD_MAX_BYTES } from './desktop-session.mjs';
+import { createBuildInfo } from './build-info.mjs';
 
 export function createComputerAgentServer({ env = process.env, desktopFactory = createDesktopController, browserFactory = createCloudBrowser, executorFactory = createCloudExecutor, logger = console } = {}) {
 const host = env.COMPUTER_HOST || '127.0.0.1';
@@ -89,7 +90,7 @@ const openDshWeb = async ({ signal } = {}) => {
   await browser.closeBlankTabs?.();
   return { ...view, ...page };
 };
-desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', workspace,
+desktop = desktopFactory({ applications: env.AGENTKIT_DESKTOP_MODE === '1', workspace, buildInfo: createBuildInfo(env),
   // 默认不预开终端窗口：欢迎页/dock 已经能按需启动终端，开机就弹一个
   // xterm 会盖住欢迎页。排障或旧行为可用 AGENTKIT_DESKTOP_TERMINAL=1 打开。
   terminal: env.AGENTKIT_DESKTOP_TERMINAL === '1',

@@ -169,13 +169,14 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const [binding, setBinding] = useState(null);
   const [busy, setBusy] = useState('');
   const [clipboardNotice, setClipboardNotice] = useState('');
+  const [desktopDiagnostics, setDesktopDiagnostics] = useState(null);
   // 桌面卡片尺寸由「可用宽 × 可用高」共同决定：全屏后高度不够时按高度反推宽度，
   // 保证远端整幅画面（含云浏览器顶部地址/输入条）完整可见，不靠滚动兜底。
   const [desktopDisplay, setDesktopDisplay] = useState(() => normalizeDisplay());
   const [stageBox, setStageBox] = useState(null);
   const controlRef = useRef(null);
   const clipboardRef = useRef(null), clipboardTimerRef = useRef(null);
-  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null), stageAreaRef = useRef(null);
+  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null), stageAreaRef = useRef(null), controlCapsuleRef = useRef(null);
   const fullscreenRef = useRef(nativeFullscreen); fullscreenRef.current = nativeFullscreen;
   const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false, controlError: '' });
   state.current.botId = botId;
@@ -232,6 +233,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     try { send({ type: 'close' }); current.socket?.close(1000, 'panel closed'); } catch {}
     controlRef.current.reset({ readOnly: true }); current.lastDrawnFrame = null; current.socket = null; current.session = null; current.pendingFrame = null; current.frameMetadata = null; current.readOnly = true; inputRef.current?.blur();
     current.suspended = false; current.resuming = false; current.pendingInputs = []; current.frameEpoch++;
+    if (current.mounted) setDesktopDiagnostics(null);
     if (announce && current.mounted) { setPhase(current.config?.configured ? 'idle' : 'unconfigured'); setReadOnly(true); }
   };
   const ended = value => {
@@ -416,6 +418,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         if (value.type === 'ready') {
           current.suspended = false; current.resuming = false; current.receivedSeq = -1;
           current.session = value.sessionId; current.readOnly = Boolean(value.readOnly); current.display = normalizeDisplay(value.display); setDesktopDisplay(current.display);
+          setDesktopDiagnostics(value.diagnostics || null);
           current.mode = mode;
           controlRef.current.reset(value);
           const inputs = current.pendingInputs; current.pendingInputs = [];
@@ -596,14 +599,20 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const emptyTitle = phase === 'unconfigured' ? bindingTitle : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法连接云端助理' : '正在检查助理状态';
   const emptyDetail = phase === 'unconfigured' ? bindingDetail : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
   const computerVariant = variant === 'computer' || variant === 'native-tab';
-  // 右下角胶囊与"诊断"不再占桌面卡片的高度预算：卡片按量出来的可用区域取 contain 尺寸。
+  // 接管状态紧贴桌面卡片下方；测量时扣掉胶囊本身，避免状态条把画面挤出右栏。
   useLayoutEffect(() => {
     if (!computerVariant) return undefined;
     const node = stageAreaRef.current;
     if (!node) return undefined;
     const measure = () => {
       const rect = node.getBoundingClientRect();
-      const next = fitDesktopBox({ availableWidth: rect.width, availableHeight: rect.height, display: desktopDisplay, maxWidth: 1280 });
+      const measuredCapsuleHeight = controlCapsuleRef.current?.getBoundingClientRect?.().height || 0;
+      // Some hosts expose the parent rect for an unlaid-out child during the
+      // first pass. Cap the measurement so that transient geometry cannot
+      // collapse the desktop card to 0x0; ResizeObserver will refine it later.
+      const capsuleHeight = active || selectable ? Math.min(128, Math.max(44, measuredCapsuleHeight)) : 0;
+      const availableHeight = Math.max(0, rect.height - (capsuleHeight ? capsuleHeight + 10 : 0));
+      const next = fitDesktopBox({ availableWidth: rect.width, availableHeight, display: desktopDisplay, maxWidth: 1280 });
       setStageBox(previous => {
         if (!(next.width > 0 && next.height > 0)) return previous ?? null;
         return previous && Math.abs(previous.width - next.width) < 0.5 && Math.abs(previous.height - next.height) < 0.5 ? previous : next;
@@ -612,8 +621,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     measure();
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
     observer?.observe(node);
+    if (controlCapsuleRef.current) observer?.observe(controlCapsuleRef.current);
     return () => observer?.disconnect();
-  }, [computerVariant, desktopDisplay]);
+  }, [computerVariant, desktopDisplay, active, selectable, controlPhase, notice, clipboardNotice]);
   const guidance = phase === 'unconfigured' ? unconfiguredGuidance(binding) : null;
   const onboardingClick = action => {
     if (action === 'check') void refreshConnection();
@@ -668,16 +678,28 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         null) : null,
       readOnly && active && !controlRef.current.snapshot.available ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
       h('div', { 'data-personal-assistant-desktop-layout': 'true', style: { flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '20px 16px 12px', boxSizing: 'border-box' } },
-      h('div', { ref: stageAreaRef, 'data-personal-assistant-desktop-stack': 'true', style: { width: '100%', maxWidth: 1280, minHeight: 0, flex: '1 1 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 } }, onboarding || stage),
-      active || selectable ? h('div', { 'data-personal-assistant-control-capsule': 'true', role: 'status', 'aria-live': 'polite', style: { flex: 'none', display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 6, width: 'fit-content', maxWidth: '100%', boxSizing: 'border-box', padding: '7px 12px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', border: ui.border, boxShadow: '0 1px 4px #10182808', lineHeight: 1.5 } },
+      h('div', { ref: stageAreaRef, 'data-personal-assistant-desktop-stack': 'true', style: { width: '100%', maxWidth: 1280, minHeight: 0, flex: '1 1 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 } },
+      onboarding || stage,
+      active || selectable ? h('div', { ref: controlCapsuleRef, 'data-personal-assistant-control-capsule': 'true', role: 'status', 'aria-live': 'polite', style: { flex: 'none', display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 6, width: 'fit-content', maxWidth: '100%', boxSizing: 'border-box', padding: '7px 12px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', border: ui.border, boxShadow: '0 1px 4px #10182808', lineHeight: 1.5 } },
         !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open(state.current.handoffSupported ? 'observe' : 'read') }, phase === 'connecting' ? '正在启动…' : '重新连接') : null,
         active && readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, controlPhase === 'acquiring' ? '正在接管…' : controlPhase === 'releasing' ? '正在交还…' : '助理正在使用 · 点画面即可接管') : null,
         active && readOnly && controlRef.current.snapshot.available ? h('button', { style: { ...pillStyle, padding: '3px 9px', fontSize: 11 }, onClick: () => controlRef.current.acquire() }, '接管') : null,
         active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '您拥有控制权 · 点画面外释放') : null,
+        active && !readOnly ? h('button', { style: { ...ghostStyle, padding: '3px 9px', fontSize: 11 }, onClick: releaseControl }, '交还') : null,
         active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null,
         // 剪贴板不再放按钮：面板里只保留 ⌘V 粘贴 / ⌘C 复制与一行状态文字。
         active && clipboardNotice ? h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, clipboardNotice) : null) : null),
-      h('details', { style: { flex: 'none', alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } }, h('summary', { style: { cursor: 'pointer' } }, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
+      ),
+      h('details', { style: { flex: 'none', alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } },
+        h('summary', { style: { cursor: 'pointer' } }, '诊断'),
+        h('div', { style: { paddingTop: 8, lineHeight: 1.7 } },
+          h('div', null, `客户端：${PERSONAL_ASSISTANT_CLIENT_BUILD}`),
+          desktopDiagnostics ? h('div', null, `云电脑包：${desktopDiagnostics.packageVersion || '未知'} · 清单：${desktopDiagnostics.manifestVersion || '未知'}`) : null,
+          desktopDiagnostics?.runtimeBuild && desktopDiagnostics.runtimeBuild !== 'unknown' ? h('div', null, `运行时构建：${desktopDiagnostics.runtimeBuild}`) : null,
+          desktopDiagnostics?.computerImage && desktopDiagnostics.computerImage !== 'unknown' ? h('div', null, `电脑镜像：${desktopDiagnostics.computerImage}`) : null,
+          desktopDiagnostics?.dock ? h('div', null, `Dock：${desktopDiagnostics.dock.position} · ${desktopDiagnostics.dock.iconCount} 个图标`) : null,
+        )),
+      );
   }
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },
     h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 12, borderBottom: ui.border } },
@@ -693,7 +715,13 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     h('footer', { style: { display: 'flex', alignItems: 'start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', borderTop: ui.border } },
       h('details', { open: diagnosticsOpen, onToggle: event => setDiagnosticsOpen(event.currentTarget.open) }, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
         directoryCloseCode ? h('div', { style: { paddingTop: 8 } }, `目录连接关闭码：${directoryCloseCode}`) : null,
-        h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('div', null, `云端实例：${config?.agentId || '未开通'}`), h('div', null, `连接标识：${botId || '未连接'}`), h('div', null, `画面帧率：${fps} fps`), h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
+        h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } },
+          h('div', null, `云端实例：${config?.agentId || '未开通'}`),
+          h('div', null, `连接标识：${botId || '未连接'}`),
+          h('div', null, `画面帧率：${fps} fps`),
+          desktopDiagnostics ? h('div', null, `云电脑包：${desktopDiagnostics.packageVersion || '未知'} · 清单：${desktopDiagnostics.manifestVersion || '未知'}`) : null,
+          desktopDiagnostics?.dock ? h('div', null, `Dock：${desktopDiagnostics.dock.position} · ${desktopDiagnostics.dock.iconCount} 个图标`) : null,
+          h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
       h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD, style: { opacity: 0.75 } }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
 }
 

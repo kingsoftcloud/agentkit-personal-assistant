@@ -494,6 +494,7 @@ test('UTF-8 paste sends the paste while its clipboard owner is alive and then re
   const session = await controller.openSession({ identity: {}, controllable: true, leaseId: 'l' });
   await controller.input({ sessionId: session.sessionId, event: { type: 'text', text } });
   assert.equal(owned, false);
+  assert.ok(calls.some(call => call[0] === 'xdotool' && call[1] === 'keydown' && call.includes('Control_L')));
   assert.ok(calls.some(call => call[0] === 'xdotool' && call.includes('v')));
   assert.ok(calls.every(call => !call.includes('--clearmodifiers')));
   controller.dispose();

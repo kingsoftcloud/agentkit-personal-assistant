@@ -34,6 +34,7 @@
   "files": [
     "src",
     "runtime",
+    "web",
     "scripts",
     "personal-assistant.plugin.json",
     "cordis.patch.yml",

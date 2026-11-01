@@ -338,7 +338,8 @@ test('原生桌面卡片同时受可用宽高约束，全屏不滚动、胶囊�
   assert.ok(width <= 1187 + 0.5 && height <= 741.88 + 0.5, `卡片不得超出可用区，实际 ${width}x${height}`);
   assert.ok(Math.abs(width / height - 1280 / 800) < 0.01, '卡片保持远端桌面的宽高比');
   assert.ok(card.props.style.borderRadius > 0); assert.equal(card.props.style.padding, undefined);
-  assert.equal(stack.children.length, 1); assert.equal(stack.children[0], card, 'stack 只包画面，胶囊不再参与画面高度预算');
+  assert.equal(stack.children.length, 2); assert.equal(stack.children[0], card, 'stack 先放画面');
+  assert.equal(stack.children[1], capsule, '接管胶囊附着在云电脑卡片下方');
   assert.ok(capsule, '控制胶囊仍然渲染');
   assert.equal(capsule.props.style.position, undefined); assert.equal(capsule.props.style.transform, undefined);
   assert.ok(nodes.some(node => node.props.role === 'alert' && /只读旁观/.test(node.children.join(''))));
