@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPersonalAssistantStateStore } from '../src/persistent-state.mjs';
@@ -26,4 +26,15 @@ test('sessions, memory, and schedules survive a runtime restart', async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('损坏的会话目录不能当成空目录读取或被新建会话覆盖', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'personal-assistant-corrupt-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await createPersonalAssistantStateStore(root).init();
+  const corrupt = '{"unexpected":"sessions-shape"}';
+  await writeFile(join(root, 'sessions.json'), corrupt);
+  await assert.rejects(store.sessions('default'), { code: 'STATE_CORRUPT' });
+  await assert.rejects(store.createSession({ botId: 'default' }), { code: 'STATE_CORRUPT' });
+  assert.equal(await readFile(join(root, 'sessions.json'), 'utf8'), corrupt);
 });

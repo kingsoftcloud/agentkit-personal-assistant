@@ -35,7 +35,8 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
     selectedBot: () => selectedBotId,
     session: input => request('personal-assistant.session.create', { ...input, botId: input?.botId ?? selectedBotId }),
     listSessions: botId => request('personal-assistant.sessions.list', { botId: botId ?? selectedBotId }),
-    createSession: input => request('personal-assistant.sessions.create', { ...input, botId: input?.botId ?? selectedBotId }),
+    // 网关公开的是单数 session.create；旧的 sessions.create 从未进入云端会话通道。
+    createSession: input => request('personal-assistant.session.create', { ...input, botId: input?.botId ?? selectedBotId }),
     listMessages: sessionId => request('personal-assistant.sessions.messages.list', { sessionId, botId: selectedBotId }),
     appendMessage: (sessionId, input) => request('personal-assistant.sessions.messages.append', { sessionId, ...input, botId: input?.botId ?? selectedBotId }),
     listTurns: sessionId => request('personal-assistant.sessions.turns.list', { sessionId, botId: selectedBotId }),
@@ -69,7 +70,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, readCloudClipboardAfterCopy, clipboardTextOf, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -168,15 +169,16 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const [binding, setBinding] = useState(null);
   const [busy, setBusy] = useState('');
   const [clipboardNotice, setClipboardNotice] = useState('');
+  const [desktopDiagnostics, setDesktopDiagnostics] = useState(null);
   // 桌面卡片尺寸由「可用宽 × 可用高」共同决定：全屏后高度不够时按高度反推宽度，
   // 保证远端整幅画面（含云浏览器顶部地址/输入条）完整可见，不靠滚动兜底。
   const [desktopDisplay, setDesktopDisplay] = useState(() => normalizeDisplay());
   const [stageBox, setStageBox] = useState(null);
   const controlRef = useRef(null);
   const clipboardRef = useRef(null), clipboardTimerRef = useRef(null);
-  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null), stageAreaRef = useRef(null);
+  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null), stageAreaRef = useRef(null), controlCapsuleRef = useRef(null);
   const fullscreenRef = useRef(nativeFullscreen); fullscreenRef.current = nativeFullscreen;
-  const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false });
+  const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false, controlError: '' });
   state.current.botId = botId;
   const rpc = async (operation, payload = {}) => {
     if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
@@ -201,11 +203,12 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     send,
     changed: value => {
       const current = state.current; current.controlPhase = value.phase; current.readOnly = value.readOnly; current.controlEpoch = value.controlEpoch;
+      if (value.phase === 'controlling') current.controlError = '';
       if (value.readOnly && cursorRef.current) cursorRef.current.style.visibility = 'hidden';
       if (value.phase === 'observe') { current.pressed.clear(); current.buttons.clear(); }
       if (current.mounted) { setReadOnly(value.readOnly); setControlPhase(value.phase); }
     },
-    failed: message => { if (state.current.mounted) setNotice(message); },
+    failed: message => { state.current.controlError = message || '控制权暂不可用'; if (state.current.mounted) setNotice(message); },
   });
   // 剪贴板请求复用同一条桌面 WS（云端 desktop-ws 的 clipboard.read / clipboard.write），
   // 用 requestId 关联回复；旧版云端不认这两个消息类型，超时后给明确提示而不是转圈。
@@ -230,6 +233,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     try { send({ type: 'close' }); current.socket?.close(1000, 'panel closed'); } catch {}
     controlRef.current.reset({ readOnly: true }); current.lastDrawnFrame = null; current.socket = null; current.session = null; current.pendingFrame = null; current.frameMetadata = null; current.readOnly = true; inputRef.current?.blur();
     current.suspended = false; current.resuming = false; current.pendingInputs = []; current.frameEpoch++;
+    if (current.mounted) setDesktopDiagnostics(null);
     if (announce && current.mounted) { setPhase(current.config?.configured ? 'idle' : 'unconfigured'); setReadOnly(true); }
   };
   const ended = value => {
@@ -268,23 +272,52 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     for (const event of events) sent = input(event) || sent;
     return sent;
   };
-  // ⌘C：先把按键原样交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
-  // 之前只读剪贴板不转发按键，用户按 ⌘C 等于没复制，还会在输入框里反复触发按键。
+  // 剪贴板读写和桌面输入共用 human 控制租约。旁观状态下先申请接管并等待
+  // 服务端回执，避免“写入剪贴板”先于 lease 成功而稳定收到 409。
+  const ensureClipboardControl = async () => {
+    const current = state.current;
+    const snapshot = controlRef.current?.snapshot;
+    if (!current.session || current.socket?.readyState !== 1) { clipboardNotify('云电脑尚未连接，请先打开桌面'); return false; }
+    if (snapshot && snapshot.phase === 'controlling' && snapshot.readOnly === false) return true;
+    if (current.suspended || current.resuming) { clipboardNotify('云电脑正在恢复，请稍候再试'); return false; }
+    if (!snapshot?.available) { clipboardNotify('当前为只读旁观，请先打开控制模式'); return false; }
+    current.controlError = '';
+    if (!controlRef.current.acquire()) { clipboardNotify('当前无法接管云电脑，请重试'); return false; }
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const latest = controlRef.current.snapshot;
+      if (latest.phase === 'controlling' && latest.readOnly === false) return true;
+      if (current.controlError) break;
+    }
+    clipboardNotify(current.controlError || '接管云电脑超时，请重试');
+    return false;
+  };
+  // ⌘C：先把复制按键交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
+  // 云端桌面始终是 Linux，不能把 macOS 的 Meta 映射为 Super_L，否则 Linux 应用不会执行复制。
   const copyCloudClipboardToLocal = async () => {
-    const modifier = /Mac|iPhone|iPad/u.test(String(globalThis.navigator?.platform || '')) ? 'Meta' : 'Control';
+    if (!await ensureClipboardControl()) return { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' };
+    // 先记住旧 selection，再发 Ctrl+C；X11 的 selection owner 在按键后异步更新，
+    // 直接 sleep 150ms 仍可能读到旧文本，尤其是中文/浏览器渲染进程较忙时。
+    const before = await clipboardRef.current.read().catch(() => ({ text: '' }));
+    let sent = false;
     if (!state.current.pressed.has('_copyShortcut')) {
       state.current.pressed.add('_copyShortcut');
-      try {
-        sendDesktopKeys([
-          { type: 'key', action: 'down', key: modifier },
-          { type: 'key', action: 'down', key: 'c' },
-          { type: 'key', action: 'up', key: 'c' },
-          { type: 'key', action: 'up', key: modifier },
-        ]);
-        await new Promise(resolve => setTimeout(resolve, 150));
-      } finally { state.current.pressed.delete('_copyShortcut'); }
+      try { sent = sendDesktopKeys(copyShortcutEvents()) !== false; }
+      finally { state.current.pressed.delete('_copyShortcut'); }
     }
-    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
+    if (!sent) { clipboardNotify('复制按键未发送，请先接管云电脑后再试'); return { ok: false, code: 'CLIPBOARD_KEY_NOT_SENT' }; }
+    let settled;
+    try {
+      settled = await readCloudClipboardAfterCopy({
+        readCloud: () => clipboardRef.current.read(),
+        beforeText: clipboardTextOf(before),
+      });
+    } catch (error) {
+      clipboardNotify(error?.message || '读取云电脑剪贴板失败，请重试');
+      return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' };
+    }
+    return copyCloudClipboard({ readCloud: async () => settled, writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
   };
   // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
   // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。
@@ -304,6 +337,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     readLocal: () => readHostClipboard(),
     writeCloud: text => clipboardRef.current.write(text),
     sendKeys: sendDesktopKeys,
+    ensureControl: ensureClipboardControl,
     notify: clipboardNotify,
   });
   // paste 事件兜底：macOS 上 Electron 的编辑菜单可能先把 ⌘V 吃掉，但浏览器仍会把
@@ -312,6 +346,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     readLocal: async () => String(text ?? ''),
     writeCloud: value => clipboardRef.current.write(value),
     sendKeys: sendDesktopKeys,
+    ensureControl: ensureClipboardControl,
     notify: clipboardNotify,
   });
   const drawLatest = async () => {
@@ -396,6 +431,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         if (value.type === 'ready') {
           current.suspended = false; current.resuming = false; current.receivedSeq = -1;
           current.session = value.sessionId; current.readOnly = Boolean(value.readOnly); current.display = normalizeDisplay(value.display); setDesktopDisplay(current.display);
+          setDesktopDiagnostics(value.diagnostics || null);
           current.mode = mode;
           controlRef.current.reset(value);
           const inputs = current.pendingInputs; current.pendingInputs = [];
@@ -409,6 +445,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         if (value.type === 'clipboard.response') { clipboardRef.current?.accept(value); return; }
         if (value.type === 'closed') { if (value.retryable !== true) ended(value); return; }
         if (value.type === 'error') {
+          // 旧版 runtime 对 clipboard 消息只回无 requestId 的通用错误帧；
+          // 立刻结束在途请求，直接给出“版本较旧”提示，避免再等 5 秒超时。
+          if (clipboardRef.current?.accept(value)) return;
           if (Number.isSafeInteger(value.controlEpoch) && value.controlEpoch < current.controlEpoch) return;
           setNotice(value.message || value.code || '云电脑请求失败');
           if (current.handoffSupported && value.recoverable === true) { controlRef.current.reject(value); return; }
@@ -425,6 +464,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       socket.onerror = () => { if (valid()) setNotice('桌面通道暂时断开，正在重连'); };
       socket.onclose = event => {
         if (!valid()) return;
+        // 挂起/异常关闭都要立即结束在途请求；否则面板会等到超时才知道
+        // 剪贴板操作没有完成，而重连后的响应也不应误认领旧 requestId。
+        clipboardRef.current?.rejectAll();
         if (current.suspended && event.code !== 1000) { clearTimeout(current.firstFrame); current.firstFrame = null; current.socket = null; setPhase('dormant'); return; }
         current.session = null; clearTimeout(current.firstFrame); current.firstFrame = null;
         if (!current.reconnectAllowed || event.code === 1000) { ended(); return; }
@@ -570,14 +612,20 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const emptyTitle = phase === 'unconfigured' ? bindingTitle : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法连接云端助理' : '正在检查助理状态';
   const emptyDetail = phase === 'unconfigured' ? bindingDetail : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
   const computerVariant = variant === 'computer' || variant === 'native-tab';
-  // 右下角胶囊与"诊断"不再占桌面卡片的高度预算：卡片按量出来的可用区域取 contain 尺寸。
+  // 接管状态紧贴桌面卡片下方；测量时扣掉胶囊本身，避免状态条把画面挤出右栏。
   useLayoutEffect(() => {
     if (!computerVariant) return undefined;
     const node = stageAreaRef.current;
     if (!node) return undefined;
     const measure = () => {
       const rect = node.getBoundingClientRect();
-      const next = fitDesktopBox({ availableWidth: rect.width, availableHeight: rect.height, display: desktopDisplay, maxWidth: 1280 });
+      const measuredCapsuleHeight = controlCapsuleRef.current?.getBoundingClientRect?.().height || 0;
+      // Some hosts expose the parent rect for an unlaid-out child during the
+      // first pass. Cap the measurement so that transient geometry cannot
+      // collapse the desktop card to 0x0; ResizeObserver will refine it later.
+      const capsuleHeight = active || selectable ? Math.min(128, Math.max(44, measuredCapsuleHeight)) : 0;
+      const availableHeight = Math.max(0, rect.height - (capsuleHeight ? capsuleHeight + 10 : 0));
+      const next = fitDesktopBox({ availableWidth: rect.width, availableHeight, display: desktopDisplay, maxWidth: 1280 });
       setStageBox(previous => {
         if (!(next.width > 0 && next.height > 0)) return previous ?? null;
         return previous && Math.abs(previous.width - next.width) < 0.5 && Math.abs(previous.height - next.height) < 0.5 ? previous : next;
@@ -586,8 +634,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     measure();
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
     observer?.observe(node);
+    if (controlCapsuleRef.current) observer?.observe(controlCapsuleRef.current);
     return () => observer?.disconnect();
-  }, [computerVariant, desktopDisplay]);
+  }, [computerVariant, desktopDisplay, active, selectable, controlPhase, notice, clipboardNotice]);
   const guidance = phase === 'unconfigured' ? unconfiguredGuidance(binding) : null;
   const onboardingClick = action => {
     if (action === 'check') void refreshConnection();
@@ -642,16 +691,28 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         null) : null,
       readOnly && active && !controlRef.current.snapshot.available ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
       h('div', { 'data-personal-assistant-desktop-layout': 'true', style: { flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '20px 16px 12px', boxSizing: 'border-box' } },
-      h('div', { ref: stageAreaRef, 'data-personal-assistant-desktop-stack': 'true', style: { width: '100%', maxWidth: 1280, minHeight: 0, flex: '1 1 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 } }, onboarding || stage),
-      active || selectable ? h('div', { 'data-personal-assistant-control-capsule': 'true', role: 'status', 'aria-live': 'polite', style: { flex: 'none', display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 6, width: 'fit-content', maxWidth: '100%', boxSizing: 'border-box', padding: '7px 12px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', border: ui.border, boxShadow: '0 1px 4px #10182808', lineHeight: 1.5 } },
+      h('div', { ref: stageAreaRef, 'data-personal-assistant-desktop-stack': 'true', style: { width: '100%', maxWidth: 1280, minHeight: 0, flex: '1 1 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 } },
+      onboarding || stage,
+      active || selectable ? h('div', { ref: controlCapsuleRef, 'data-personal-assistant-control-capsule': 'true', role: 'status', 'aria-live': 'polite', style: { flex: 'none', display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 6, width: 'fit-content', maxWidth: '100%', boxSizing: 'border-box', padding: '7px 12px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', border: ui.border, boxShadow: '0 1px 4px #10182808', lineHeight: 1.5 } },
         !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open(state.current.handoffSupported ? 'observe' : 'read') }, phase === 'connecting' ? '正在启动…' : '重新连接') : null,
         active && readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, controlPhase === 'acquiring' ? '正在接管…' : controlPhase === 'releasing' ? '正在交还…' : '助理正在使用 · 点画面即可接管') : null,
         active && readOnly && controlRef.current.snapshot.available ? h('button', { style: { ...pillStyle, padding: '3px 9px', fontSize: 11 }, onClick: () => controlRef.current.acquire() }, '接管') : null,
         active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '您拥有控制权 · 点画面外释放') : null,
+        active && !readOnly ? h('button', { style: { ...ghostStyle, padding: '3px 9px', fontSize: 11 }, onClick: releaseControl }, '交还') : null,
         active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null,
         // 剪贴板不再放按钮：面板里只保留 ⌘V 粘贴 / ⌘C 复制与一行状态文字。
         active && clipboardNotice ? h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, clipboardNotice) : null) : null),
-      h('details', { style: { flex: 'none', alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } }, h('summary', { style: { cursor: 'pointer' } }, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
+      ),
+      h('details', { style: { flex: 'none', alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } },
+        h('summary', { style: { cursor: 'pointer' } }, '诊断'),
+        h('div', { style: { paddingTop: 8, lineHeight: 1.7 } },
+          h('div', null, `客户端：${PERSONAL_ASSISTANT_CLIENT_BUILD}`),
+          desktopDiagnostics ? h('div', null, `云电脑包：${desktopDiagnostics.packageVersion || '未知'} · 清单：${desktopDiagnostics.manifestVersion || '未知'}`) : null,
+          desktopDiagnostics?.runtimeBuild && desktopDiagnostics.runtimeBuild !== 'unknown' ? h('div', null, `运行时构建：${desktopDiagnostics.runtimeBuild}`) : null,
+          desktopDiagnostics?.computerImage && desktopDiagnostics.computerImage !== 'unknown' ? h('div', null, `电脑镜像：${desktopDiagnostics.computerImage}`) : null,
+          desktopDiagnostics?.dock ? h('div', null, `Dock：${desktopDiagnostics.dock.position} · ${desktopDiagnostics.dock.iconCount} 个图标`) : null,
+        )),
+      );
   }
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },
     h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 12, borderBottom: ui.border } },
@@ -667,7 +728,13 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     h('footer', { style: { display: 'flex', alignItems: 'start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', borderTop: ui.border } },
       h('details', { open: diagnosticsOpen, onToggle: event => setDiagnosticsOpen(event.currentTarget.open) }, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
         directoryCloseCode ? h('div', { style: { paddingTop: 8 } }, `目录连接关闭码：${directoryCloseCode}`) : null,
-        h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('div', null, `云端实例：${config?.agentId || '未开通'}`), h('div', null, `连接标识：${botId || '未连接'}`), h('div', null, `画面帧率：${fps} fps`), h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
+        h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } },
+          h('div', null, `云端实例：${config?.agentId || '未开通'}`),
+          h('div', null, `连接标识：${botId || '未连接'}`),
+          h('div', null, `画面帧率：${fps} fps`),
+          desktopDiagnostics ? h('div', null, `云电脑包：${desktopDiagnostics.packageVersion || '未知'} · 清单：${desktopDiagnostics.manifestVersion || '未知'}`) : null,
+          desktopDiagnostics?.dock ? h('div', null, `Dock：${desktopDiagnostics.dock.position} · ${desktopDiagnostics.dock.iconCount} 个图标`) : null,
+          h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
       h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD, style: { opacity: 0.75 } }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
 }
 

@@ -8,7 +8,9 @@ import {
   MAX_CLIPBOARD_BYTES,
   clipboardFriendlyError,
   clipboardTextOf,
+  copyShortcutEvents,
   copyCloudClipboard,
+  readCloudClipboardAfterCopy,
   createClipboardChannel,
   isCopyShortcut,
   isPasteShortcut,
@@ -25,6 +27,12 @@ test('云端桌面是 Linux：粘贴快捷键固定 Control_L+v，host 是 macOS
   assert.deepEqual(pasteShortcutEvents().map(event => `${event.action}:${event.key}`),
     ['down:Control_L', 'down:v', 'up:v', 'up:Control_L']);
   assert.ok(Object.isFrozen(pasteShortcutEvents()));
+});
+
+test('云端桌面是 Linux：复制快捷键固定 Control_L+c，macOS 的 ⌘C 不转成 Super_L', () => {
+  assert.deepEqual(copyShortcutEvents().map(event => `${event.action}:${event.key}`),
+    ['down:Control_L', 'down:c', 'up:c', 'up:Control_L']);
+  assert.ok(Object.isFrozen(copyShortcutEvents()));
 });
 
 test('只听 ⌘V / Ctrl+V；裸 v、带 Shift、输入法组合期间都不抢', () => {
@@ -125,11 +133,49 @@ test('复制 = 读云端 → 写本地 → 提示成功；云端空/失败都有
   assert.equal(denied.messages[0], '需要先点画面接管云电脑，才能读写云端剪贴板');
 });
 
+test('Ctrl+C 后等待 X11 selection 更新，中文不会读到上一次剪贴板', async () => {
+  const values = [{ text: '旧内容' }, { text: '旧内容' }, { text: '中文双向复制 ✅ 你好，云电脑' }];
+  const waits = [];
+  let clock = 0;
+  const result = await readCloudClipboardAfterCopy({
+    beforeText: '旧内容',
+    readCloud: async () => values.shift() || { text: '中文双向复制 ✅ 你好，云电脑' },
+    timeoutMs: 500,
+    settleMs: 180,
+    pollMs: 50,
+    now: () => clock,
+    sleep: async ms => { waits.push(ms); clock += ms; },
+  });
+  assert.deepEqual(result, { text: '中文双向复制 ✅ 你好，云电脑', changed: true });
+  assert.deepEqual(waits, [50, 50]);
+});
+
+test('重复复制同一段文字也在稳定窗口后接受，不会误报空剪贴板', async () => {
+  let clock = 0;
+  const result = await readCloudClipboardAfterCopy({
+    beforeText: '相同内容',
+    readCloud: async () => ({ text: '相同内容' }),
+    sleep: async ms => { clock += ms; },
+    now: () => clock,
+    timeoutMs: 300,
+    settleMs: 100,
+    pollMs: 50,
+  });
+  assert.equal(result.text, '相同内容');
+  assert.equal(result.changed, false);
+  assert.equal(clock, 100);
+});
+
 test('clipboardRead 返回 { text } 与裸字符串都能处理，错误码翻译成中文', () => {
   assert.equal(clipboardTextOf({ text: 'a' }), 'a');
   assert.equal(clipboardTextOf('b'), 'b');
   assert.equal(clipboardTextOf(null), '');
   assert.equal(clipboardFriendlyError(clipboardError('DESKTOP_READ_ONLY')), '需要先点画面接管云电脑，才能读写云端剪贴板');
+  assert.equal(clipboardFriendlyError(clipboardError('COMPUTER_USER_CONTROLLED')), '当前有人正在操作云电脑，请等对方交还后再复制或粘贴');
+  assert.equal(clipboardFriendlyError(clipboardError('COMPUTER_LEASE_CONFLICT')), '云电脑正在被其他任务使用，请稍后再复制或粘贴');
+  assert.equal(clipboardFriendlyError(clipboardError('CLIPBOARD_UPGRADE_REQUIRED')), '当前云端版本尚不支持剪贴板，请更新云端助理后重试');
+  assert.equal(clipboardFriendlyError(clipboardError('CLIPBOARD_RESPONSE_INVALID')), '云端没有确认剪贴板操作成功，请重试');
+  assert.equal(clipboardFriendlyError(clipboardError('CLIPBOARD_TIMEOUT')), '云端剪贴板响应超时，请检查连接后重试');
   assert.equal(clipboardFriendlyError(clipboardError('DESKTOP_SESSION_NOT_FOUND')), '云电脑已空闲或断开，请先恢复画面再试');
   assert.equal(clipboardFriendlyError(clipboardError('CLIPBOARD_TEXT_TOO_LARGE')), '剪贴板内容超过 64 KiB，云电脑剪贴板放不下');
   assert.equal(clipboardFriendlyError(clipboardError('DESKTOP_UNAVAILABLE')), '云电脑暂时不可用，请稍后重试');
@@ -173,17 +219,92 @@ test('handoff 会话按 input 的约定带上 controlEpoch；没有控制代次�
   assert.equal('controlEpoch' in withoutEpoch[0], false);
 });
 
-test('旧版云端不认 clipboard 消息：5 秒超时给「版本较旧」提示，不转圈、不假装成功', async t => {
+test('剪贴板响应超时报告连接超时，不猜测云端版本', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const channel = createClipboardChannel({ send: () => true });
   const reading = channel.read();
   t.mock.timers.tick(5000);
   await assert.rejects(reading, error => {
     assert.equal(error.code, 'CLIPBOARD_TIMEOUT');
-    assert.match(error.message, /云端助理版本较旧，剪贴板通道未启用（重新部署后可用）/);
+    assert.match(error.message, /云端剪贴板响应超时/);
     return true;
   });
   assert.equal(channel.size, 0);
+});
+
+test('明确不支持 clipboard 消息时立即拒绝请求，不等待超时', async () => {
+  const channel = createClipboardChannel({ send: () => true });
+  const reading = channel.read();
+  const rejected = assert.rejects(reading, { code: 'CLIPBOARD_UPGRADE_REQUIRED' });
+  assert.equal(channel.accept({ type: 'error', code: 'DESKTOP_MESSAGE_UNSUPPORTED' }), true);
+  await rejected;
+  assert.equal(channel.size, 0);
+});
+
+test('缺少成功标志、无效读写结果都不能伪报剪贴板成功', async () => {
+  for (const [operation, reply] of [
+    ['read', { value: { text: 'unconfirmed' } }],
+    ['read', { ok: true, value: { text: 42 } }],
+    ['write', { ok: true, value: { written: false } }],
+    ['write', { ok: true, value: {} }],
+  ]) {
+    let sent;
+    const channel = createClipboardChannel({ send: value => { sent = value; return true; } });
+    const result = operation === 'read' ? channel.read() : channel.write('pending');
+    const rejected = assert.rejects(result, { code: 'CLIPBOARD_RESPONSE_INVALID' });
+    channel.accept({ type: 'clipboard.response', requestId: sent.requestId, ...reply });
+    await rejected;
+  }
+});
+
+test('请求发出后控制代次改变，迟到的成功结果不能写回本机或继续粘贴', async () => {
+  const sent = [];
+  let epoch = 1;
+  const channel = createClipboardChannel({ send: value => { sent.push(value); return true; }, controlEpoch: () => epoch });
+  const reading = channel.read();
+  const rejected = assert.rejects(reading, { code: 'DESKTOP_CONTROL_EPOCH_CHANGED' });
+  epoch = 2;
+  channel.accept({ type: 'clipboard.response', requestId: sent[0].requestId, ok: true, value: { text: 'stale' } });
+  await rejected;
+  assert.equal(channel.size, 0);
+});
+
+test('云端没有确认写入时不发送粘贴按键，不提示粘贴成功', async () => {
+  const messages = [], keys = [];
+  const result = await pasteToCloud({ readLocal: async () => 'x', writeCloud: async () => ({ written: false }), sendKeys: value => { keys.push(value); return true; }, notify: value => messages.push(value) });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'CLIPBOARD_WRITE_FAILED');
+  assert.deepEqual(keys, []);
+  assert.ok(messages.every(value => !value.includes('已粘贴')));
+});
+
+test('旁观状态未取得控制租约时，粘贴不会先写云端剪贴板', async () => {
+  const writes = [], keys = [], messages = [];
+  const result = await pasteToCloud({
+    readLocal: async () => 'x',
+    ensureControl: async () => false,
+    writeCloud: async value => { writes.push(value); return { written: true }; },
+    sendKeys: value => { keys.push(value); return true; },
+    notify: value => messages.push(value),
+  });
+  assert.deepEqual(result, { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' });
+  assert.deepEqual(writes, []);
+  assert.deepEqual(keys, []);
+  assert.match(messages.at(-1), /接管云电脑/);
+});
+
+test('旁观状态未取得控制租约时，复制不会读取云端剪贴板', async () => {
+  const reads = [], writes = [], messages = [];
+  const result = await copyCloudClipboard({
+    ensureControl: async () => false,
+    readCloud: async () => { reads.push(true); return { text: 'x' }; },
+    writeLocal: async value => { writes.push(value); },
+    notify: value => messages.push(value),
+  });
+  assert.deepEqual(result, { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' });
+  assert.deepEqual(reads, []);
+  assert.deepEqual(writes, []);
+  assert.match(messages.at(-1), /接管云电脑/);
 });
 
 test('socket 未连接时立即失败；连接关闭时在途请求全部失败', async () => {

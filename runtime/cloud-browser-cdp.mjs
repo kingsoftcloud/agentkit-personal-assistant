@@ -186,7 +186,7 @@ export async function launchChromium({
         // 桌面窗口给用户看：界面与页面语言都用简体中文；LC_ALL 会盖过 LANG，桌面模式不能设。
         // 无头自动化不改变既有口径（历史行为是 C.UTF-8 + 默认语言）。
         ...(desktop
-          ? { LANG: 'zh_CN.UTF-8', LANGUAGE: 'zh_CN:zh' }
+          ? { LANG: 'zh_CN.UTF-8', LANGUAGE: 'zh_CN:zh', LC_CTYPE: 'C.UTF-8' }
           : { LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' }),
         ...(timeZone ? { TZ: timeZone } : {}),
         ...(desktop ? { DISPLAY: env.DISPLAY || ':99' } : {}),

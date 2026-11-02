@@ -186,6 +186,22 @@ const styles = {
 
 const text = value => (typeof value === 'string' ? value : '');
 
+const SESSION_POINTER_PREFIX = 'agentkit.personal-assistant.current-session.v1';
+const sessionPointerKey = scope => {
+  const agentId = text(scope?.agentId), botId = text(scope?.botId);
+  return agentId && botId ? `${SESSION_POINTER_PREFIX}:${encodeURIComponent(agentId)}:${encodeURIComponent(botId)}` : '';
+};
+const readSessionPointer = key => {
+  if (!key) return '';
+  try { return text(globalThis.localStorage?.getItem(key)); } catch { return ''; }
+};
+const writeSessionPointer = (key, sessionId) => {
+  const value = text(sessionId);
+  if (!key || !value) return;
+  try { globalThis.localStorage?.setItem(key, value); } catch { /* 宿主可能禁用存储，不影响云端会话 */ }
+};
+const sessionFailure = (code, message, status = 503) => Object.assign(new Error(message), { code, status });
+
 /** 与 DSH 原生对话框一致的发送箭头。 */
 const sendGlyph = h => h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
   h('path', { d: 'M12 19V5M5 12l7-7 7 7' }));
@@ -197,10 +213,14 @@ const closeGlyph = h => h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', 
 export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null } = {}) {
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
+  // Hook 依赖稳定身份，避免父组件仅创建新的 scope 对象就重新初始化会话。
+  const pointerKey = sessionPointerKey(scope);
   const [phase, setPhase] = useState('loading');
   const [error, setError] = useState('');
   const [sessions, setSessions] = useState([]);
   const [sessionId, setSessionId] = useState('');
+  const [runtimeInstanceId, setRuntimeInstanceId] = useState('');
+  const [stateStorage, setStateStorage] = useState('');
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState([]);
@@ -290,8 +310,15 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     try {
       const snapshot = await call('personal-assistant.session.snapshot', { sessionId: id });
       if (!aliveRef.current || sessionRef.current !== id || generation !== generationRef.current) return;
-      cursorRef.current = Number(snapshot?.cursor) || 0;
-      const history = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
+      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)
+        || !Array.isArray(snapshot.messages) || !Array.isArray(snapshot.turns)
+        || !Number.isSafeInteger(snapshot.cursor) || snapshot.cursor < 0) {
+        throw sessionFailure('PERSONAL_ASSISTANT_SESSION_SNAPSHOT_INVALID', '云端会话快照格式无效，请重新同步');
+      }
+      setRuntimeInstanceId(text(snapshot?.runtimeInstanceId));
+      setStateStorage(text(snapshot?.stateStorage));
+      cursorRef.current = snapshot.cursor;
+      const history = snapshot.messages;
       setMessages(history.map((message, index) => ({
         id: text(message?.id) || `history-${index}`,
         role: text(message?.role) || 'assistant',
@@ -299,13 +326,37 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
         done: true,
       })));
       setAwaiting(snapshot.turns?.some(turn => ['queued', 'running'].includes(turn.status)) || false);
+      writeSessionPointer(pointerKey, id);
       setPhase('ready');
     } catch (failure) {
       if (!aliveRef.current || generation !== generationRef.current) return;
+      // 找不到快照也可能是重启/状态卷短暂不可见；保留指针，只由显式选择
+      // 或新建成功替换，避免下次初始化把历史缺失误认成首次使用。
       setPhase('error');
       setError(failure?.message || '无法读取会话内容');
     }
-  }, [call]);
+  }, [call, pointerKey]);
+
+  const createSession = useCallback(async () => {
+    if (!aliveRef.current) return;
+    if (sendingRef.current || awaitingRef.current || queueRef.current.length > 0) {
+      setQueueNotice('当前会话还有进行中的任务，请等待完成后再新建会话');
+      return;
+    }
+    setPhase('loading');
+    setError('');
+    try {
+      const created = await call('personal-assistant.session.create', {});
+      const createdId = text(created?.sessionId);
+      if (!createdId) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_CREATE_INVALID', '云端没有返回有效的新会话标识');
+      setSessions(previous => [...previous.filter(row => text(row?.sessionId) !== createdId), { sessionId: createdId, title: text(created?.title) || '新会话' }]);
+      await openSession(createdId);
+    } catch (failure) {
+      if (!aliveRef.current) return;
+      setPhase('error');
+      setError(failure?.message || '新会话创建失败，请重试');
+    }
+  }, [call, openSession]);
 
   const bootstrap = useCallback(async () => {
     setPhase('loading');
@@ -314,20 +365,39 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     try {
       const listed = await call('personal-assistant.sessions.list');
       if (!aliveRef.current) return;
-      const available = Array.isArray(listed?.sessions) ? listed.sessions : [];
+      if (!Array.isArray(listed?.sessions)) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_LIST_INVALID', '云端会话目录格式无效，请重试');
+      const sessionIds = new Set();
+      if (listed.sessions.some(row => {
+        const id = text(row?.sessionId);
+        if (!row || typeof row !== 'object' || !id || sessionIds.has(id)) return true;
+        sessionIds.add(id);
+        return false;
+      })) {
+        throw sessionFailure('PERSONAL_ASSISTANT_SESSION_LIST_INVALID', '云端会话目录包含无效会话，请重试');
+      }
+      const available = listed.sessions;
+      setRuntimeInstanceId(text(listed.runtimeInstanceId));
+      setStateStorage(text(listed.stateStorage));
       setSessions(available);
-      if (available.length > 0) { await openSession(text(available[0].sessionId)); return; }
-      const created = await call('personal-assistant.session.create', {});
-      if (!aliveRef.current) return;
-      const createdId = text(created?.sessionId);
-      setSessions(createdId ? [{ sessionId: createdId, title: text(created?.title) || '新会话' }] : []);
-      await openSession(createdId);
+      const remembered = readSessionPointer(pointerKey);
+      // 即使目录里还有其他会话，也不能悄悄换过去掩盖当前会话丢失。
+      if (remembered && !available.some(row => text(row.sessionId) === remembered)) {
+        throw sessionFailure('PERSONAL_ASSISTANT_SESSION_STATE_MISSING', '云端历史会话暂时不可见，请检查实例状态后重试，或手动选择会话');
+      }
+      if (available.length > 0) {
+        const selected = available.find(row => text(row.sessionId) === remembered) || available[0];
+        await openSession(text(selected.sessionId));
+        return;
+      }
+      // 有过成功打开的会话却突然拿到空目录，通常是 PVC/状态目录/Bot 范围出了问题。
+      // 不再静默创建一个空会话；用户可以通过头部的“新任务”显式确认创建。
+      await createSession();
     } catch (failure) {
       if (!aliveRef.current) return;
       setPhase('error');
       setError(failure?.message || '会话通道暂时不可用');
     }
-  }, [call, openSession]);
+  }, [call, createSession, openSession, pointerKey]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -347,23 +417,26 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       try {
         const page = await call('personal-assistant.session.events', { sessionId, cursor: cursorRef.current });
         if (cancelled) return;
-        cursorRef.current = Number(page?.cursor ?? cursorRef.current) || 0;
-        mergeEvents(page?.events);
-        if (Array.isArray(page.turns)) {
-          setAwaiting(page.turns.some(turn => ['queued', 'running'].includes(turn.status)));
-          const active = page.turns.findLast(turn => ['queued', 'running'].includes(turn.status));
-          const labels = { cloud_computer: '操作云电脑', cloud_workspace: '处理云端文件', cloud_bash: '执行云端命令', cloud_run_code: '运行云端代码', assistant_schedule: '设置云端任务' };
-          const tool = active?.progress?.tool;
-          setProgressText(tool ? `${active.progress.state === 'running' ? '正在' : '已完成'}${labels[tool] || (tool.startsWith('cloud_browser_') ? '操作云端浏览器' : '执行工具')}` : '');
-          const visibleFailures = page.turns
-            .filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn.status) && !TRANSIENT_TURN_ERRORS.has(String(turn.error || '')))
-            .map(turn => ({ type: 'step', id: `turn-status-${turn.turnId}`, text: `任务${turn.status === 'failed' ? '失败' : '已中断'}：${turnErrorText(turn.error)}` }));
-          mergeEvents(visibleFailures);
+        if (!page || typeof page !== 'object' || Array.isArray(page) || !Array.isArray(page.events)
+          || !Array.isArray(page.turns) || !Number.isSafeInteger(page.cursor)) {
+          throw sessionFailure('PERSONAL_ASSISTANT_SESSION_EVENTS_INVALID', '云端会话增量格式无效，请重新同步');
         }
+        if (page.cursor < cursorRef.current) throw sessionFailure('SESSION_CURSOR_STALE', '会话日志已更新，请重新同步', 409);
+        cursorRef.current = page.cursor;
+        mergeEvents(page.events);
+        setAwaiting(page.turns.some(turn => ['queued', 'running'].includes(turn.status)));
+        const active = page.turns.findLast(turn => ['queued', 'running'].includes(turn.status));
+        const labels = { cloud_computer: '操作云电脑', cloud_workspace: '处理云端文件', cloud_bash: '执行云端命令', cloud_run_code: '运行云端代码', assistant_schedule: '设置云端任务' };
+        const tool = active?.progress?.tool;
+        setProgressText(tool ? `${active.progress.state === 'running' ? '正在' : '已完成'}${labels[tool] || (tool.startsWith('cloud_browser_') ? '操作云端浏览器' : '执行工具')}` : '');
+        const visibleFailures = page.turns
+          .filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn.status) && !TRANSIENT_TURN_ERRORS.has(String(turn.error || '')))
+          .map(turn => ({ type: 'step', id: `turn-status-${turn.turnId}`, text: `任务${turn.status === 'failed' ? '失败' : '已中断'}：${turnErrorText(turn.error)}` }));
+        mergeEvents(visibleFailures);
         setError('');
       } catch (failure) {
         if (!cancelled) {
-          if (failure.code === 'SESSION_CURSOR_STALE') { void openSession(sessionId); return; }
+          if (failure.code === 'SESSION_CURSOR_STALE' || failure.code === 'PERSONAL_ASSISTANT_SESSION_EVENTS_INVALID') { void openSession(sessionId); return; }
           setError(failure.message || '云端连接中断，正在恢复；任务不会改到本机执行');
         }
       }
@@ -515,14 +588,23 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     return () => window.removeEventListener('beforeunload', warn);
   }, [queue.length]);
 
+  const sessionScopeTitle = [
+    sessionId ? '当前助理线程已持久化' : '',
+    runtimeInstanceId ? `运行实例 ${runtimeInstanceId}` : '',
+    stateStorage ? `状态 ${stateStorage}` : '',
+  ].filter(Boolean).join(' · ');
+
   // Studio(macOS) 的拖拽区靠 data-window-drag 标记：PA 页面没有外壳 tab strip，需要自己的头部行。
   const header = h('header', { style: styles.header, 'data-window-drag': '' },
     h('h1', { style: styles.title }, '个人助理'),
-    h('span', { style: styles.status }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
+    h('span', { style: styles.status, title: sessionScopeTitle || undefined }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
     h('span', { style: styles.spacer }),
+    // 会话目录是云端恢复/多 Bot 隔离的后台能力，个人助理主界面只保留一条连续线程。
+    // 不把 sessionId 下拉框暴露给用户，避免把基础设施概念变成日常管理负担。
+    h('button', { type: 'button', 'data-window-drag-recall': '', disabled: phase === 'loading' || sending || awaiting || queue.length > 0, onClick: () => void createSession(), 'aria-label': '开始新任务', title: queue.length > 0 ? '请等待排队消息发送后再开始新任务' : '开始一个新的助理任务线程', style: styles.ghost }, '新任务'),
     onOpenComputer ? h('button', { type: 'button', 'data-window-drag-recall': '', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
 
-  return h('section', { 'data-personal-assistant-conversation': 'true', style: styles.page, onClick: async event => {
+  return h('section', { 'data-personal-assistant-conversation': 'true', 'data-agent-id': text(scope?.agentId) || undefined, 'data-bot-id': text(scope?.botId) || undefined, 'data-session-id': sessionId || undefined, 'data-runtime-instance-id': runtimeInstanceId || undefined, 'data-state-storage': stateStorage || undefined, style: styles.page, onClick: async event => {
     const link = event.target.closest?.('a[href^="cloud-file:"]');
     if (!link) return;
     event.preventDefault();
@@ -535,7 +617,9 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     } catch (failure) { setError(failure.message || '云端文件下载失败'); }
   } }, header,
     h('style', null, '@keyframes pa-awaiting { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }'),
-    error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } }, error) : null,
+    error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+      h('span', null, error),
+      sessionId ? h('button', { type: 'button', style: styles.ghost, disabled: phase === 'loading', onClick: () => void openSession(sessionId) }, '重新同步会话') : null) : null,
     h('div', { ref: scrollerRef, 'data-personal-assistant-messages': 'true', style: styles.scroller, onScroll: event => {
       const element = event.currentTarget;
       followLatestRef.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64;
