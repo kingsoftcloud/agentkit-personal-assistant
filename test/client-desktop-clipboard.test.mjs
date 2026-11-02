@@ -10,6 +10,7 @@ import {
   clipboardTextOf,
   copyShortcutEvents,
   copyCloudClipboard,
+  readCloudClipboardAfterCopy,
   createClipboardChannel,
   isCopyShortcut,
   isPasteShortcut,
@@ -130,6 +131,39 @@ test('复制 = 读云端 → 写本地 → 提示成功；云端空/失败都有
     writeLocal: async () => {}, notify: denied.notify,
   })).ok, false);
   assert.equal(denied.messages[0], '需要先点画面接管云电脑，才能读写云端剪贴板');
+});
+
+test('Ctrl+C 后等待 X11 selection 更新，中文不会读到上一次剪贴板', async () => {
+  const values = [{ text: '旧内容' }, { text: '旧内容' }, { text: '中文双向复制 ✅ 你好，云电脑' }];
+  const waits = [];
+  let clock = 0;
+  const result = await readCloudClipboardAfterCopy({
+    beforeText: '旧内容',
+    readCloud: async () => values.shift() || { text: '中文双向复制 ✅ 你好，云电脑' },
+    timeoutMs: 500,
+    settleMs: 180,
+    pollMs: 50,
+    now: () => clock,
+    sleep: async ms => { waits.push(ms); clock += ms; },
+  });
+  assert.deepEqual(result, { text: '中文双向复制 ✅ 你好，云电脑', changed: true });
+  assert.deepEqual(waits, [50, 50]);
+});
+
+test('重复复制同一段文字也在稳定窗口后接受，不会误报空剪贴板', async () => {
+  let clock = 0;
+  const result = await readCloudClipboardAfterCopy({
+    beforeText: '相同内容',
+    readCloud: async () => ({ text: '相同内容' }),
+    sleep: async ms => { clock += ms; },
+    now: () => clock,
+    timeoutMs: 300,
+    settleMs: 100,
+    pollMs: 50,
+  });
+  assert.equal(result.text, '相同内容');
+  assert.equal(result.changed, false);
+  assert.equal(clock, 100);
 });
 
 test('clipboardRead 返回 { text } 与裸字符串都能处理，错误码翻译成中文', () => {

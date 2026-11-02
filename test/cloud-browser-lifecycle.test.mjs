@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createCloudBrowser } from '../runtime/cloud-browser.mjs';
+import { createCloudBrowser, detectBrowserChallenge } from '../runtime/cloud-browser.mjs';
 import {
   DESKTOP_DECORATION_HORIZONTAL, DESKTOP_DECORATION_VERTICAL, DESKTOP_DOCK_HEIGHT, DESKTOP_SCREEN_HEIGHT,
   DESKTOP_SCREEN_WIDTH, chromiumArgs, desktopWindowClientSize,
@@ -51,7 +51,8 @@ async function fixture(t, options = {}) {
         if (method === 'Runtime.evaluate') return { result: { value: params.expression === 'document.readyState' ? 'complete'
           : params.expression.includes('performance.getEntries') ? []
             : params.expression.includes('getBoundingClientRect') ? { found: true, left: 20, top: 30, width: 40, height: 50 }
-              : { ...page, text: 'visible browser', links: [] } } };
+              : typeof options.pageState === 'function' ? options.pageState(page, params.expression)
+                : { ...page, text: 'visible browser', links: [] } } };
         return {};
       },
     }, async dispose() { this.disposed = true; this.connection.closed = true; } };
@@ -64,6 +65,31 @@ async function fixture(t, options = {}) {
   t.after(async () => { await browser.dispose(); await rm(workspace, { recursive: true, force: true }); });
   return { browser, transports, commands, windowBounds };
 }
+
+test('验证码/风控页会被识别，自动操作停手并提示用户在可见浏览器中完成验证', async t => {
+  let challenge = true;
+  const { browser } = await fixture(t, {
+    navigationMinIntervalMs: 0,
+    challengeCooldownMs: 30_000,
+    pageState: page => challenge
+      ? { ...page, title: '安全验证', text: '访问频繁，请完成验证码验证后继续', links: [] }
+      : { ...page, title: '正常页面', text: '已完成验证', links: [] },
+  });
+  const opened = await browser.open('https://example.com/');
+  assert.equal(opened.warnings.length, 1);
+  assert.match(opened.warnings[0], /验证码|风控/);
+  await assert.rejects(browser.click({ selector: 'button' }), { code: 'ASSISTANT_BROWSER_CHALLENGE_REQUIRED' });
+  assert.equal((await browser.snapshot()).warnings.length, 1);
+  challenge = false;
+  assert.deepEqual((await browser.snapshot()).warnings, []);
+  await browser.click({ selector: 'button' });
+});
+
+test('风控识别只依赖页面信号，不要求登录，也不把普通页面误判为验证页', () => {
+  assert.equal(detectBrowserChallenge({ title: '百度一下', text: '欢迎使用搜索服务' }), null);
+  assert.equal(detectBrowserChallenge({ title: 'Verify you are human', text: '' })?.code, 'ASSISTANT_BROWSER_CHALLENGE_REQUIRED');
+  assert.equal(detectBrowserChallenge({ title: '安全验证', text: '请完成滑块验证' })?.code, 'ASSISTANT_BROWSER_CHALLENGE_REQUIRED');
+});
 
 test('可见桌面十二分钟无 CDP 操作后仍保留浏览器和最后页面', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });

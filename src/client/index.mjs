@@ -70,7 +70,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, readCloudClipboardAfterCopy, clipboardTextOf, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -297,14 +297,27 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   // 云端桌面始终是 Linux，不能把 macOS 的 Meta 映射为 Super_L，否则 Linux 应用不会执行复制。
   const copyCloudClipboardToLocal = async () => {
     if (!await ensureClipboardControl()) return { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' };
+    // 先记住旧 selection，再发 Ctrl+C；X11 的 selection owner 在按键后异步更新，
+    // 直接 sleep 150ms 仍可能读到旧文本，尤其是中文/浏览器渲染进程较忙时。
+    const before = await clipboardRef.current.read().catch(() => ({ text: '' }));
+    let sent = false;
     if (!state.current.pressed.has('_copyShortcut')) {
       state.current.pressed.add('_copyShortcut');
-      try {
-        sendDesktopKeys(copyShortcutEvents());
-        await new Promise(resolve => setTimeout(resolve, 150));
-      } finally { state.current.pressed.delete('_copyShortcut'); }
+      try { sent = sendDesktopKeys(copyShortcutEvents()) !== false; }
+      finally { state.current.pressed.delete('_copyShortcut'); }
     }
-    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
+    if (!sent) { clipboardNotify('复制按键未发送，请先接管云电脑后再试'); return { ok: false, code: 'CLIPBOARD_KEY_NOT_SENT' }; }
+    let settled;
+    try {
+      settled = await readCloudClipboardAfterCopy({
+        readCloud: () => clipboardRef.current.read(),
+        beforeText: clipboardTextOf(before),
+      });
+    } catch (error) {
+      clipboardNotify(error?.message || '读取云电脑剪贴板失败，请重试');
+      return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' };
+    }
+    return copyCloudClipboard({ readCloud: async () => settled, writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
   };
   // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
   // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。

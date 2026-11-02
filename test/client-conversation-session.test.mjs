@@ -74,17 +74,13 @@ test('面板重挂载优先恢复当前 Bot 记住的 sessionId，而不是盲�
   assert.equal(root?.props['data-state-storage'], 'state-path');
 });
 
-test('会话目录超过一个时显示选择器，并在切换后读取目标会话', async t => {
+test('会话目录超过一个时仍恢复当前线程，但个人助理界面不暴露会话选择器', async t => {
   const viewState = view(t, { listed: { sessions: [{ sessionId: 'latest-session', title: '最近会话' }, { sessionId: 'saved-session', title: '已保存会话' }] } });
   await viewState.settle();
   const selector = viewState.nodes().find(node => node.props['data-personal-assistant-session-selector'] === 'true');
-  assert.ok(selector);
-  assert.deepEqual(selector.children.map(option => option.children[0]), ['最近会话', '已保存会话']);
-  selector.props.onChange({ target: { value: 'saved-session' } });
-  await viewState.settle();
-  const snapshots = viewState.requests.filter(row => row.operation.endsWith('.session.snapshot'));
-  assert.equal(snapshots.at(-1)?.payload.sessionId, 'saved-session');
-  assert.equal(viewState.nodes().find(node => node.props['data-session-id'])?.props['data-session-id'], 'saved-session');
+  assert.equal(selector, undefined);
+  assert.equal(viewState.nodes().some(node => node.props['aria-label'] === '选择个人助理会话'), false);
+  assert.equal(viewState.nodes().find(node => node.props['data-session-id'])?.props['data-session-id'], 'latest-session');
 });
 
 test('已有会话指针但云端返回空目录时不自动造一个新会话', async t => {
@@ -129,10 +125,10 @@ test('同一 Agent/Bot 的 scope 对象重新渲染时不反复 bootstrap 或换
   assert.equal(viewState.nodes().find(node => node.props['data-session-id'])?.props['data-session-id'], 'old-session');
 });
 
-test('新会话只能由显式按钮创建，并在创建后打开返回的 sessionId', async t => {
+test('新任务只能由显式按钮创建，并在创建后打开返回的 sessionId', async t => {
   const viewState = view(t);
   await viewState.settle();
-  const button = viewState.nodes().find(node => node.props['aria-label'] === '新建会话');
+  const button = viewState.nodes().find(node => node.props['aria-label'] === '开始新任务');
   assert.ok(button);
   button.props.onClick();
   await viewState.settle();

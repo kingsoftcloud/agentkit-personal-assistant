@@ -94,11 +94,6 @@ const styles = {
     border: '1px solid var(--dsw-alias-border-default, #d8dee8)', background: 'transparent',
     color: 'inherit', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', font: 'inherit', fontSize: 12,
   },
-  sessionSelect: {
-    minWidth: 120, maxWidth: 220, border: '1px solid var(--dsw-alias-border-default, #d8dee8)',
-    borderRadius: 8, padding: '5px 26px 5px 9px', background: 'transparent', color: 'inherit',
-    font: 'inherit', fontSize: 12, textOverflow: 'ellipsis',
-  },
   scroller: { flex: '1 1 0px', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overscrollBehavior: 'contain', boxSizing: 'border-box', padding: '20px 16px 8px' },
   thread: { maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 },
   row: { display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' },
@@ -395,7 +390,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
         return;
       }
       // 有过成功打开的会话却突然拿到空目录，通常是 PVC/状态目录/Bot 范围出了问题。
-      // 不再静默创建一个空会话；用户可以通过头部的“新会话”显式确认创建。
+      // 不再静默创建一个空会话；用户可以通过头部的“新任务”显式确认创建。
       await createSession();
     } catch (failure) {
       if (!aliveRef.current) return;
@@ -593,14 +588,8 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     return () => window.removeEventListener('beforeunload', warn);
   }, [queue.length]);
 
-  const sessionLabel = session => {
-    const title = text(session?.title).trim();
-    const id = text(session?.sessionId);
-    if (title) return title;
-    return id ? `会话 ${id.slice(0, 8)}` : '未命名会话';
-  };
   const sessionScopeTitle = [
-    sessionId ? `会话 ${sessionId}` : '',
+    sessionId ? '当前助理线程已持久化' : '',
     runtimeInstanceId ? `运行实例 ${runtimeInstanceId}` : '',
     stateStorage ? `状态 ${stateStorage}` : '',
   ].filter(Boolean).join(' · ');
@@ -610,17 +599,9 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     h('h1', { style: styles.title }, '个人助理'),
     h('span', { style: styles.status, title: sessionScopeTitle || undefined }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
     h('span', { style: styles.spacer }),
-    sessions.length > 0 ? h('select', {
-      'data-personal-assistant-session-selector': 'true',
-      'data-window-drag-recall': '',
-      'aria-label': '选择个人助理会话',
-      title: '切换已保存的云端会话',
-      value: sessionId,
-      disabled: phase === 'loading' || sending || awaiting || queue.length > 0,
-      style: styles.sessionSelect,
-      onChange: event => { const id = text(event?.target?.value); if (id && id !== sessionId) void openSession(id); },
-    }, sessions.map(session => h('option', { key: text(session?.sessionId), value: text(session?.sessionId) }, sessionLabel(session)))) : null,
-    h('button', { type: 'button', 'data-window-drag-recall': '', disabled: phase === 'loading' || sending || awaiting || queue.length > 0, onClick: () => void createSession(), 'aria-label': '新建会话', title: queue.length > 0 ? '请等待排队消息发送后再新建会话' : '新建云端会话', style: styles.ghost }, '新会话'),
+    // 会话目录是云端恢复/多 Bot 隔离的后台能力，个人助理主界面只保留一条连续线程。
+    // 不把 sessionId 下拉框暴露给用户，避免把基础设施概念变成日常管理负担。
+    h('button', { type: 'button', 'data-window-drag-recall': '', disabled: phase === 'loading' || sending || awaiting || queue.length > 0, onClick: () => void createSession(), 'aria-label': '开始新任务', title: queue.length > 0 ? '请等待排队消息发送后再开始新任务' : '开始一个新的助理任务线程', style: styles.ghost }, '新任务'),
     onOpenComputer ? h('button', { type: 'button', 'data-window-drag-recall': '', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
 
   return h('section', { 'data-personal-assistant-conversation': 'true', 'data-agent-id': text(scope?.agentId) || undefined, 'data-bot-id': text(scope?.botId) || undefined, 'data-session-id': sessionId || undefined, 'data-runtime-instance-id': runtimeInstanceId || undefined, 'data-state-storage': stateStorage || undefined, style: styles.page, onClick: async event => {

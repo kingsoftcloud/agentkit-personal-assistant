@@ -71,6 +71,32 @@ export function copyShortcutEvents() {
   ]);
 }
 
+/**
+ * 等待云桌面处理完 Ctrl+C 再读取 selection。
+ *
+ * X11 selection 是异步的：应用收到按键后才会把内容交给 clipboard owner，
+ * 立即 read 很容易拿到上一次内容，中文通常因此看起来像“乱码/没复制成功”。
+ * 若新内容与旧内容相同，仍在最短等待窗口后接受它，支持用户重复复制同一段文字。
+ */
+export async function readCloudClipboardAfterCopy({ readCloud, beforeText = '', timeoutMs = 1200, settleMs = 180, pollMs = 50, sleep = delay => new Promise(resolve => setTimeout(resolve, delay)), now = Date.now } = {}) {
+  if (typeof readCloud !== 'function') throw clipError('CLIPBOARD_READ_FAILED', '读取云电脑剪贴板失败，请重试');
+  const timeout = Number.isFinite(timeoutMs) && timeoutMs >= 0 ? timeoutMs : 1200;
+  const settle = Number.isFinite(settleMs) && settleMs >= 0 ? settleMs : 180;
+  const poll = Number.isFinite(pollMs) && pollMs > 0 ? pollMs : 50;
+  const clock = typeof now === 'function' ? now : Date.now;
+  const started = Number(clock());
+  let latest = '';
+  while (Number(clock()) - started <= timeout) {
+    const value = await readCloud();
+    latest = clipboardTextOf(value);
+    const elapsed = Number(clock()) - started;
+    if (latest && (latest !== String(beforeText ?? '') || elapsed >= settle)) return { text: latest, changed: latest !== String(beforeText ?? '') };
+    if (elapsed >= timeout) break;
+    await sleep(Math.min(poll, timeout - elapsed));
+  }
+  return { text: latest, changed: latest !== String(beforeText ?? '') };
+}
+
 /** 把云端的错误码翻成用户能照做的中文；英文原文只作为兜底。 */
 export function clipboardFriendlyError(error) {
   const code = String(error?.code || '');
