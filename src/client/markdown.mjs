@@ -2,7 +2,7 @@
  * 极简 Markdown 渲染：只覆盖模型回答里真正常见的语法，不引入第三方依赖。
  *
  * 支持：围栏代码块、行内代码、粗体、斜体、链接、无序/有序列表、引用、标题、
- * 分隔线、段落内换行。已知限制：不解析表格、嵌套列表、HTML（一律按文本转义显示）。
+ * GFM 表格、分隔线、段落内换行。已知限制：不解析嵌套列表、HTML（一律按文本转义显示）。
  */
 
 const FENCE = /^```\s*([\w+#.-]*)\s*$/u;
@@ -11,6 +11,39 @@ const UL = /^\s*[-*+]\s+(.*)$/u;
 const OL = /^\s*(\d{1,3})[.)]\s+(.*)$/u;
 const QUOTE = /^\s*>\s?(.*)$/u;
 const RULE = /^\s*([-*_])\s*(?:\1\s*){2,}$/u;
+const TABLE_SEPARATOR = /^:?-{1,}:?$/u;
+
+/** 拆分一行表格，支持首尾管道符和转义的 `\\|`。 */
+function splitTableRow(line) {
+  let value = typeof line === 'string' ? line.trim() : '';
+  if (value.startsWith('|')) value = value.slice(1);
+  if (value.endsWith('|') && !value.endsWith('\\|')) value = value.slice(0, -1);
+  const cells = [];
+  let cell = '';
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === '\\' && value[index + 1] === '|') { cell += '|'; index += 1; continue; }
+    if (character === '|') { cells.push(cell.trim()); cell = ''; continue; }
+    cell += character;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function tableAlignment(cell) {
+  const value = String(cell || '').trim();
+  if (value.startsWith(':') && value.endsWith(':')) return 'center';
+  if (value.endsWith(':')) return 'right';
+  return 'left';
+}
+
+function tableHeaderAndSeparator(headerLine, separatorLine) {
+  if (!String(headerLine).includes('|') || !String(separatorLine).includes('|')) return null;
+  const headers = splitTableRow(headerLine);
+  const separators = splitTableRow(separatorLine);
+  if (headers.length < 2 || separators.length !== headers.length || !separators.every(cell => TABLE_SEPARATOR.test(cell))) return null;
+  return { headers, alignments: separators.map(tableAlignment) };
+}
 
 /** 把 Markdown 源码切成块；纯函数，方便单测。 */
 export function parseMarkdown(source) {
@@ -37,6 +70,21 @@ export function parseMarkdown(source) {
       continue;
     }
     if (line.trim() === '') { flushParagraph(paragraph); index += 1; continue; }
+    const table = index + 1 < lines.length ? tableHeaderAndSeparator(line, lines[index + 1]) : null;
+    if (table) {
+      flushParagraph(paragraph);
+      index += 2;
+      const rows = [];
+      while (index < lines.length && lines[index].trim() !== '') {
+        if (!lines[index].includes('|')) break;
+        const row = splitTableRow(lines[index]);
+        if (row.length !== table.headers.length) break;
+        rows.push(row);
+        index += 1;
+      }
+      blocks.push({ type: 'table', ...table, rows });
+      continue;
+    }
     const heading = HEADING.exec(line);
     if (heading) {
       flushParagraph(paragraph);
@@ -124,6 +172,25 @@ export function renderMarkdown(h, source, styles = {}) {
       const tag = block.type === 'ordered' ? 'ol' : 'ul';
       return h(tag, { key, style: styles.list, start: block.type === 'ordered' && block.start !== 1 ? block.start : undefined },
         block.items.map((item, position) => h('li', { key: `${key}-l${position}` }, inline(item, `${key}-l${position}`))));
+    }
+    if (block.type === 'table') {
+      const tableCell = (tag, text, column, cellKey) => h(tag, {
+        key: cellKey,
+        style: {
+          border: '1px solid var(--dsw-alias-border-default, #d8dee8)',
+          padding: '6px 8px',
+          verticalAlign: 'top',
+          ...(tag === 'th' ? { background: 'var(--dsw-alias-bg-layer-2, #f7f9fc)', fontWeight: 600 } : null),
+          ...(styles.tableCell || {}),
+          textAlign: block.alignments[column] || 'left',
+        },
+      }, inline(text, cellKey));
+      const header = h('thead', { key: `${key}-head` }, h('tr', { key: `${key}-head-row` },
+        block.headers.map((text, column) => tableCell('th', text, column, `${key}-h${column}`))));
+      const body = h('tbody', { key: `${key}-body` }, block.rows.map((row, rowIndex) => h('tr', { key: `${key}-r${rowIndex}` },
+        row.map((text, column) => tableCell('td', text, column, `${key}-r${rowIndex}-c${column}`)))));
+      return h('div', { key, style: { overflowX: 'auto', ...styles.tableWrap } },
+        h('table', { style: { borderCollapse: 'collapse', width: '100%', ...styles.table } }, header, body));
     }
     return h('p', { key, style: styles.paragraph }, inline(block.text, key));
   });

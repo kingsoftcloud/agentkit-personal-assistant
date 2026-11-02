@@ -18,10 +18,11 @@ test('宿主提供 MarkdownText 时用原生渲染，并带上代码块/脚注�
   assert.equal(tree.props.labels.footnotes, '脚注');
 });
 
-test('宿主没有原生渲染器时退回自带解析，表格按原样文本、不抛错', () => {
-  const tree = renderAssistantBody(h, '**重点**\n\n- 一\n- 二', {}, undefined);
+test('宿主没有原生渲染器时退回自带解析，并渲染 GFM 表格', () => {
+  const tree = renderAssistantBody(h, '**重点**\n\n| 项目 | 结果 |\n| --- | :---: |\n| 模型 | 通过 |', {}, undefined);
   assert.ok(Array.isArray(tree));
-  assert.deepEqual(tree.map(node => node.type), ['p', 'ul']);
+  assert.deepEqual(tree.map(node => node.type), ['p', 'div']);
+  assert.equal(tree[1].children[0].type, 'table');
 });
 
 test('模块存在但没导出 MarkdownText 时同样退回自带解析', () => {
