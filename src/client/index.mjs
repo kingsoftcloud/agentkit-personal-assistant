@@ -7,7 +7,7 @@ import { renderBotDetail } from './views/bot-detail.mjs';
 import { renderSettings } from './views/settings.mjs';
 import { renderLocalAccess, LOCAL_ACCESS_SCOPES } from './views/local-access.mjs';
 import { renderCreateProgress } from './views/create-progress.mjs';
-import { button as panelButton, connectionDot, connectionStateOf, backIcon, styles as panelUi, TOKENS as PANEL_TOKENS } from './views/ui.mjs';
+import { backIcon, button as panelButton, connectionDot, connectionStateOf, styles as panelUi, TOKENS as PANEL_TOKENS } from './views/ui.mjs';
 
 export class PersonalAssistantGatewayUnavailableError extends Error {
   constructor() {
@@ -158,7 +158,7 @@ const onboardingStyle = {
 
 const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
 
-export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page', nativeFullscreen = false } = {}) {
+export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page', nativeFullscreen = false, connectionDot = null, onBack = null } = {}) {
   const R = clientReact || globalThis.React;
   if (!R) return '个人助理页面尚未就绪，请重新打开';
   const { createElement: h, useEffect, useRef, useState } = R;
@@ -915,6 +915,8 @@ function normalizeDetail(raw, botId, fallbackBot = null) {
       usage: raw.computer.usage && typeof raw.computer.usage === 'object'
         ? { tokens: String(raw.computer.usage.tokens ?? ''), hours: String(raw.computer.usage.hours ?? '') } : null,
     } : null,
+    // Host 的目录/本机状态不可用时会显式给 degraded，页面按「部分数据暂不可用」展示。
+    degraded: raw?.degraded === true,
   };
 }
 
@@ -982,6 +984,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const [localBusy, setLocalBusy] = useState('');
   const [localError, setLocalError] = useState('');
   const [localNotice, setLocalNotice] = useState('');
+  // 撤销时间戳：对话页未挂载时也要能补系统提示（契约第 4 章第 4 条）。
+  const [localRevokedAt, setLocalRevokedAt] = useState('');
   // —— 列表概览 ——
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(true);
@@ -1029,6 +1033,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const [createError, setCreateError] = useState('');
 
   const aliveRef = useRef(true);
+  const previousAuthorizedRef = useRef(undefined);
   const createTimerRef = useRef(null);
   const createStartedAtRef = useRef(0);
   const createCollapsedRef = useRef(false);
@@ -1045,12 +1050,19 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     if (scope?.botId && !payload.botId) extra.botId = scope.botId;
     return rpc(operation, { ...payload, ...extra });
   };
-  const scopedRequest = (operation, payload = {}) => {
-    if (!scope) throw new Error('云端助理尚未连接');
-    if (payload.agentId && payload.agentId !== scope.agentId) throw new Error('云端实例不一致');
-    if (operation !== 'personal-assistant.bots.list' && payload.botId && payload.botId !== scope.botId) throw new Error('云端助理不一致');
-    return request(operation, { ...payload, ...scope });
+  /** 给指定 scope 造一个绑定请求：切换 Bot 后立即绑定，不依赖下一次渲染的闭包。 */
+  const requestForScope = targetScope => (operation, payload = {}) => {
+    if (!targetScope) throw new Error('云端助理尚未连接');
+    if (payload.agentId && payload.agentId !== targetScope.agentId) throw new Error('云端实例不一致');
+    if (operation !== 'personal-assistant.bots.list' && payload.botId && payload.botId !== targetScope.botId) throw new Error('云端助理不一致');
+    return request(operation, { ...payload, ...targetScope });
   };
+  const scopedRequest = scope ? requestForScope(scope) : null;
+  /** 云电脑面板自己会选 Bot，这里只补 agentId，不校验 botId。 */
+  const panelRequest = (operation, payload = {}) => request(operation, {
+    ...payload,
+    ...(scope?.agentId && !payload.agentId ? { agentId: scope.agentId } : {}),
+  });
   const clearCreateTimer = () => { if (createTimerRef.current) { clearTimeout(createTimerRef.current); createTimerRef.current = null; } };
   const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 
@@ -1070,6 +1082,10 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
         unavailable: false,
       };
       setConnection(next);
+      // 授权可能被 Host 自动撤销（超时/权限变更），这里也要补系统提示，不能只看按钮动作。
+      const previousAuthorized = previousAuthorizedRef.current;
+      previousAuthorizedRef.current = next.authorized;
+      if (previousAuthorized === true && next.authorized === false) setLocalRevokedAt(String(Date.now()));
       if (!next.authorized) setLocalScopes(next.scopes.length ? next.scopes : LOCAL_ACCESS_SCOPES.map(item => item.id));
       setRiskConfirmDraft(next.riskConfirm);
       return next;
@@ -1098,6 +1114,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     setLocalBusy('revoke'); setLocalError(''); setLocalNotice('');
     try {
       await rpc('personal-assistant.local-access.revoke');
+      setLocalRevokedAt(String(Date.now()));
       await loadConnection();
       setLocalNotice('已撤销本机授权');
     } catch (failure) {
@@ -1177,7 +1194,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     setScope(nextScope);
     setSelectedBotId(previous => previous || botId);
     if (nativeWorkbench?.available) {
-      try { nativeWorkbench.bind(nextScope, scopedRequest); } catch { /* 原生侧栏绑定失败不阻断面板 */ }
+      try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 原生侧栏绑定失败不阻断面板 */ }
     }
     await loadOverview({ fallbackBots: directoryBots, primaryId: botId });
     if (!aliveRef.current) return;
@@ -1204,7 +1221,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       setScope(nextScope);
       setSelectedBotId(target);
       setChatSessionId('');
-      if (nativeWorkbench?.available) { try { nativeWorkbench.bind(nextScope, scopedRequest); } catch { /* 忽略 */ } }
+      if (nativeWorkbench?.available) { try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 忽略 */ } }
     }
     setPanelView('chat');
   };
@@ -1217,7 +1234,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     setDeleteConfirm({ open: false, text: '', busy: false, error: '' });
     setPanelView('detail');
     const cached = readPanelCache(`bot-detail.${id}`);
-    if (cached?.value) { setDetail(cached.value); setDetailLoading(false); setDetailDegraded(cached.value.bot?.degraded === true); }
+    if (cached?.value) { setDetail(cached.value); setDetailLoading(false); setDetailDegraded(cached.value.degraded === true); }
     else { setDetail(null); setDetailLoading(true); }
     void loadDetail(id);
   };
@@ -1228,7 +1245,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       const raw = await scopedCall('personal-assistant.bot.detail', { botId });
       const fallback = botSummary(botId);
       const normalized = normalizeDetail(raw, botId, fallback);
-      setDetail(normalized); setDetailDegraded(false);
+      setDetail(normalized); setDetailDegraded(normalized.degraded === true);
       writePanelCache(`bot-detail.${botId}`, normalized);
       setUpdatedAt(stamp());
     } catch (failure) {
@@ -1259,7 +1276,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     const botId = selectedBotId || detail?.bot?.id;
     if (!botId || !memoryId) return;
     try {
-      await scopedCall('personal-assistant.bot.memory.delete', { botId, memoryId });
+      const result = await scopedCall('personal-assistant.bot.memory.delete', { botId, memoryId });
+      if (result?.deleted === false) { setNotice('记忆删除未生效：本机状态存储暂不可用'); return; }
       setDetail(previous => previous ? {
         ...previous,
         memory: {
@@ -1484,7 +1502,20 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const bots = overview?.bots || [];
   const runningCount = bots.filter(bot => bot.status === 'running').length;
   const degraded = overviewDegraded || detailDegraded || settingsDegraded;
-  const dotNode = connectionDot({ h, connection, onOpen: () => { setLocalAccessOpen(open => !open); setLocalError(''); setLocalNotice(''); } });
+  // 圆点三态点击口径（契约第 2 章）：authorized/connected 打开授权弹层；offline 是重连。
+  const onDotOpen = () => {
+    if (connectionStateOf(connection) === 'offline') {
+      // offline 的点击含义是「重连」：立刻重查连接，并把结果直接显示在弹层里。
+      setLocalAccessOpen(true); setLocalError(''); setLocalNotice('正在重新检查本机连接…');
+      void loadConnection().then(next => {
+        setLocalNotice(next?.connected ? '本机已连接，可继续授权' : '本机仍未连接：请确认 Studio 本机客户端在运行');
+      });
+      return;
+    }
+    setLocalAccessOpen(open => !open);
+    setLocalError(''); setLocalNotice('');
+  };
+  const dotNode = connectionDot({ h, connection, onOpen: onDotOpen });
   const configured = config?.configured === true;
 
   const renderHeader = () => {
@@ -1522,7 +1553,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           : null),
       dotNode,
       panelView === 'settings'
-        ? panelButton({ h, label: settingsBusy === 'save' ? '保存中…' : '保存', variant: 'primary', 'data-window-drag-recall': '', disabled: settingsBusy === 'save' || !configured || settingsDegraded, onClick: saveSettings, style: { height: 32 } })
+        ? panelButton({ h, label: settingsBusy === 'save' ? '保存中…' : '保存', variant: 'primary', 'data-window-drag-recall': '', disabled: settingsBusy === 'save' || !configured || !settingsInspect, onClick: saveSettings, style: { height: 32 } })
         : panelButton({ h, label: '编辑', variant: 'ghost', 'data-window-drag-recall': '', onClick: () => setNotice('模型、记忆与能力可直接在下方调整'), style: { height: 32 } }));
   };
 
@@ -1643,14 +1674,14 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           React: R, request: scopedRequest, scope, markdown: clientMarkdown,
           initialSessionId: chatSessionId, onBack: () => setPanelView('list'),
           onOpenComputer: () => setPanelView('desktop'),
-          localAuthorized: connection.authorized === true,
+          revokedAt: localRevokedAt,
           connectionDot: dotNode,
         }));
     }
     if (panelView === 'desktop') {
       return h('div', { style: { flex: '1 1 0px', minHeight: 0, minWidth: 0, display: 'flex', position: 'relative' } },
         h(PersonalAssistantPanel, {
-          request: scopedRequest, variant: 'page',
+          request: panelRequest, variant: 'page',
           connectionDot: dotNode, onBack: () => setPanelView('chat'),
         }));
     }

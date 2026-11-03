@@ -22,6 +22,15 @@
  *    （最多 QUEUE_MAX_ATTEMPTS 次），绝不直接丢消息、也不改成"发送失败"吓人。
  * 4. 只有宿主明确报告「没有在途 turn」才推进队列；本地 Host 通道不返回 turns 时
  *    依赖兜底重试，最坏情况是会多试几次，但不会因为排队而丢消息。
+ *
+ * ## 首屏与授权提示（契约第 4 章第 1–4 条）
+ *
+ * - 首次进入且没有本地快照时渲染骨架（`data-pa-conversation-skeleton`），不用整页 spinner；
+ *   有上次快照时先回显再向云端校准（stale-while-revalidate）。
+ * - 支持 `initialSessionId`（列表页历史会话入口）与 `onBack`（返回列表）、
+ *   `connectionDot`（页头三态圆点插槽）。
+ * - `revokedAt` 非空时在对话流插入一条系统提示「本机授权已撤销」，同一会话只插一条；
+ *   撤销发生时对话未挂载也能在下次进入时补上。
  */
 
 import { renderMarkdown } from './markdown.mjs';
@@ -299,7 +308,7 @@ const conversationSkeleton = h => {
   return h('div', { 'data-pa-conversation-skeleton': 'true', 'aria-hidden': 'true', style: { display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 8 } }, rows);
 };
 
-export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', localAuthorized = undefined, connectionDot = null } = {}) {
+export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', revokedAt = '', connectionDot = null } = {}) {
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
   const [phase, setPhase] = useState('loading');
@@ -345,7 +354,6 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   const pollTraceTicksRef = useRef(0);
   // 记录上一次的授权状态：只有 true → false 才是「撤销」，
   // 首次挂载时 already-false 不算撤销，不插系统提示。
-  const authorizedRef = useRef(localAuthorized);
 
   const call = useCallback(async (operation, payload = {}) => {
     if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
@@ -536,16 +544,13 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   }, [bootstrap]);
 
   // 撤销本机授权：在对话流插入一条系统提示（契约第 4 章第 4 条）。
-  // 只在 true → false 的跳变时插一条；初次进入面板时 already-false 不算撤销。
+  // revokedAt 由面板外壳维护，同一会话里只插一条；撤销后首次进入对话也会补上。
   useEffect(() => {
-    const previous = authorizedRef.current;
-    authorizedRef.current = localAuthorized;
-    if (previous === true && localAuthorized === false) {
-      setSystemNotices(list => list.some(row => row.id.startsWith('local-access-revoked-'))
-        ? list
-        : [...list, { id: `local-access-revoked-${Date.now()}`, text: '本机授权已撤销' }]);
-    }
-  }, [localAuthorized]);
+    if (!revokedAt) return;
+    setSystemNotices(list => list.some(row => row.id === 'local-access-revoked')
+      ? list
+      : [...list, { id: 'local-access-revoked', text: '本机授权已撤销' }]);
+  }, [revokedAt]);
 
   // 事件增量：宿主侧按 cursor 返回增量，空增量也要前进 cursor。
   // 本地快照回显后 cursor 还不可信，必须等 snapshot 校准完（calibrated）再开轮询。
