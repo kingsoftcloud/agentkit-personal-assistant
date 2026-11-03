@@ -20,14 +20,32 @@ function at(value) {
 }
 
 /**
+ * 任务异常默认不吞：输出一行结构化日志，便于在 runtime 日志里定位是哪条定时任务失败。
+ * 定时器回调里的 rejection 没人 await，按 Node 默认策略会直接结束进程——把「某次任务失败
+ * （例如云端暂时不可达）」降级成可观测错误，而不是让整个助理进程掉线。
+ */
+export const defaultScheduleTaskErrorHandler = (error, context = {}) => {
+  try {
+    console.error(JSON.stringify({
+      event: 'personal-assistant.schedule.task-failed',
+      scheduleId: String(context.scheduleId ?? ''),
+      scheduledAt: Number(context.scheduledAt) || null,
+      code: String(error?.code || 'SCHEDULE_TASK_FAILED'),
+      message: String(error?.message || error || ''),
+    }));
+  } catch { /* 日志失败不能反过来影响调度 */ }
+};
+
+/**
  * In-memory scheduler with stable nextRunAt/cancel semantics. A host can
  * persist `snapshot()` and restore it on restart before scheduling callbacks.
  */
 export class ScheduleManager {
-  constructor({ now = () => Date.now(), setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout } = {}) {
+  constructor({ now = () => Date.now(), setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout, onTaskError = defaultScheduleTaskErrorHandler } = {}) {
     this.now = now;
     this.setTimeoutFn = setTimeoutFn;
     this.clearTimeoutFn = clearTimeoutFn;
+    this.onTaskError = onTaskError;
     this.schedules = new Map();
   }
 
@@ -41,7 +59,12 @@ export class ScheduleManager {
     const delay = Math.max(1, nextRunAt - this.now());
     record.timer = this.setTimeoutFn(async () => {
       this.schedules.delete(id);
-      await task({ scheduleId: id, scheduledAt: nextRunAt });
+      try {
+        await task({ scheduleId: id, scheduledAt: nextRunAt });
+      } catch (error) {
+        try { this.onTaskError?.(error, Object.freeze({ scheduleId: id, scheduledAt: nextRunAt })); }
+        catch { /* 错误处理自身失败也不能泄漏成 unhandledRejection */ }
+      }
     }, delay);
     record.timer?.unref?.();
     this.schedules.set(id, record);

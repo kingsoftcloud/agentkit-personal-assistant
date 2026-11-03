@@ -24,6 +24,45 @@ const byteLength = value => {
 /** clipboardRead() 兼容 `{ text }` 与裸字符串两种返回。 */
 export const clipboardTextOf = value => (typeof value === 'string' ? value : String(value?.text ?? ''));
 
+/**
+ * 回声窗口：粘贴把文本写进云电脑剪贴板后，紧接着的「复制」如果读到同一段文本，
+ * 说明应用并没有真正复制，只是把刚写进去的内容原样读回（X11 selection 变了而已）。
+ * 这时不能再写回本机，否则两端来回覆盖，用户原本的本机剪贴板会被静默替换。
+ */
+export const CLIPBOARD_ECHO_WINDOW_MS = 2000;
+
+/** 回声判定器：生产用模块级默认实例；测试注入新实例即可避免用例之间互相污染。 */
+export function createClipboardEchoGuard({ windowMs = CLIPBOARD_ECHO_WINDOW_MS, now = () => Date.now() } = {}) {
+  let lastWrite = null;
+  return Object.freeze({
+    /** 记录刚写入云电脑剪贴板的文本（粘贴成功后调用）。 */
+    remember(text) { lastWrite = { text: String(text ?? ''), at: now() }; },
+    /** 云端读到的内容是否就是窗口内刚写入的同一段文本。 */
+    isEcho(text) {
+      const value = String(text ?? '');
+      if (!value || !lastWrite) return false;
+      return lastWrite.text === value && now() - lastWrite.at <= windowMs;
+    },
+  });
+}
+
+const defaultEchoGuard = createClipboardEchoGuard();
+
+/** 按 UTF-8 字符边界截断，保证不产生半个汉字（与云端 desktop-session 的截断口径一致）。 */
+export function truncateUtf8(text, maxBytes = MAX_CLIPBOARD_BYTES) {
+  const value = String(text ?? '');
+  if (byteLength(value) <= maxBytes) return value;
+  let bytes = 0;
+  let result = '';
+  for (const char of value) {
+    const size = byteLength(char);
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    result += char;
+  }
+  return result;
+}
+
 /** 读本地剪贴板：非安全上下文 / 未授权时浏览器会抛错，必须换成用户能懂的提示。 */
 export async function readLocalClipboard({ clipboard } = {}) {
   const api = clipboard || globalThis.navigator?.clipboard;
@@ -81,6 +120,11 @@ export function clipboardFriendlyError(error) {
     return '云电脑已空闲或断开，请先恢复画面再试';
   }
   if (code === 'CLIPBOARD_TEXT_TOO_LARGE') return '剪贴板内容超过 64 KiB，云电脑剪贴板放不下';
+  // Host 侧的本机剪贴板错误码：不映射就只能显示「暂时不可用」，会把 64 KiB 超限说成临时故障。
+  if (code === 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE') return '剪贴板内容超过 64 KiB，无法同步到本机';
+  if (code === 'PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE') return '本机剪贴板暂时不可用，请稍后重试或手动复制';
+  if (code === 'CLIPBOARD_TIMEOUT') return '云端助理版本较旧，剪贴板通道未启用（重新部署后可用）';
+  if (code === 'CLIPBOARD_UNAVAILABLE') return '云电脑尚未连接，剪贴板暂不可用';
   if (['DESKTOP_UNAVAILABLE', 'DESKTOP_FRAME_FAILED', 'DESKTOP_SESSION_FAILED'].includes(code)) return '云电脑暂时不可用，请稍后重试';
   if (['CLIPBOARD_FAILED', 'CLOUD_SESSION_FAILED'].includes(code)) return '剪贴板操作失败，请重试';
   if (code === 'CLIPBOARD_TEXT_INVALID') return '剪贴板内容格式不被云端接受，请重试';
@@ -173,7 +217,7 @@ export function isCopyShortcut(event) {
  * 粘贴：本地剪贴板 → 云电脑剪贴板 → 云桌面 Ctrl+V。
  * notify 负责把结果写进面板上的轻提示；返回结构化结果方便调用方/测试断言。
  */
-export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = () => {} } = {}) {
+export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = () => {}, echoGuard = defaultEchoGuard } = {}) {
   const read = readLocal || (() => readLocalClipboard());
   let text = '';
   try { text = await read(); }
@@ -182,10 +226,12 @@ export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = (
   if (byteLength(text) > MAX_CLIPBOARD_BYTES) { notify('剪贴板内容超过 64 KiB，云电脑剪贴板放不下'); return { ok: false, code: 'CLIPBOARD_TOO_LARGE' }; }
   try { await writeCloud(text); }
   catch (error) { notify(clipboardFriendlyError(error) || '写入云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
+  echoGuard.remember(text);
   if (typeof sendKeys === 'function') {
     let sent = false;
     try { sent = sendKeys(pasteShortcutEvents()) !== false; }
-    catch (error) { return { ok: true, code: 'CLIPBOARD_KEY_FAILED', error }; }
+    // 内容已经写进云端剪贴板，但按键没发出去：必须提示用户手动粘贴，不能假装成功。
+    catch (error) { notify('文字已写入云电脑剪贴板，但没能自动按 Ctrl+V，请手动在云桌面粘贴'); return { ok: true, code: 'CLIPBOARD_KEY_FAILED', error }; }
     // 只读旁观时输入通道拒发按键：内容已到云端剪贴板，但要明确告诉用户还差接管这一步。
     if (!sent) { notify('已写入云电脑剪贴板，但当前没有控制权；接管云电脑后再按 Ctrl+V'); return { ok: true, code: 'CLIPBOARD_KEY_NOT_SENT' }; }
   }
@@ -194,15 +240,20 @@ export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = (
 }
 
 /** 复制：云电脑剪贴板 → 本地剪贴板。 */
-export async function copyCloudClipboard({ readCloud, writeLocal, notify = () => {} } = {}) {
+export async function copyCloudClipboard({ readCloud, writeLocal, notify = () => {}, echoGuard = defaultEchoGuard } = {}) {
   const write = writeLocal || (text => writeLocalClipboard(text));
   let value;
   try { value = await readCloud(); }
   catch (error) { notify(clipboardFriendlyError(error) || '读取云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_READ_FAILED' }; }
   const text = clipboardTextOf(value);
   if (!text) { notify('云电脑剪贴板是空的，没有可复制的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
-  try { await write(text); }
+  // 读回的是刚粘贴进去的内容：应用没有真正复制，别用回声覆盖本机剪贴板。
+  if (echoGuard.isEcho(text)) { notify('云电脑剪贴板里还是本机刚粘贴的内容，没有可复制的新内容'); return { ok: true, echoed: true, text }; }
+  const truncated = byteLength(text) > MAX_CLIPBOARD_BYTES;
+  const outgoing = truncated ? truncateUtf8(text) : text;
+  try { await write(outgoing); }
   catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许写入剪贴板，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
-  notify('已复制到本地');
-  return { ok: true, text };
+  // 云端读侧也会截断到 64 KiB；这里显式告诉用户「只复制了前 64 KiB」，不静默丢内容。
+  notify(truncated ? '云端剪贴板内容超过 64 KiB，已复制前 64 KiB' : '已复制到本地');
+  return truncated ? { ok: true, text: outgoing, truncated: true } : { ok: true, text: outgoing };
 }
