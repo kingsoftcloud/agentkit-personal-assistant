@@ -46,3 +46,32 @@ test('本机剪贴板读写属于 Host 支持的 operation，且在绑定之前�
     { code: 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE', status: 413 },
   );
 });
+
+const tooLargeError = () => Object.assign(new Error('stdout maxBuffer length exceeded'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+
+test('Host 读取本机剪贴板超过 64 KiB：413 内容过大，而不是 503 暂时不可用', async () => {
+  // 注入系统命令执行器，复现 execFile 的 maxBuffer 超限；不读开发机真实剪贴板。
+  const gateway = createPersonalAssistantHostGateway(config, { env: {}, clipboardExecFile: async () => { throw tooLargeError(); } });
+  await assert.rejects(
+    gateway.request('personal-assistant.clipboard.read'),
+    error => {
+      assert.equal(error.code, 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE');
+      assert.equal(error.status, 413);
+      assert.match(error.message, /64 KiB/);
+      return true;
+    },
+  );
+});
+
+test('Host 读取本机剪贴板其它失败：保持 503 暂时不可用，不误报超长', async () => {
+  const gateway = createPersonalAssistantHostGateway(config, { env: {}, clipboardExecFile: async () => { throw Object.assign(new Error('spawn pbpaste ENOENT'), { code: 'ENOENT' }); } });
+  await assert.rejects(
+    gateway.request('personal-assistant.clipboard.read'),
+    { code: 'PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE', status: 503 },
+  );
+});
+
+test('Host 读取本机剪贴板成功：透传文本，且读路径同样在绑定之前可用', async () => {
+  const gateway = createPersonalAssistantHostGateway(config, { env: {}, clipboardExecFile: async () => ({ stdout: '从本机复制的内容\n' }) });
+  assert.deepEqual(await gateway.request('personal-assistant.clipboard.read'), { text: '从本机复制的内容\n' });
+});

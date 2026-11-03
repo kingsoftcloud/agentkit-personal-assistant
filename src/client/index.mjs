@@ -52,9 +52,6 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
     submitTurn: (sessionId, input) => request('personal-assistant.sessions.turns.submit', { sessionId, ...input, botId: input?.botId ?? selectedBotId }),
     searchMemory: query => request('personal-assistant.memory.search', { query, botId: selectedBotId }),
     remember: input => request('personal-assistant.memory.upsert', { ...input, botId: input?.botId ?? selectedBotId }),
-    listSchedules: botId => request('personal-assistant.schedules.list', { botId: botId ?? selectedBotId }),
-    createSchedule: input => request('personal-assistant.schedules.create', { ...input, botId: input?.botId ?? selectedBotId }),
-    deleteSchedule: scheduleId => request('personal-assistant.schedules.delete', { scheduleId, botId: selectedBotId }),
     computerStatus: computerId => request('personal-assistant.computer.status', { computerId, botId: selectedBotId }),
     computerAction: input => request('personal-assistant.computer.action', { ...input, botId: input?.botId ?? selectedBotId }),
     browserOpen: url => request('personal-assistant.computer.action', { action: 'open', args: { url }, botId: selectedBotId }),
@@ -199,7 +196,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   };
   const releaseInputs = () => {
     const current = state.current;
-    for (const key of current.pressed) controlRef.current?.input({ type: 'key', action: 'up', key });
+    for (const key of current.pressed) { if (key === '_copyShortcut') continue; controlRef.current?.input({ type: 'key', action: 'up', key }); }
     for (const button of current.buttons) controlRef.current?.input({ type: 'button', action: 'up', button });
     current.pressed.clear(); current.buttons.clear();
   };
@@ -235,7 +232,11 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     state.current.reconnect = null; state.current.firstFrame = null;
   };
   const close = (announce = true) => {
-    const current = state.current; current.reconnectAllowed = false; clearTimers(); releaseControl(); current.generation += 1;
+    const current = state.current; current.reconnectAllowed = false;
+    // E6：_copyShortcut 是合成复制用的伪按键，不是真实按下的键。关闭/卸载前先移除，
+    // 否则 releaseInputs 会把它当真实按键发一条 keyup 给云电脑（也可能跨连接残留）。
+    current.pressed.delete('_copyShortcut');
+    clearTimers(); releaseControl(); current.generation += 1;
     clipboardRef.current?.rejectAll();
     try { send({ type: 'close' }); current.socket?.close(1000, 'panel closed'); } catch {}
     controlRef.current.reset({ readOnly: true }); current.lastDrawnFrame = null; current.socket = null; current.session = null; current.pendingFrame = null; current.frameMetadata = null; current.readOnly = true; inputRef.current?.blur();
@@ -296,12 +297,20 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     try {
       const value = await rpc('personal-assistant.clipboard.read');
       if (typeof value?.text === 'string') return value.text;
-    } catch { /* 旧 Host 没有剪贴板 RPC，退回浏览器剪贴板 */ }
+    } catch (error) {
+      // Host 已明确回复「内容超过 64 KiB」：这是可读的业务结论，不能退回浏览器剪贴板把它吞掉。
+      if (error?.code === 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE') throw error;
+      /* 旧 Host 没有剪贴板 RPC，退回浏览器剪贴板 */
+    }
     return readLocalClipboard();
   };
   const writeHostClipboard = async text => {
     try { await rpc('personal-assistant.clipboard.write', { text: String(text ?? '') }); return; }
-    catch { /* 同上 */ }
+    catch (error) {
+      // 写方向同理：Host 明确说超限就上抛，交给 clipboardFriendlyError 显示可读文案。
+      if (error?.code === 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE') throw error;
+      /* 旧 Host 没有剪贴板 RPC，退回浏览器剪贴板 */
+    }
     await writeLocalClipboard(String(text ?? ''));
   };
   const pasteLocalClipboardToCloud = () => pasteToCloud({
@@ -511,7 +520,16 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const blur = () => releaseControl();
     const outside = event => { if (!viewRef.current?.contains(event.target)) releaseControl(); };
     document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('pointerdown', outside, true);
-    return () => { current.mounted = false; observer?.disconnect(); if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame); if (current.wheelFrame) cancelAnimationFrame(current.wheelFrame); controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true); };
+    return () => {
+      current.mounted = false;
+      // E5：剪贴板提示的 4s 定时器属于本面板，卸载时清掉并置空引用，避免残留回调写已卸载状态。
+      if (clipboardTimerRef.current) { clearTimeout(clipboardTimerRef.current); clipboardTimerRef.current = null; }
+      observer?.disconnect();
+      if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame);
+      if (current.wheelFrame) cancelAnimationFrame(current.wheelFrame);
+      controller.abort(); close(false); clearInterval(interval);
+      document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true);
+    };
   }, [request]);
   const point = event => mapDisplayPoint({ clientX: event.clientX, clientY: event.clientY, rect: canvasRef.current.getBoundingClientRect(), display: state.current.display });
   // 触控板一次滑动手势会推几十上百个 wheel 事件。以前每个事件都发一条 input，
@@ -669,6 +687,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       active ? h('span', { role: 'status', 'aria-live': 'polite', style: { marginLeft: connectionDot ? 4 : 'auto', color: 'var(--dsw-alias-label-secondary, #536174)' } }, stateText) : null),
     phase === 'readonly' ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '当前为只读旁观，鼠标和键盘输入不会发送；可申请控制') : null,
     active && notice ? h('div', { role: 'status', style: { padding: '8px 12px' } }, notice) : null,
+    // E7：整页面板（shell 桌面 tab）也要显示剪贴板提示，不能只留在 computer 变体里。
+    active && clipboardNotice ? h('div', { role: 'status', 'aria-live': 'polite', style: { padding: '8px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12 } }, clipboardNotice) : null,
     onboarding || stage,
     h('footer', { style: { display: 'flex', alignItems: 'start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', borderTop: ui.border } },
       h('details', { open: diagnosticsOpen, onToggle: event => setDiagnosticsOpen(event.currentTarget.open) }, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
@@ -974,6 +994,17 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   if (!R) return '个人助理页面尚未就绪，请重新打开';
   const { createElement: h, useEffect, useRef, useState } = R;
 
+  // G3.5：把「已开通 + 云实例/Bot 身份」与概览一起放进 SWR 缓存。重开面板时首帧直接按
+  // 上次的 Bot 列表渲染，configuration 仍在后台真实校准（失败只提示，不退回开通报板）。
+  // 缓存只在首帧读一次，后续重新渲染不重复打 localStorage。
+  const bootCacheRef = useRef(null);
+  if (!bootCacheRef.current) bootCacheRef.current = { shell: readPanelCache('shell'), overview: readPanelCache('overview') };
+  const bootShellCache = bootCacheRef.current.shell?.value;
+  const bootOverviewCache = bootCacheRef.current.overview?.value || null;
+  const bootConfig = bootShellCache?.configured === true
+    ? { configured: true, agentId: String(bootShellCache.agentId || ''), botId: String(bootShellCache.botId || '') }
+    : null;
+
   // —— 导航 ——
   const [panelView, setPanelView] = useState('list');
   // —— 本机连接/授权（三态圆点口径）——
@@ -986,15 +1017,15 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const [localNotice, setLocalNotice] = useState('');
   // 撤销时间戳：对话页未挂载时也要能补系统提示（契约第 4 章第 4 条）。
   const [localRevokedAt, setLocalRevokedAt] = useState('');
-  // —— 列表概览 ——
-  const [overview, setOverview] = useState(null);
-  const [overviewLoading, setOverviewLoading] = useState(true);
-  const [overviewDegraded, setOverviewDegraded] = useState(false);
-  const [config, setConfig] = useState(null);
+  // —— 列表概览（首帧用缓存，避免在 configuration 返回前停在「正在读取开通状态…」）——
+  const [overview, setOverview] = useState(bootOverviewCache);
+  const [overviewLoading, setOverviewLoading] = useState(!bootOverviewCache);
+  const [overviewDegraded, setOverviewDegraded] = useState(bootOverviewCache?.degraded === true);
+  const [config, setConfig] = useState(bootConfig);
   const [binding, setBinding] = useState(null);
   const [bindingBusy, setBindingBusy] = useState('');
-  const [scope, setScope] = useState(null);
-  const [selectedBotId, setSelectedBotId] = useState(String(initialBotId || ''));
+  const [scope, setScope] = useState(bootConfig ? { agentId: bootConfig.agentId, botId: bootConfig.botId } : null);
+  const [selectedBotId, setSelectedBotId] = useState(String(initialBotId || bootConfig?.botId || ''));
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [updatedAt, setUpdatedAt] = useState('');
@@ -1163,7 +1194,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   /** 首次装载：先回显缓存，再解析 scope 与概览；任何一步失败都落回可操作的界面。 */
   const boot = async () => {
-    // 1) 立刻回显缓存（stale-while-revalidate）
+    // 1) 首帧已由 state 初值回显缓存；这里兜底「本次渲染之后才写入」的概览缓存（stale-while-revalidate）。
     const cachedOverview = readPanelCache('overview');
     if (cachedOverview?.value) {
       setOverview(cachedOverview.value);
@@ -1172,10 +1203,19 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     }
     void loadConnection();
     let configValue = null;
-    try { configValue = await rpc('personal-assistant.configuration'); } catch { configValue = null; }
+    let configFailed = false;
+    try { configValue = await rpc('personal-assistant.configuration'); } catch { configFailed = true; }
+    if (!aliveRef.current) return;
+    // G3.5：真实校准失败时保留缓存首帧（列表、Bot 身份都还在），只提示；不能把列表打回开通报板。
+    if (configFailed && bootConfig) {
+      setOverviewLoading(false);
+      setNotice('暂时读不到云端状态，先展示上次的数据');
+      return;
+    }
     setConfig(configValue || null);
     if (!configValue?.configured) {
       // 未开通不是错误：交给开通报板（01）。desktop.status 不抛错，用它区分「没有实例」与「读不到」。
+      removePanelCache('shell');
       const snapshot = await rpc('personal-assistant.desktop.status').catch(() => null);
       if (!aliveRef.current) return;
       setBinding(snapshot || { configured: false, reason: 'unavailable', candidates: [] });
@@ -1193,6 +1233,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     const nextScope = { agentId: String(configValue.agentId || ''), botId };
     setScope(nextScope);
     setSelectedBotId(previous => previous || botId);
+    // 写回「已开通 + 当前 Bot」：下次重开面板首帧就能直接渲染列表，而不是停在开通报板。
+    writePanelCache('shell', { configured: true, agentId: nextScope.agentId, botId });
     if (nativeWorkbench?.available) {
       try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 原生侧栏绑定失败不阻断面板 */ }
     }
@@ -1222,6 +1264,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       setSelectedBotId(target);
       setChatSessionId('');
       if (nativeWorkbench?.available) { try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 忽略 */ } }
+      writePanelCache('shell', { configured: true, agentId: nextScope.agentId, botId: target });
     }
     setPanelView('chat');
   };

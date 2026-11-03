@@ -442,3 +442,108 @@ test('重开面板状态一致：上次概览缓存先回显，网络恢复后�
   assert.equal(cachedAfter.value.bots[0]?.name, '真实写作助理', '新数据要回写缓存，下次重开才能一致');
   view.unmount();
 });
+
+/* --------------------- E7 面板层：Host 413 不回退浏览器 --------------------- */
+
+const clipboardTooLarge = () => Object.assign(new Error('本机剪贴板内容超过 64 KiB，无法读取'), { code: 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE', status: 413 });
+
+/** 挂载面板并进入 active 态（剪贴板提示只在 active 时渲染）。 */
+async function mountActivePanel(t, { readError, writeError, variant = 'computer' } = {}) {
+  const dom = installPanelDom(t);
+  const navigatorReads = [];
+  const navigatorWrites = [];
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true, writable: true,
+    value: {
+      clipboard: {
+        readText: async () => { navigatorReads.push('read'); return '浏览器剪贴板里的内容'; },
+        writeText: async text => { navigatorWrites.push(text); },
+      },
+    },
+  });
+  t.after(() => {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  });
+  const errors = spyConsole(t);
+  const requests = [];
+  const request = async operation => {
+    requests.push(operation);
+    if (operation.endsWith('.configuration')) return { configured: true, agentId: 'ar-test', botId: 'writer' };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, primaryBotId: 'writer', bots: [{ botId: 'writer', displayName: '写作助理' }] };
+    if (operation.endsWith('.desktop.ticket')) return { wsUrl: 'wss://gw.example/personal-assistant/desktop/ws', ticket: 'ticket-clipboard', readOnly: false };
+    if (operation === 'personal-assistant.clipboard.read' && readError) throw readError;
+    if (operation === 'personal-assistant.clipboard.write' && writeError) throw writeError;
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  // 断言失败也要卸载：剪贴板提示的 4s 定时器由卸载清理，否则进程会带着未清句柄不退出。
+  t.after(() => view.unmount());
+  t.after(() => setClientReactRuntime(undefined));
+  // computer 变体（侧栏）与 page 变体（整页桌面 tab）都要覆盖；剪贴板提示两者都应显示。
+  const mount = () => view.settle(PersonalAssistantPanel, { request, variant });
+  await mount();
+  // computer 变体在配置就绪后会自动建连；page 变体需要点「连接云电脑」。
+  if (!dom.FakeSocket.instances.length) {
+    const connect = buttonsWith(view, '重新连接')[0] || buttonsWith(view, '连接云电脑')[0];
+    assert.ok(connect, `${variant} 变体应提供建连入口`);
+    connect.props.onClick();
+    await mount();
+  }
+  const socket = dom.FakeSocket.instances.at(-1);
+  assert.ok(socket, `${variant} 变体应完成建连`);
+  socket.readyState = 1;
+  socket.onopen?.();
+  await mount();
+  // 可重连的关闭会切到 reconnecting（active 态），提示条才会渲染出来。
+  socket.onclose?.({ code: 4000 });
+  await mount();
+  const input = view.find(node => node.props?.['aria-label'] === '云电脑文本输入');
+  return { dom, view, requests, errors, input, socket, navigatorReads, navigatorWrites, mount };
+}
+
+test('Host 读取本机剪贴板返回 413：不退回浏览器剪贴板，面板显示「超过 64 KiB」', async t => {
+  const fx = await mountActivePanel(t, { readError: clipboardTooLarge() });
+  assert.ok(fx.input, '桌面视图应渲染隐藏输入框来接收粘贴快捷键');
+  fx.input.props.onKeyDown({ key: 'v', metaKey: true, type: 'keydown', preventDefault() {} });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await fx.mount();
+  assert.ok(fx.requests.includes('personal-assistant.clipboard.read'), '粘贴应先通过 Host 读本机剪贴板');
+  assert.deepEqual(fx.navigatorReads, [], 'Host 已明确回 413，不能再退回 navigator.clipboard 把可读原因吞掉');
+  assert.match(fx.view.text(), /剪贴板内容超过 64 KiB/u, '应显示可照做的中文提示，而不是浏览器权限错误');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});
+
+test('Host 写入本机剪贴板返回 413：不退回浏览器剪贴板，面板显示「超过 64 KiB」', async t => {
+  const fx = await mountActivePanel(t, { writeError: clipboardTooLarge() });
+  assert.ok(fx.input, '桌面视图应渲染隐藏输入框来接收复制快捷键');
+  fx.input.props.onKeyDown({ key: 'c', metaKey: true, type: 'keydown', preventDefault() {} });
+  await new Promise(resolve => setTimeout(resolve, 220)); // 合成复制按键后有 150ms 窗口
+  const sent = fx.socket.sent.map(item => String(item)).map(item => { try { return JSON.parse(item); } catch { return null; } }).filter(Boolean);
+  const readMessage = sent.find(item => item.type === 'clipboard.read');
+  assert.ok(readMessage, '⌘C 应先向云桌面请求剪贴板内容');
+  fx.socket.onmessage({ data: JSON.stringify({ type: 'clipboard.response', requestId: readMessage.requestId, ok: true, value: { text: '云端应用里复制的内容' } }) });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await fx.mount();
+  assert.ok(fx.requests.includes('personal-assistant.clipboard.write'), '复制方向应写 Host 本机剪贴板');
+  assert.deepEqual(fx.navigatorWrites, [], 'Host 已明确回 413，不能再退回 navigator.clipboard');
+  assert.match(fx.view.text(), /剪贴板内容超过 64 KiB/u, '应显示可照做的中文提示');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});
+
+test('page 变体（整页桌面 tab）Host 读取剪贴板 413：不退回浏览器且显示「超过 64 KiB」', async t => {
+  const fx = await mountActivePanel(t, { readError: clipboardTooLarge(), variant: 'page' });
+  assert.ok(fx.input, '整页面板也应渲染隐藏输入框来接收粘贴快捷键');
+  fx.input.props.onKeyDown({ key: 'v', metaKey: true, type: 'keydown', preventDefault() {} });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  await fx.mount();
+  assert.ok(fx.requests.includes('personal-assistant.clipboard.read'), '粘贴应先通过 Host 读本机剪贴板');
+  assert.deepEqual(fx.navigatorReads, [], 'Host 已明确回 413，page 变体也不能退回 navigator.clipboard');
+  assert.match(fx.view.text(), /剪贴板内容超过 64 KiB/u, '整页桌面 tab 里也要能看到可读提示，不能静默');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});

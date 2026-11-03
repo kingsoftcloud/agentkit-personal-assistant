@@ -109,6 +109,9 @@ const plain = value => value && typeof value === 'object' && !Array.isArray(valu
 const CLIPBOARD_MAX_BYTES = 64 * 1024;
 const CLIPBOARD_TIMEOUT_MS = 2000;
 const runClipboardReader = promisify(execFile);
+// execFile 在 stdout 超过 maxBuffer 时抛 ERR_CHILD_PROCESS_STDIO_MAXBUFFER；它说明「内容太大」，
+// 而不是「剪贴板坏了」，必须映射成 413 让面板给出「超过 64 KiB」的可照做提示。
+const isClipboardTooLarge = error => error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxbuffer/iu.test(String(error?.message || ''));
 /** Host 是普通 Node 进程：直接调系统剪贴板命令，不依赖浏览器权限。 */
 async function readHostClipboard({ execFileImpl = runClipboardReader } = {}) {
   const options = { timeout: CLIPBOARD_TIMEOUT_MS, maxBuffer: CLIPBOARD_MAX_BYTES, windowsHide: true };
@@ -124,11 +127,14 @@ async function readHostClipboard({ execFileImpl = runClipboardReader } = {}) {
     try {
       const { stdout } = await execFileImpl('wl-paste', ['--no-newline'], options);
       return { text: String(stdout ?? '') };
-    } catch {
+    } catch (error) {
+      // 超长是内容问题，换 xclip 也一样超；直接上抛给外层映射 413，不误报「不可用」。
+      if (isClipboardTooLarge(error)) throw error;
       const { stdout } = await execFileImpl('xclip', ['-selection', 'clipboard', '-o'], options);
       return { text: String(stdout ?? '') };
     }
-  } catch {
+  } catch (error) {
+    if (isClipboardTooLarge(error)) throw fail('PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE', '本机剪贴板内容超过 64 KiB，无法读取', 413);
     throw fail('PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE', '本机剪贴板暂时不可用', 503);
   }
 }
@@ -239,7 +245,7 @@ export const STUDIO_DESKTOP_SERVICE = 'studioPersonalAssistantDesktop';
 
 // 默认走系统信任链：内网/预发网关的证书不在 Node 内置 CA 里，直接 fetch 会 "fetch failed"。
 const defaultFetchImpl = createSystemFetch();
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, studioVersion } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, studioVersion, clipboardExecFile } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -757,7 +763,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     }
     if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
     // 本机剪贴板不依赖云端绑定，先于 binding() 处理：面板刚打开、账号还没绑定时也能用。
-    if (operation === 'personal-assistant.clipboard.read') return readHostClipboard();
+    if (operation === 'personal-assistant.clipboard.read') return readHostClipboard({ execFileImpl: clipboardExecFile });
     if (operation === 'personal-assistant.clipboard.write') {
       if (typeof payload.text !== 'string') throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '剪贴板内容格式错误');
       await writeHostClipboard(payload.text);

@@ -63,7 +63,8 @@
 
 **G1.7（低）缺少的夹具场景**：连续多次粘贴、正好 64 KiB 的边界、端到端「通道错误码 → 用户提示」、Host 侧 64 KiB 写出 413 均无用例。
 
-> 阶段 B 状态：G1.1/G1.3/G1.4/G1.7 已修复并由用例覆盖；G1.2 客户端侧（截断 + 明确提示）已修，Host 读侧 503 误导仍待 E7；G1.5/G1.6 属写域外、未修（E5/E6）。详见 §5.3。
+> 阶段 B 状态：G1.1/G1.3/G1.4/G1.7 已修复并由用例覆盖；G1.2 客户端侧（截断 + 明确提示）已修；G1.5/G1.6 属写域外、未修（E5/E6）。详见 §5.3。
+> 阶段 C 状态（task-5）：G1.2 已全链路修复——Host 读侧 `maxBuffer` 超限映射 413 `PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE`；客户端对 413 不回退 navigator（task-6 合入），computer 侧栏与 page 整页两个变体都显示「超过 64 KiB」可读文案，面板层用例见 §5.6.2 用例 E。详见 §5.6。
 
 ### 1.3 计划新增测试用例（阶段 B）
 
@@ -117,10 +118,12 @@
 **G2.1（中）Bot 删除后没有「暂停」语义，任务是「失败」而不是「暂停」。**
 `src/bot-registry.mjs:166 remove()` 只从内存注册表移除；`src/host-gateway.mjs` 的 `deleteBot` 只写 Host 侧 `deleted:true`，不通知云端 runtime（`runtime/assistant-runtime.mjs:39-50` 启动时一次性加载 `BOT_REGISTRY_PATH`）。到点后 `requireSession` 抛 `BOT_NOT_FOUND` → 任务被标 `failed`、输出告警日志，不会乱发到别的 Bot（这点合格），但用户重新建回同名 Bot 后任务不会自动恢复，也没有「已暂停等待 Bot 恢复」的可读状态。
 **阶段 B 补测发现**：Bot 删除后 runtime 在 `stateBotId()` 处就抛出裸 `Error('BOT_NOT_FOUND: writer')`（无 `code`），`armSchedule` 的 catch 只能记成通用 `SCHEDULE_EXECUTION_FAILED`，持久化状态里看不到「Bot 已删除」；同时 bridge 一次都不会被调用（比「投递给别的 Bot」安全）。见 `test/schedule-bot-routing.test.mjs` 第 4 条与 §5.3 G2.1。
+**阶段 C 已修复（task-5）**：认领成功后先查 `registry.has(botId)`，缺失即写 `paused` + `error: 'BOT_NOT_FOUND'`（`runtime/assistant-runtime.mjs:256-260`）；执行中撞上 `BOT_NOT_FOUND` 也落 `paused`（`:268-274`）；`botIdOf` 补上 `BOT_NOT_FOUND`/404 错误码（`:91-99`）；`reconcileSchedules` 按 `BOT_REGISTRY_PATH` 重载注册表并把 paused 改回 pending 重新 arm（`:280-320`、周期任务 `:428-431`）。证据见 §5.6.2 用例 C。
 
 **G2.2（高）没有任何重试；且「认领」不是幂等的，多实例/重启重叠会重复发送。**
 - 无重试：`runtime/assistant-runtime.mjs:181-193` 单次 `turnWrite`，云端不可达时直接 `failed`，`runAt` 不会顺延。第 7 章要求「重试与幂等」，重试缺失。
 - 幂等缺口：认领只比对 `metadata.generation`（`:175-179`），不检查当前 `status`；两个 runtime 实例（滚动重启重叠、共享同一 state 目录）都会在启动时 arm 同一条 `pending` 记录，到点后各自认领成功并各自提交一次。**已实测复现**：临时探针启动两个 `startAssistantRuntime` 共享 state 目录，到点后 `submitTurn` 被调用 2 次、产生 2 个 turn 行、`schedules` 最终都是 `completed`（`submitTurn calls = 2`；turn rows = 2）。修复需要 `runtime/assistant-runtime.mjs` 的认领改为「状态前置条件 + 代次轮转」（例如 `if (row.status !== 'pending') return null`，认领时换新 generation），属于写域外，按第 4 节提交裁决。
+**阶段 C 已修复（task-5，Lead 批准 E1/E2）**：认领改为文件锁临界区 `state/claim-locks/<sha256>.lock` + 双条件（`status === 'pending'` 且 generation 匹配）+ 成功后代次轮转（`runtime/assistant-runtime.mjs:192-224`）；重试在提交链路内进行，只对连接类错误与 429/5xx 退避（默认 3 次、2 s/10 s，可注入或 `SCHEDULE_RETRY_ATTEMPTS`/`SCHEDULE_RETRY_DELAYS_MS` 配置），每次重试前校验认领仍归自己，且复用同一 `turnId`/`requestId`（`:226-248`、`:350-363`）。修复前探针复现的 `submitTurn calls = 2` 在修复后同条件用例中恒为 1。证据见 §5.6.2 用例 A/B。
 
 **G2.3（低）`ScheduleManager` 的任务异常会变成未处理拒绝（unhandledRejection）。**
 `src/schedule-manager.mjs:23-42` 定时器回调 `async () => { ... await task(...) }` 没有 try/catch；`task` 抛错时 Promise 无人 await → Node 默认策略下进程退出（`--unhandled-rejections=throw`）。runtime 的 task 内部有 catch，但 catch 里的 `patchSchedule`（状态文件写失败、`interrupt` 等）再抛错就会穿透到调度器。第 7 章「云端不可达」场景下，这会把「一次任务失败」放大成「助理进程崩溃」。
@@ -205,13 +208,13 @@
 
 | 编号 | 文件（写域外） | 问题 | 建议 | 影响验收 |
 | --- | --- | --- | --- | --- |
-| E1 | `runtime/assistant-runtime.mjs:175-193` | 认领非幂等：多实例/重启重叠重复发送同一条消息（已实测 2 次提交） | 认领加 `status === 'pending'` 前置条件 + 代次轮转 | 第 2 项「幂等（不得重复发送）」 |
-| E2 | `runtime/assistant-runtime.mjs:181-193` | 云端不可达无重试，任务直接 `failed` | 退避重试 + 幂等认领 + 上限告警 | 第 2 项「重试」 |
-| E3 | `runtime/assistant-runtime.mjs:304-307`、`src/bot-registry.mjs:166`、`src/host-gateway.mjs` `deleteBot` | Bot 删除后任务 `failed` 而非 `paused`，重名 Bot 恢复后不自动续跑 | 删除时把该 botId 的 pending 改 `paused`，注册表恢复后 re-arm | 第 2 项「Bot 删除后降级为暂停」 |
+| E1 | `runtime/assistant-runtime.mjs:175-193` | 认领非幂等：多实例/重启重叠重复发送同一条消息（已实测 2 次提交） | 认领加 `status === 'pending'` 前置条件 + 代次轮转（✅ 阶段 C 已修：文件锁 + 双条件 + 代次轮转，见 §5.6） | 第 2 项「幂等（不得重复发送）」 |
+| E2 | `runtime/assistant-runtime.mjs:181-193` | 云端不可达无重试，任务直接 `failed` | 退避重试 + 幂等认领 + 上限告警（✅ 阶段 C 已修，默认 3 次、2 s/10 s，见 §5.6） | 第 2 项「重试」 |
+| E3 | `runtime/assistant-runtime.mjs:304-307`、`src/bot-registry.mjs:166`、`src/host-gateway.mjs` `deleteBot` | Bot 删除后任务 `failed` 而非 `paused`，重名 Bot 恢复后不自动续跑 | 删除时把该 botId 的 pending 改 `paused`，注册表恢复后 re-arm（✅ 阶段 C 已修：paused + BOT_NOT_FOUND + reconcile，见 §5.6） | 第 2 项「Bot 删除后降级为暂停」 |
 | E4 | `src/client/index.mjs:55-57` | 复数 `schedules.*` RPC 不在 Host 白名单，恒 404 | 改单数 operation（或 Host 补别名） | 定时任务面板可用性（当前无 UI 入口，未暴露） |
 | E5 | `src/client/index.mjs:272-273`、`:514` | 剪贴板 4 s timer 卸载未清理 | 清理时 `clearTimeout(clipboardTimerRef.current)` | 第 3 项「无轮询堆积」 |
 | E6 | `src/client/index.mjs:283-292`、`:234` | `_copyShortcut` 伪按键可能以 keyup 泄漏 | 关闭前从 `pressed` 删除该伪键 | 第 1 项健壮性 |
-| E7 | `src/host-gateway.mjs:113-134` | 本机剪贴板 > 64 KiB 读失败报 503「暂时不可用」，且客户端退回 navigator 报「浏览器拒绝」，与真实原因不符 | Host 对 maxBuffer 超限抛 413 `PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE`；客户端对 413 不退回 navigator | 第 1 项「超长文本策略」 |
+| E7 | `src/host-gateway.mjs:113-134` | 本机剪贴板 > 64 KiB 读失败报 503「暂时不可用」，且客户端退回 navigator 报「浏览器拒绝」，与真实原因不符 | Host 对 maxBuffer 超限抛 413 `PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE`；客户端对 413 不退回 navigator，且 computer/page 两个变体均显示可读文案（✅ 阶段 C 全部修复，见 §5.6） | 第 1 项「超长文本策略」 |
 
 ## 5. 阶段 B 执行记录
 
@@ -280,14 +283,14 @@
 | 缺口 | 状态 | 证据 / 说明 |
 | --- | --- | --- |
 | G1.1 回声去重 | 已修复 | F1.1 + 用例 1/2/3 |
-| G1.2 超长策略不一致 | 客户端侧已修；Host 读侧仍待 E7 | F1.2 + 用例 5/6；Host `maxBuffer` 503 误导仍是 E7 |
+| G1.2 超长策略不一致 | 已修复 | F1.2 + 用例 5/6；E7 Host 侧 413 见 §5.6.2 用例 D；客户端 413 不回退 + computer/page 两变体提示见用例 E |
 | G1.3 sendKeys 失败静默 | 已修复 | F1.3 + 用例 7 |
 | G1.4 错误码无中文 | 已修复 | F1.4 + 用例 9 |
 | G1.5 剪贴板 4 s timer 泄漏 | 未修（写域外 E5） | 稳定性用例未触发剪贴板提示路径，不能据此认为已修复 |
 | G1.6 `_copyShortcut` keyup 泄漏 | 未修（写域外 E6） | 同上 |
 | G1.7 缺夹具 | 已补 | 用例 1–12 |
-| G2.1 Bot 删除→失败而非暂停 | 未修（写域外 E3）；已补现状用例 | 用例 16：不乱发、不重发，但错误码退化为 `SCHEDULE_EXECUTION_FAILED`、无 paused 状态 |
-| G2.2 无重试 + 认领非幂等 | 未修（写域外 E1/E2）；已补现状用例 | 用例 17 锁定「当前单次投递」；双实例重复发送的探针证据见 §2.2 |
+| G2.1 Bot 删除→失败而非暂停 | 已修复（E3） | 用例 C：paused + `BOT_NOT_FOUND`，恢复后 reconcile 重新 arm 并成功投递；HTTP 层 404 `BOT_NOT_FOUND`，见 §5.6.2 |
+| G2.2 无重试 + 认领非幂等 | 已修复（E1/E2） | 用例 A：两实例同到点 `submitTurn` 共 1 次、turn 1 条；用例 B：ECONNREFUSED 两次→第 3 次成功、成功投递 1 次、用户消息 1 条；见 §5.6.2 |
 | G2.3 调度器 unhandledRejection | 已修复 | F2.3 + 用例 19/20/21/22/23 |
 | G2.4 客户端复数 schedule RPC | 未修（写域外 E4）；当前无 UI 入口 | 未新增用例 |
 | G3.1 无 20 次切换用例 | 已补 | 用例 24/25/27 |
@@ -295,6 +298,8 @@
 | G3.3 `[request]` 身份依赖 | 已锁定契约 | 用例 25/27：同一 request 引用下每轮只 1 条 WS、无重复 boot 请求 |
 | G3.4 RPC 失败降级恢复无用例 | 已补 | 用例 26（面板）+ 用例 28（外壳缓存/降级） |
 | G3.5 重开列表首帧仍等 configuration | 待裁决 | 用例 28 实测：缓存只回显计数，列表主体仍显示「正在读取开通状态…」；见 §3.2 G3.5 |
+
+> 阶段 C（task-5）更新：G2.1、G2.2 由「未修」转为「已修复」；G1.2 全链路已修（Host 413 + 客户端不回退 + computer/page 变体可读提示，用例 D/E）。完整记录见 §5.6。
 
 ### 5.4 真实命令输出（仓库根目录执行）
 
@@ -335,3 +340,136 @@ EXIT=0
 6. **视图切换覆盖范围**：外壳覆盖列表/详情/设置/授权弹层；对话页与云电脑面板是独立组件，各自用 20 次挂载/连接用例覆盖，未做「外壳内 chat↔desktop 嵌套切换」；创建进度页轮询路径未在 20 轮内触发（其 timer 清理逻辑在 `clearCreateTimer`，未纳入本轮断言）。
 7. **E5/E6 未修**：剪贴板提示 timer 与 `_copyShortcut` 伪按键仍按 §4 等裁决；这两条不阻塞「无白屏/无堆积」主结论，但属于第 1 项健壮性尾项。
 8. **用例耗时**：全量测试从基线约 4.5 s 增至约 5.9 s（`npm test`），新增用例含 260 ms 真实等待与会话轮询清理验证，属可接受范围。
+
+### 5.6 阶段 C（task-5：E1/E2/E3/E7 全链路）执行记录
+
+Lead 批准的写域为 `runtime/assistant-runtime.mjs`、`src/host-gateway.mjs`、`test/**`、`docs/verification-report.md`（未执行 git 操作）。E7 客户端半边由客户端队员 task-6 合入 `src/client/index.mjs`；随后 Lead 授权 verifier 在同一文件增补 page 变体提示条一处渲染（见 5.6.1），并补面板层用例。
+
+#### 5.6.1 改动清单
+
+| 文件 | 类型 | 内容 |
+| --- | --- | --- |
+| `runtime/assistant-runtime.mjs` | 修复 E1/E2/E3 | 认领锁 + 代次轮转；提交级退避重试；Bot 缺失 paused；reconcile 恢复；`botIdOf` 补错误码 |
+| `src/host-gateway.mjs` | 修复 E7-Host | `maxBuffer` 超限识别为 413；`clipboardExecFile` 注入口 |
+| `test/schedule-resilience.test.mjs` | 新增 3 条 | E1 重叠实例、E2 退避重试、E3 paused/reconcile |
+| `test/schedule-bot-routing.test.mjs` | 修改 2 条断言 | 用例 4 改为 paused + `BOT_NOT_FOUND`；用例 5 改为「重试到上限」语义 |
+| `test/host-clipboard-limit.test.mjs` | 新增 3 条 | Host 读侧 413 / 503 / 成功透传 |
+| `src/client/index.mjs` | 修复 E7-Client（task-6 + 授权增补） | 413 直接上抛不回退 navigator（task-6）；`variant === 'page'` 分支补 clipboardNotice 提示条（verifier，仅渲染一处，未动连接生命周期） |
+| `test/client-stability.test.mjs` | 新增 3 条 | E7 面板层：computer 读/写 413 + page 读 413，均断言 navigator 零调用与可读文案 |
+| `docs/verification-report.md` | 报告 | 本节及 §1.2/§2.2/§4/§5.3 状态更新 |
+
+修复代码位置（阶段 C 后行号）：
+
+- E1 认领：`runtime/assistant-runtime.mjs:192-224`。锁目录 `state/claim-locks`（`:44-45`）；锁文件按 `[botId, scheduleId]` 的 sha256 命名（`:193`）；`open(path, 'wx')` 抢占，EEXIST 且超过 60 s 视为陈旧可抢回（`:194-207`）；锁内 `stateStore.mutate` 双条件校验 `status === 'pending'` 且 generation 匹配，成功后写入新 `generation`/`claimToken`/`claimedBy`（`:208-224`）。
+- E2 重试：可重试错误集合 `:226-227`（ECONNREFUSED/ECONNRESET/ETIMEDOUT/ENOTFOUND/EAI_AGAIN/EPIPE/EHOSTUNREACH/ENETUNREACH + 429/5xx）；重试策略 `:233-248`（默认 3 次、2 s/10 s，`SCHEDULE_RETRY_ATTEMPTS`/`SCHEDULE_RETRY_DELAYS_MS` 或 `runtime.scheduleRetry` 注入可调；每次重试前用 `scheduleStillOwned` 校验认领仍归自己、任务未被取消）；`submitWithBusyRetry` 接入策略 `:350-363`，重试复用同一 `turnId`/`requestId`，因此不会多建 turn 或用户消息。
+- E3 paused：`armSchedule` 认领后先查 `registry.has(botId)`，缺失立即 `paused` + `BOT_NOT_FOUND`（`:256-260`）；执行中抛 `BOT_NOT_FOUND` 同样落 paused（`:268-274`）；`botIdOf` 为裸 `BOT_NOT_FOUND` 补 `code` 与 404（`:91-99`）；`reloadBotRegistry`/`reconcileSchedules`（`:280-320`）按注册表文件重载、paused → pending 并重新 arm；周期 reconcile 默认 30 s（`:428-431`，`SCHEDULE_RECONCILE_INTERVAL_MS=0` 可关）；handle 暴露 `reconcileSchedules`（`:490`）。
+- E7-Host：`isClipboardTooLarge` 识别 `ERR_CHILD_PROCESS_STDIO_MAXBUFFER`（`src/host-gateway.mjs:114`）；读路径外层将其映射为 413 `PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE`（`:137`），其它错误仍 503；`wl-paste` 超长不再回退 `xclip`（`:132`）；工厂新增 `clipboardExecFile` 注入（`:248`），dispatch 使用（`:766`）。
+- E7-Client：`src/client/index.mjs` 的 `readHostClipboard`/`writeHostClipboard` 对 413 直接上抛、不再回退 `navigator.clipboard`（task-6）；`variant === 'page'` 分支在连接 notice 之后渲染 `clipboardNotice` 提示条（与 computer 分支同款 `role=status`/`aria-live` 结构，仅此一处新增，页分支连接生命周期未改动）。
+
+#### 5.6.2 关键证据（可直接引用）
+
+**用例 A（E1）`两个实例共享状态目录同时到点：只成功投递一次，认领锁与代次轮转挡下重复触发`**
+夹具：真实 `startAssistantRuntime` ×2，共享同一 `ASSISTANT_STATE_PATH`；实例 1 创建任务后实例 2 才启动（boot 会把同一条 pending 任务再 arm 一次，正是修复前重复发送的复现条件）；到点后两个实例的定时器并发触发。断言：
+
+1. 实例 2 启动后 `timers.size === 1`（确实从持久化状态恢复了同一条任务）；
+2. 两实例成功后 `schedules.json` 中该行 `status === 'completed'`；
+3. 认领轮转代次：`metadata.generation !== 创建时的 generation`，且 `metadata.claimToken` 存在；
+4. `first.calls.length + second.calls.length === 1`（两个 bridge 合计只成功投递一次），且投递内容 `botId === 'writer'`、`input` 与任务一致；
+5. `turns.json` 中该 Bot 仅 1 条 turn；
+6. 再等 40 ms，投递总数仍为 1（没有后台补发）。
+
+**用例 B（E2）`首次 ECONNREFUSED 后按退避重试：第三次成功且只产生一条用户消息、一次成功投递`**
+夹具：单实例；bridge 前两次抛 `ECONNREFUSED`，第三次成功；`scheduleRetry = { attempts: 3, delaysMs: [0, 0] }`。断言：
+
+1. 任务最终 `status === 'completed'`；
+2. bridge 被调用 3 次（确实退避重试，且到上限停止）；
+3. 成功投递计数为 1（`calls.length === 1`）；
+4. `turns.json` 仅 1 条 turn 且 `status === 'completed'`（重试复用同一 turn）；
+5. `messages.json` 中该 Bot 只有 1 条 `role === 'user'` 消息（重试不给会话重复插入用户消息）。
+
+**用例 C（E3）`Bot 删除后任务挂起 paused 且保留 BOT_NOT_FOUND，Bot 恢复后 reconcile 重新 arm 并成功投递`**
+夹具：真实 `BOT_REGISTRY_PATH` 文件启动；到点前把 `writer` 从注册表文件删除并 `reconcileSchedules()`；随后恢复文件再 reconcile。断言：
+
+1. 删除 Bot 后到点：任务 `status === 'paused'`、`error === 'BOT_NOT_FOUND'`（不再是通用 `SCHEDULE_EXECUTION_FAILED`）；
+2. bridge 一次都未被调用（不会回退投递给主助理或其它 Bot），`timers.size === 0`；
+3. Bot 删除期间 HTTP `GET /v1/schedules?botId=writer` 返回 404 + `BOT_NOT_FOUND`（可读错误码）；
+4. 恢复 Bot + reconcile 后：任务回到 `pending`、`error === null`，且重新 arm（`timers.size === 1`）；
+5. 再次到点：任务 `completed`，只投递一次且 `botId === 'writer'`。
+
+**用例 D（E7-Host）Host 读侧 64 KiB 口径**（`test/host-clipboard-limit.test.mjs`，注入命令执行器，不读写真实系统剪贴板）：
+
+1. `Host 读取本机剪贴板超过 64 KiB：413 内容过大，而不是 503 暂时不可用` — 抛 `ERR_CHILD_PROCESS_STDIO_MAXBUFFER` 时返回 `PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE`/413 且 message 含「64 KiB」；
+2. `Host 读取本机剪贴板其它失败：保持 503 暂时不可用，不误报超长` — `ENOENT` 仍 `PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE`/503；
+3. `Host 读取本机剪贴板成功：透传文本，且读路径同样在绑定之前可用` — 注入 `{ stdout: '从本机复制的内容\n' }` 时原样返回。
+
+既有路由用例同步修正：`Bot 被删除后任务不投递给其它 Bot，任务挂起为 paused 且不重发` 断言 `paused`/`BOT_NOT_FOUND`、bridge 调用 0 次；`云端不可达：退避重试到上限后只留一条 turn，不重复投递成功` 断言 3 次尝试、1 条 turn、最终 `failed`/`ECONNREFUSED`。
+
+**用例 E（E7-面板层）413 不退回浏览器剪贴板，且界面显示可读文案**（`test/client-stability.test.mjs`，真实面板组件 + 假 React/WS/DOM，`navigator.clipboard` 挂探针统计调用）：
+
+1. `Host 读取本机剪贴板返回 413：不退回浏览器剪贴板，面板显示「超过 64 KiB」`（侧栏 computer 变体）：按 ⌘V 后 `personal-assistant.clipboard.read` 被调用；`navigator.clipboard.readText` 调用 0 次；界面含「剪贴板内容超过 64 KiB」；控制台无错误。
+2. `Host 写入本机剪贴板返回 413：不退回浏览器剪贴板，面板显示「超过 64 KiB」`：⌘C 合成按键后经 WS `clipboard.read` 取回云端内容，写 Host 返回 413；`navigator.clipboard.writeText` 调用 0 次；同样显示可读文案；控制台无错误。
+3. `page 变体（整页桌面 tab）Host 读取剪贴板 413：不退回浏览器且显示「超过 64 KiB」`：shell 桌面 tab 路径（`variant: 'page'`）同样断言 navigator 零调用 + 整页可见文案。修复前该断言失败（提示条只在 computer 分支渲染），补 page 分支提示条后通过。
+
+证据有效性：临时移除 page 分支提示条重跑，第 3 条在「整页桌面 tab 里也要能看到可读提示」处失败；恢复后通过（说明断言确实覆盖渲染缺口，而不是只断言状态字段）。
+
+#### 5.6.3 真实命令输出（仓库根目录执行）
+
+定向用例：
+
+```
+$ node --test test/schedule-resilience.test.mjs
+ℹ tests 3
+ℹ pass 3
+ℹ fail 0
+ℹ duration_ms 1829.476875
+
+$ node --test test/schedule-bot-routing.test.mjs test/host-clipboard-limit.test.mjs
+ℹ tests 12
+ℹ pass 12
+ℹ fail 0
+ℹ duration_ms 267.781417
+
+$ node --test test/client-stability.test.mjs
+ℹ tests 8
+ℹ pass 8
+ℹ fail 0
+ℹ duration_ms 946.918917
+```
+
+全量：
+
+```
+$ npm test
+ℹ tests 406
+ℹ suites 0
+ℹ pass 404
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 2
+ℹ todo 0
+ℹ duration_ms 6923.512417
+
+$ npm run check
+ℹ pass 404
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 2
+ℹ todo 0
+ℹ duration_ms 6836.273792
+EXIT=0
+```
+
+阶段 C 新增 9 条用例（3 条韧性 + 3 条 Host 读侧 + 3 条面板层）、修改 2 条既有断言；基线从 397 项 / 395 通过 / 0 失败变为 406 项 / 404 通过 / 0 失败 / 2 skipped，无回归。
+
+稳定性：`test/schedule-resilience.test.mjs` 连续重跑 3 次均为 3/3 通过（1835.31 ms / 1805.31 ms / 1787.81 ms），并发认领与真实等待窗口未出现偶发失败。
+
+#### 5.6.4 设计边界与残留风险
+
+1. **认领锁的陈旧窗口**：持锁进程在「拿到锁」与「写入 running」之间崩溃会留下锁文件，其它实例要等 60 s 才会抢回；期间任务由周期 reconcile（默认 30 s）重新 arm 后恢复。极端最坏延迟 ≈ 90 s，不会重复发送。
+2. **重试上限内的总窗口**：默认 3 次（2 s/10 s 退避），约 12 s 内失败则任务 `failed`；这是有意的「有限次数 + 上限时间」，不做无限重试，也不会在失败后后台补发。
+3. **重试只覆盖瞬态错误**：参数错误、`BOT_NOT_FOUND`、`SESSION_NOT_FOUND` 等不重试；若任务在重试期间被取消（`status !== 'running'` 或代次变化），`scheduleStillOwned` 会立即停止重试。
+4. **Bot 恢复是轮询而非事件**：默认 30 s reconcile 一次，Bot 恢复后最坏 30 s 内续跑；`SCHEDULE_RECONCILE_INTERVAL_MS=0` 时只能手动调 `reconcileSchedules()`（测试即如此）。
+5. **多实例验证是同进程两实例**：文件锁对真实跨进程同样成立，但仓库内未做跨进程压测；已完成态 patch 带代次校验，旧代次写入会被拒绝。
+6. **E7 的显示边界（已收口）**：客户端对 413 不再回退 navigator，computer 侧栏与 page 整页两个变体都渲染可读提示；提示条与连接 notice 一样只在 `active`（已建连/重连中/休眠/恢复中）时显示，未连接状态不会触发剪贴板链路，因此无需提示。
+7. **reconcile 会重新 arm 所有 pending 行**：同 key 的 `scheduleOnce` 会替换旧定时器，不会双发，但每次 reconcile 会重置该定时器的触发时刻（仍以 `nextRunAt` 为准）。
+8. **构建产物未更新**：按 Lead 要求本次未跑 `npm run build:client`；`dist/client.js` 尚未包含 task-6 的 413 改动与 page 变体提示条，面板实机验证前需统一重建。

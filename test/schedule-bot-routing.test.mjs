@@ -4,8 +4,8 @@
  * 验收口径（docs/prototype-implementation-plan.md 第 7 章）：
  * - 任务按创建它的 botId 绑定，触发时由该 Bot 发起会话，不串到主助理或其它 Bot；
  * - 多 Bot 并存时各自会话互不干扰；
- * - Bot 被删除后任务不能乱发给别的 Bot；
- * - 云端不可达时只尝试一次、不重复发送（当前无重试，见 docs/verification-report.md §2）。
+ * - Bot 被删除后任务挂起（paused + BOT_NOT_FOUND），绝不乱发给别的 Bot；
+ * - 云端不可达时有限次重试且不重复投递（E1/E2 修复后语义，见 docs/verification-report.md §2.2）。
  *
  * 夹具：真实 startAssistantRuntime + 真实状态目录，只把 turnBridge 和定时器换成可控实现，
  * 这样路由判定（stateStore 按 botId 隔离、requireSession、armSchedule 取 row.botId）都走真实代码。
@@ -44,7 +44,7 @@ async function eventually(read) {
   assert.fail('condition did not settle');
 }
 
-async function boot(t, { submitTurn } = {}) {
+async function boot(t, { submitTurn, retry = { attempts: 1, delaysMs: [0] } } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'pa-schedule-routing-'));
   const timers = new Map();
   const calls = [];
@@ -79,7 +79,8 @@ async function boot(t, { submitTurn } = {}) {
       WORKSPACE_PATH: root,
       ASSISTANT_STATE_PATH: join(root, 'state'),
     },
-    runtime: { scheduleManager, registry, turnBridge },
+    // 重试与定时器都用可控实现：定时器手动触发，退避延迟注入为 0，测试不依赖真实等待。
+    runtime: { scheduleManager, registry, turnBridge, scheduleRetry: retry, scheduleReconcileIntervalMs: 0 },
   });
   const request = async (path, body) => {
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -171,7 +172,7 @@ test('任务不能借用其它 Bot 的会话：404 SESSION_NOT_FOUND 且不 arm 
   assert.equal((await fx.request('/v1/schedules?botId=researcher')).body.schedules.length, 0);
 });
 
-test('Bot 被删除后任务不投递给其它 Bot，任务以 BOT_NOT_FOUND 失败且不重发', async t => {
+test('Bot 被删除后任务不投递给其它 Bot，任务挂起为 paused 且不重发', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   const fx = await boot(t);
   const writerSession = await createSession(fx, 'writer');
@@ -186,24 +187,24 @@ test('Bot 被删除后任务不投递给其它 Bot，任务以 BOT_NOT_FOUND 失
   const readSchedules = async () => JSON.parse(await readFile(join(fx.root, 'state', 'schedules.json'), 'utf8'));
   const row = await eventually(async () => {
     const rows = await readSchedules();
-    return rows.find(item => item.botId === 'writer' && item.scheduleId === 'after-delete' && item.status !== 'pending');
+    return rows.find(item => item.botId === 'writer' && item.scheduleId === 'after-delete' && ['paused', 'failed'].includes(item.status));
   });
-  assert.equal(row.status, 'failed');
-  // 现状：runtime 在 stateBotId() 处就抛出裸 Error('BOT_NOT_FOUND: writer')（无 code），
-  // armSchedule 的 catch 只能记成通用 SCHEDULE_EXECUTION_FAILED。语义正确（没有乱发），
-  // 但用户/日志里看不到「Bot 已删除」，属于报告 §2.2 G2.1 的降级可读性缺口。
-  assert.equal(row.error, 'SCHEDULE_EXECUTION_FAILED');
+  // G2.1 修复后：Bot 删除只让任务挂起（paused），错误码保留 BOT_NOT_FOUND 让 UI 能说清原因；
+  // 恢复 Bot 后由 reconcile 重新 arm，不会把任务改写成通用失败或投递给别的 Bot。
+  assert.equal(row.status, 'paused');
+  assert.equal(row.error, 'BOT_NOT_FOUND');
   assert.deepEqual(fx.calls, [], 'Bot 已删除时连一次 bridge 提交都不应发生，更不能落到别的 Bot');
   assert.equal(fx.timers.size, 0);
-  // 再等一拍，确认没有「失败后自动重试」的重复发送（当前实现没有重试，见报告 §2.2）。
+  // 再等一拍，确认 paused 任务不会在后台被重试发送。
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(fx.calls.length, 0);
 });
 
-test('云端不可达：单次触发只尝试一次并标记失败，不重复发送（当前无重试）', async t => {
+test('云端不可达：退避重试到上限后只留一条 turn，不重复投递成功', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
   let attempts = 0;
   const fx = await boot(t, {
+    retry: { attempts: 3, delaysMs: [0, 0] },
     submitTurn: async () => {
       attempts += 1;
       throw Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
@@ -221,11 +222,11 @@ test('云端不可达：单次触发只尝试一次并标记失败，不重复�
   const row = (await fx.request('/v1/schedules?botId=writer')).body.schedules[0];
   assert.equal(row.status, 'failed');
   assert.equal(row.error, 'ECONNREFUSED');
-  assert.equal(attempts, 1, '一次触发只能提交一次，幂等底线是不能重复发送');
-  assert.equal(fx.calls.length, 1);
-  assert.equal(fx.timers.size, 0, '失败后不能留下会自动重发的定时器');
+  assert.equal(attempts, 3, '应按配置退避重试到上限，而不是无限重试');
+  assert.equal(fx.calls.length, 3);
+  assert.equal(fx.timers.size, 0, '重试耗尽后不能留下会自动重发的定时器');
   const turns = (await fx.request(`/v1/sessions/${sessionId}/turns?botId=writer`)).body.turns;
-  assert.equal(turns.length, 1, '失败只能留下一条 turn 记录');
+  assert.equal(turns.length, 1, '重试复用同一个 turn，不得重复创建消息');
   assert.equal(turns[0].status, 'failed');
 });
 

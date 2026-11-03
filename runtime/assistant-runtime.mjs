@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, open, rm, stat } from 'node:fs/promises';
 import { createComputerBrokerClient, createHttpComputerBrokerTransport } from '../src/computer-broker.mjs';
 import { createComputerToolset } from '../src/cloud-computer-tools.mjs';
 import { BotRegistry } from '../src/bot-registry.mjs';
@@ -40,7 +40,14 @@ const registryPath = values.get('bot-registry') || env.BOT_REGISTRY_PATH;
 await mkdir(workspace, { recursive: true, mode: 0o700 });
 await mkdir(artifacts, { recursive: true, mode: 0o750 });
 await mkdir(state, { recursive: true, mode: 0o700 });
+// 认领锁目录：多个 runtime 实例/进程共享同一状态目录时，用文件锁把「读状态→置 running→轮转代次」串行化。
+const claimLocks = `${state}/claim-locks`;
+await mkdir(claimLocks, { recursive: true, mode: 0o700 });
 const stateStore = await createPersonalAssistantStateStore(state).init();
+const scheduleRetryAttempts = Math.min(Math.max(Number(runtime?.scheduleRetry?.attempts ?? env.SCHEDULE_RETRY_ATTEMPTS ?? 3) || 3, 1), 6);
+const scheduleRetryDelaysMs = (Array.isArray(runtime?.scheduleRetry?.delaysMs) ? runtime.scheduleRetry.delaysMs : String(env.SCHEDULE_RETRY_DELAYS_MS ?? '2000,10000').split(','))
+  .map(value => Math.max(0, Number(value) || 0));
+const scheduleReconcileIntervalMs = Math.max(0, Number(runtime?.scheduleReconcileIntervalMs ?? env.SCHEDULE_RECONCILE_INTERVAL_MS ?? 30_000) || 0);
 const cloudFiles = createCloudFileStore(`${workspace}/workspace`);
 let bots = [];
 if (registryPath) {
@@ -83,8 +90,10 @@ const brokerDesktopFrameBinary = async body => {
 };
 const botIdOf = value => {
   const botId = String(value ?? '').trim();
-  if (!botId) throw Object.assign(new Error('botId is required'), { code: 'BOT_REQUIRED' });
-  registry.require(botId);
+  if (!botId) throw Object.assign(new Error('botId is required'), { code: 'BOT_REQUIRED', status: 400 });
+  try { registry.require(botId); }
+  // 注册表只抛裸 Error('BOT_NOT_FOUND: x')，这里补上错误码，让 UI 能区分「Bot 已删除」与普通失败。
+  catch (error) { throw Object.assign(error, { code: 'BOT_NOT_FOUND', status: 404 }); }
   return botId;
 };
 const taskIdOf = value => {
@@ -178,20 +187,129 @@ const patchSchedule = (record, patch) => stateStore.mutate('schedules', rows => 
   Object.assign(row, patch);
   return row;
 });
+// 认领只允许成功一次：文件锁串行化多实例的「读状态→置 running→轮转代次」，
+// 锁内再校验 status==='pending' 与代次；后到实例拿到锁时状态已是 running（或代次已变），直接放弃本次触发。
+const CLAIM_LOCK_STALE_MS = 60_000;
+const claimLockPath = row => `${claimLocks}/${createHash('sha256').update(JSON.stringify([row.botId, row.scheduleId])).digest('hex')}.lock`;
+const claimSchedule = async row => {
+  const lockPath = claimLockPath(row);
+  let handle = null;
+  for (let attempt = 0; attempt < 2 && !handle; attempt += 1) {
+    try { handle = await open(lockPath, 'wx', 0o600); }
+    catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      const info = await stat(lockPath).catch(() => null);
+      // 持锁进程异常退出会留下锁文件；超过 60s 视为陈旧并抢回，避免任务永久卡死。
+      if (!info || Date.now() - info.mtimeMs > CLAIM_LOCK_STALE_MS) { await rm(lockPath, { force: true }).catch(() => {}); continue; }
+      return null;
+    }
+  }
+  if (!handle) return null;
+  try {
+    return await stateStore.mutate('schedules', rows => {
+      const current = rows.find(item => item.botId === row.botId && item.scheduleId === row.scheduleId);
+      if (!current || current.status !== 'pending') return null;
+      if (row.metadata?.generation && current.metadata?.generation !== row.metadata.generation) return null;
+      const generation = randomUUID();
+      current.metadata = { ...current.metadata, generation, claimToken: generation };
+      current.status = 'running';
+      current.startedAt = new Date().toISOString();
+      current.claimedBy = runtimeInstanceId;
+      return { ...current, metadata: { ...current.metadata } };
+    });
+  } finally {
+    await handle.close().catch(() => {});
+    await rm(lockPath, { force: true }).catch(() => {});
+  }
+};
+// 云端不可达时的可重试错误：只对「连接没建立/明确 5xx」退避重试，参数类错误不重试。
+const SCHEDULE_RETRYABLE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'EHOSTUNREACH', 'ENETUNREACH', 'DSH_SESSION_CONTROLLER_UNAVAILABLE', 'COMPUTER_BROKER_REQUEST_FAILED']);
+const isRetryableScheduleError = error => SCHEDULE_RETRYABLE_CODES.has(error?.code) || (Number.isInteger(error?.status) && (error.status === 429 || error.status >= 500));
+const scheduleStillOwned = async (botId, scheduleId, generation) => {
+  const row = (await stateStore.read('schedules')).find(item => item.botId === botId && item.scheduleId === scheduleId);
+  return row?.status === 'running' && row.metadata?.generation === generation;
+};
+// 重试发生在同一次 turn 提交上（复用 turnId/requestId），因此不会多出一条用户消息或重复投递成功。
+const scheduleSubmitRetry = body => {
+  const scheduleId = body.metadata?.scheduleId;
+  const generation = body.metadata?.generation;
+  if (!scheduleId || !generation) return null;
+  let used = 0;
+  return {
+    async decide(error) {
+      if (!isRetryableScheduleError(error) || used >= scheduleRetryAttempts - 1) return null;
+      if (!(await scheduleStillOwned(body.botId, scheduleId, generation))) return null;
+      const delayMs = scheduleRetryDelaysMs[Math.min(used, scheduleRetryDelaysMs.length - 1)] ?? 0;
+      used += 1;
+      console.warn(JSON.stringify({ event: 'personal-assistant.schedule.retry', botId: body.botId, scheduleId, attempt: used, code: error?.code || error?.message, delayMs }));
+      return { delayMs };
+    },
+  };
+};
 function armSchedule(row) {
   scheduler.scheduleOnce({ scheduleId: scheduleKey(row), runAt: Math.min(Math.max(Date.now() + 1, row.nextRunAt), Date.now() + 2_147_483_647), task: async () => {
+    let claimed = null;
     try {
       if (row.nextRunAt > Date.now()) { armSchedule(row); return; }
-      const claimed = await patchSchedule(row, { status: 'running', startedAt: new Date().toISOString() });
+      claimed = await claimSchedule(row);
       if (!claimed) return;
-      const receipt = await turnWrite({ botId: row.botId, input: row.metadata.input, metadata: { scheduleId: row.scheduleId } }, row.metadata.sessionId);
+      // Bot 已删除：任务挂起为 paused（保留 BOT_NOT_FOUND 供 UI 展示），绝不投递给其它 Bot。
+      if (!registry.has(claimed.botId)) {
+        await patchSchedule(claimed, { status: 'paused', error: 'BOT_NOT_FOUND', pausedAt: new Date().toISOString(), startedAt: null });
+        console.info(JSON.stringify({ event: 'personal-assistant.schedule.paused', botId: claimed.botId, scheduleId: claimed.scheduleId, code: 'BOT_NOT_FOUND' }));
+        return;
+      }
+      const metadata = { scheduleId: claimed.scheduleId, generation: claimed.metadata.generation };
+      const receipt = await turnWrite({ botId: claimed.botId, input: claimed.metadata.input, metadata }, claimed.metadata.sessionId);
       await Promise.allSettled([...pendingTurns]);
-      const turn = (await stateStore.turns(row.botId, row.metadata.sessionId)).find(item => item.turnId === receipt.turnId);
-      await patchSchedule(row, { status: turn?.status === 'completed' ? 'completed' : 'failed', turnId: receipt.turnId, finishedAt: new Date().toISOString(), error: turn?.error || null });
-      console.info(JSON.stringify({ event: 'personal-assistant.schedule.finished', botId: row.botId, scheduleId: row.scheduleId, turnId: receipt.turnId, status: turn?.status || 'failed' }));
-    } catch (error) { await patchSchedule(row, { status: 'failed', error: error.code || 'SCHEDULE_EXECUTION_FAILED' }); }
+      const turn = (await stateStore.turns(claimed.botId, claimed.metadata.sessionId)).find(item => item.turnId === receipt.turnId);
+      await patchSchedule(claimed, { status: turn?.status === 'completed' ? 'completed' : 'failed', turnId: receipt.turnId, finishedAt: new Date().toISOString(), error: turn?.error || null });
+      console.info(JSON.stringify({ event: 'personal-assistant.schedule.finished', botId: claimed.botId, scheduleId: claimed.scheduleId, turnId: receipt.turnId, status: turn?.status || 'failed' }));
+    } catch (error) {
+      const record = claimed ?? row;
+      if (error?.code === 'BOT_NOT_FOUND') {
+        await patchSchedule(record, { status: 'paused', error: 'BOT_NOT_FOUND', pausedAt: new Date().toISOString() });
+        console.info(JSON.stringify({ event: 'personal-assistant.schedule.paused', botId: record.botId, scheduleId: record.scheduleId, code: 'BOT_NOT_FOUND' }));
+        return;
+      }
+      await patchSchedule(record, { status: 'failed', error: error?.code || 'SCHEDULE_EXECUTION_FAILED', finishedAt: new Date().toISOString() });
+    }
   } });
 }
+// Bot 恢复后不必重启进程：按注册表文件重新加载，把 paused 的任务改回 pending 并重新 arm。
+const reloadBotRegistry = async () => {
+  if (!registryPath || runtime?.registry) return false;
+  let rows;
+  try {
+    const parsed = JSON.parse(await readFile(registryPath, 'utf8'));
+    rows = Array.isArray(parsed) ? parsed : (Array.isArray(parsed.bots) ? parsed.bots : []);
+  } catch (error) { if (error?.code === 'ENOENT') rows = []; else return false; }
+  const desired = new Map(rows.filter(item => item && typeof item === 'object' && item.botId).map(item => [String(item.botId).trim(), item]));
+  for (const bot of registry.list()) if (!desired.has(bot.botId)) registry.remove(bot.botId);
+  for (const [botId, definition] of desired) if (!registry.has(botId)) registry.upsert(definition);
+  return true;
+};
+const reconcileSchedules = async () => {
+  await reloadBotRegistry();
+  let resumed = 0;
+  let armed = 0;
+  for (const row of await stateStore.read('schedules')) {
+    if (row.status === 'paused') {
+      if (!registry.has(row.botId) || !row.metadata?.input || !row.metadata?.sessionId) continue;
+      const next = await stateStore.mutate('schedules', rows => {
+        const current = rows.find(item => item.botId === row.botId && item.scheduleId === row.scheduleId);
+        if (!current || current.status !== 'paused') return null;
+        Object.assign(current, { status: 'pending', error: null, resumedAt: new Date().toISOString() });
+        return { ...current, metadata: { ...current.metadata } };
+      });
+      if (next) { armSchedule(next); resumed += 1; }
+      continue;
+    }
+    if ((!row.status || row.status === 'pending') && row.metadata?.input && row.metadata?.sessionId) { armSchedule(row); armed += 1; }
+  }
+  if (resumed || armed) console.info(JSON.stringify({ event: 'personal-assistant.schedule.reconciled', resumed, armed }));
+  return { resumed, armed };
+};
 const turnWrite = async (body, sessionId) => {
   const key = JSON.stringify([body.botId, sessionId]);
   const previous = submissionLocks.get(key) || Promise.resolve();
@@ -229,12 +347,14 @@ const buildTurnContent = async (body, botId, sessionId) => {
 
 // bridge 的 busy 标记在 waitForTurn 的 finally 里释放，链式排队后理论上不会撞上；
 // 仍保留短重试兜底（例如云端 DSH 内部还有未归位的旧 turn）。
-const submitWithBusyRetry = async args => {
+const submitWithBusyRetry = async (args, retry = null) => {
   for (let attempt = 0; ; attempt += 1) {
     try { return await turnBridge.submitTurn(args); }
     catch (error) {
-      if (error?.code !== 'DSH_SESSION_BUSY' || attempt >= 20) throw error;
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (error?.code === 'DSH_SESSION_BUSY' && attempt < 20) { await new Promise(resolve => setTimeout(resolve, 1000)); continue; }
+      const decision = retry ? await retry.decide(error) : null;
+      if (!decision) throw error;
+      if (decision.delayMs > 0) await new Promise(resolve => setTimeout(resolve, decision.delayMs));
     }
   }
 };
@@ -249,7 +369,7 @@ const observeTurn = async ({ botId, sessionId, turn, clientTurnId, receipt }) =>
 const executeTurn = async ({ botId, sessionId, body, turn, clientTurnId }) => {
   try {
     const content = await buildTurnContent(body, botId, sessionId);
-    const receipt = await submitWithBusyRetry({ botId, sessionId, input: body.input, parts: content, requestId: turn.turnId });
+    const receipt = await submitWithBusyRetry({ botId, sessionId, input: body.input, parts: content, requestId: turn.turnId }, scheduleSubmitRetry(body));
     await updateTurn(turn.turnId, { status: 'running', execution: receipt.execution, requestId: receipt.requestId });
     await observeTurn({ botId, sessionId, turn, clientTurnId, receipt });
   } catch (error) {
@@ -284,7 +404,7 @@ const submitCloudTurn = async (body, sessionId) => {
   }
   // 会话空闲：立即提交，保持原有“提交即返回 running + requestId”的接口语义。
   let receipt;
-  try { receipt = await submitWithBusyRetry({ botId, sessionId, input: body.input, parts: await buildTurnContent(body, botId, sessionId), requestId: turn.turnId }); }
+  try { receipt = await submitWithBusyRetry({ botId, sessionId, input: body.input, parts: await buildTurnContent(body, botId, sessionId), requestId: turn.turnId }, scheduleSubmitRetry(body)); }
   catch (error) {
     await updateTurn(turn.turnId, { status: 'failed', error: error.code || error.message });
     throw error;
@@ -303,8 +423,12 @@ await stateStore.mutate('turns', rows => {
 });
 for (const row of await stateStore.read('schedules')) {
   if (row.status === 'running') await patchSchedule(row, { status: 'interrupted', error: 'SCHEDULE_PROCESS_INTERRUPTED' });
-  else if ((!row.status || row.status === 'pending') && row.metadata?.input && row.metadata?.sessionId) armSchedule(row);
 }
+await reconcileSchedules();
+const reconcileTimer = scheduleReconcileIntervalMs > 0 ? setInterval(() => {
+  void reconcileSchedules().catch(error => console.error(JSON.stringify({ event: 'personal-assistant.schedule.reconcile-failed', code: error?.code || error?.message })));
+}, scheduleReconcileIntervalMs) : null;
+reconcileTimer?.unref?.();
 runtime?.setAutomationService?.(async args => {
   const botId = stateBotId(args.botId);
   if (args.action === 'list') return { schedules: await stateStore.schedules(botId) };
@@ -363,7 +487,7 @@ const server = createServer(async (request, response) => {
 });
 attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles }) });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
-return { server, stateStore, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
+return { server, stateStore, reconcileSchedules, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); if (reconcileTimer) clearInterval(reconcileTimer); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
