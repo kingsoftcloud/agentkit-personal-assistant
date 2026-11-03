@@ -280,7 +280,26 @@ const plusGlyph = h => h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', f
 const closeGlyph = h => h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', 'aria-hidden': true },
   h('path', { d: 'M6 6l12 12M18 6L6 18' }));
 
-export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null } = {}) {
+/**
+ * 首屏骨架：与真实气泡同构（用户气泡靠右、助理正文靠左），
+ * 数据到后整块替换，避免整页 spinner 或空白闪一下。
+ */
+const conversationSkeleton = h => {
+  const bone = (key, width, height, extra = null) => h('span', {
+    key, 'aria-hidden': 'true',
+    style: { display: 'block', width, height, borderRadius: height >= 20 ? 12 : 6, background: '#e5e9f0', animation: 'pa-skeleton 1.4s ease-in-out infinite', ...(extra || {}) },
+  });
+  const rows = [];
+  for (let index = 0; index < 3; index += 1) {
+    rows.push(h('div', { key: `user-${index}`, style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 } },
+      bone('who', 34, 10), bone('bubble', index === 0 ? '62%' : '48%', 34, { background: 'color-mix(in srgb, #2f6bff 10%, transparent)', animation: 'none' })));
+    rows.push(h('div', { key: `assistant-${index}`, style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6 } },
+      bone('who', 28, 10), bone('line-1', `${78 - index * 12}%`, 12), bone('line-2', `${58 - index * 8}%`, 12)));
+  }
+  return h('div', { 'data-pa-conversation-skeleton': 'true', 'aria-hidden': 'true', style: { display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 8 } }, rows);
+};
+
+export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', localAuthorized = undefined, connectionDot = null } = {}) {
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
   const [phase, setPhase] = useState('loading');
@@ -302,6 +321,9 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   // 本轮进行中收到的消息：只存在内存里，本轮结束后逐条发出（见文件头注释的边界说明）。
   const [queue, setQueue] = useState([]);
   const [queueNotice, setQueueNotice] = useState('');
+  // 撤销本机授权后的系统提示：只在下一次进入面板前留在本次对话流里，
+  // 不写本地快照（它描述的是本机状态，不属于云端会话内容）。
+  const [systemNotices, setSystemNotices] = useState([]);
   const cursorRef = useRef(0);
   const outboxRef = useRef(new Map());
   const queueRef = useRef([]);
@@ -321,6 +343,9 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   messagesRef.current = messages;
   const snapshotWriteAtRef = useRef(0);
   const pollTraceTicksRef = useRef(0);
+  // 记录上一次的授权状态：只有 true → false 才是「撤销」，
+  // 首次挂载时 already-false 不算撤销，不插系统提示。
+  const authorizedRef = useRef(localAuthorized);
 
   const call = useCallback(async (operation, payload = {}) => {
     if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
@@ -461,6 +486,16 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     setPhase('loading');
     setError('');
     if (!aliveRef.current) return;
+    // stale-while-revalidate：上次成功打开过的会话先按本地快照画出来，
+    // 再向云端 sessions.list / snapshot 校准。命中缓存时首屏不是骨架、也不是空白。
+    const cachedSessionId = text(initialSessionId) || readSessionPointer(scope);
+    const cached = cachedSessionId ? readSessionSnapshot(scope, cachedSessionId) : null;
+    if (cachedSessionId && cached) {
+      sessionRef.current = cachedSessionId;
+      setSessionId(cachedSessionId);
+      setMessages(cached.messages);
+      setPhase('ready');
+    }
     try {
       const listed = await call('personal-assistant.sessions.list');
       if (!aliveRef.current) return;
@@ -472,11 +507,14 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       setRuntimeInstanceId(text(listed.runtimeInstanceId));
       setSessions(available);
       if (available.length > 0) {
-        const remembered = readSessionPointer(scope);
-        const selected = available.find(row => text(row.sessionId) === remembered) || available[0];
+        // 打开优先级：列表页点进来的指定会话 > 上次打开的会话 > 目录第一条。
+        const preferred = text(initialSessionId) || readSessionPointer(scope);
+        const selected = available.find(row => text(row.sessionId) === preferred) || available[0];
         await openSession(text(selected.sessionId));
         return;
       }
+      // 历史会话入口指定的会话可能还没出现在目录里（目录有分页/延迟），直接按 id 打开。
+      if (text(initialSessionId)) { await openSession(text(initialSessionId)); return; }
       // 有过成功打开的会话却突然拿到空目录，通常是 PVC/状态目录/Bot 范围出了问题。
       // 不再静默创建一个空会话；用户可以通过头部的“新会话”显式确认创建。
       if (readSessionPointer(scope)) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_STATE_MISSING', '云端历史会话暂时不可见，请检查实例状态后重试');
@@ -486,7 +524,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       setPhase('error');
       setError(failure?.message || '会话通道暂时不可用');
     }
-  }, [call, createSession, openSession, scope]);
+  }, [call, createSession, initialSessionId, openSession, scope]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -496,6 +534,18 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
     };
   }, [bootstrap]);
+
+  // 撤销本机授权：在对话流插入一条系统提示（契约第 4 章第 4 条）。
+  // 只在 true → false 的跳变时插一条；初次进入面板时 already-false 不算撤销。
+  useEffect(() => {
+    const previous = authorizedRef.current;
+    authorizedRef.current = localAuthorized;
+    if (previous === true && localAuthorized === false) {
+      setSystemNotices(list => list.some(row => row.id.startsWith('local-access-revoked-'))
+        ? list
+        : [...list, { id: `local-access-revoked-${Date.now()}`, text: '本机授权已撤销' }]);
+    }
+  }, [localAuthorized]);
 
   // 事件增量：宿主侧按 cursor 返回增量，空增量也要前进 cursor。
   // 本地快照回显后 cursor 还不可信，必须等 snapshot 校准完（calibrated）再开轮询。
@@ -685,10 +735,15 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   }, [queue.length]);
 
   // Studio(macOS) 的拖拽区靠 data-window-drag 标记：PA 页面没有外壳 tab strip，需要自己的头部行。
-  const header = h('header', { style: styles.header, 'data-window-drag': '' },
+  const header = h('header', { style: { ...styles.header, minHeight: 52, padding: '8px 16px', gap: 8 }, 'data-window-drag': '' },
+    typeof onBack === 'function' ? h('button', {
+      type: 'button', 'aria-label': '返回', title: '返回 Bot 列表', 'data-window-drag-recall': '', onClick: onBack,
+      style: { flex: 'none', width: 28, height: 28, display: 'grid', placeItems: 'center', padding: 0, border: 'none', borderRadius: 8, background: 'transparent', color: 'var(--dsw-alias-label-secondary, #536174)', cursor: 'pointer' },
+    }, h('svg', { 'aria-hidden': 'true', width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none' }, h('path', { d: 'M9.8 3.4 5.2 8l4.6 4.6', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }))) : null,
     h('h1', { style: styles.title }, '个人助理'),
     h('span', { style: styles.status }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
     h('span', { style: styles.spacer }),
+    connectionDot || null,
     h('button', { type: 'button', 'data-window-drag-recall': '', disabled: phase === 'loading' || sending || awaiting || queue.length > 0, onClick: () => void createSession(), 'aria-label': '新建会话', title: queue.length > 0 ? '请等待排队消息发送后再新建会话' : '新建云端会话', style: styles.ghost }, '新会话'),
     onOpenComputer ? h('button', { type: 'button', 'data-window-drag-recall': '', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
 
@@ -704,18 +759,19 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (failure) { setError(failure.message || '云端文件下载失败'); }
   } }, header,
-    h('style', null, '@keyframes pa-awaiting { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }'),
+    h('style', null, '@keyframes pa-awaiting { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }@keyframes pa-skeleton { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }'),
     error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } }, error) : null,
     h('div', { ref: scrollerRef, 'data-personal-assistant-messages': 'true', style: styles.scroller, onScroll: event => {
       const element = event.currentTarget;
       followLatestRef.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64;
     } },
       h('div', { style: styles.thread },
-        messages.length === 0 ? h('div', { style: { ...styles.status, paddingTop: 40, textAlign: 'center' } },
-          phase === 'error' ? h('div', { style: { ...styles.centeredInner, margin: '0 auto' } },
-            h('strong', null, '暂时连不上个人助理'), h('span', null, error || '请稍后重试'),
+        messages.length === 0
+          ? (phase === 'error' ? h('div', { style: { ...styles.centeredInner, margin: '0 auto', paddingTop: 40 } },
+            h('strong', null, '暂时连不上个人助理'), h('span', { style: styles.status }, error || '请稍后重试'),
             h('button', { style: styles.ghost, onClick: () => void bootstrap() }, '重试'))
-            : phase === 'loading' ? '正在连接个人助理…' : EMPTY_HINT) : null,
+            : phase === 'loading' ? conversationSkeleton(h) : h('div', { style: { ...styles.status, paddingTop: 40, textAlign: 'center' } }, EMPTY_HINT))
+          : null,
         messages.map(message => {
           if (message.role === 'step') return h('div', { key: message.id, style: styles.step }, `· ${message.text}`);
           const mine = message.role === 'user';
@@ -725,6 +781,15 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
               mine ? (message.text || '…') : renderAssistantBody(h, message.text, styles, markdown)),
             message.status === 'failed' ? h('button', { onClick: () => void submit(outboxRef.current.get(message.clientTurnId)), disabled: sending }, `${message.failure} · 重试发送`) : null);
         }),
+        // 本机授权撤销后的系统提示：不属于云端消息，不落快照，只在本次面板会话里保留。
+        systemNotices.map(notice => h('div', {
+          key: notice.id, role: 'status', 'data-pa-system-notice': 'local-access-revoked',
+          style: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 10px', borderRadius: 8, background: '#fff0d6', color: '#946200', fontSize: 12, lineHeight: 1.7 },
+        },
+        h('span', { 'aria-hidden': 'true', style: { flex: 'none', marginTop: 1 } }, '!'),
+        h('span', { style: { flex: 1, minWidth: 0 } },
+          notice.text,
+          h('span', { style: { color: '#76808e' } }, '；本机控制入口已禁用，云电脑与云端会话不受影响。')))),
         awaiting ? h('div', { key: 'awaiting', style: styles.row },
           h('span', { style: styles.who }, '助理'),
           h('div', { style: { ...styles.bubble, color: 'var(--dsw-alias-label-secondary, #536174)' } },

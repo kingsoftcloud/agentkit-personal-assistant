@@ -32,7 +32,9 @@ export class PersonalAssistantStateStore {
 
   async init() {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
-    for (const name of ['sessions', 'memory', 'schedules', 'messages', 'turns']) {
+    // bots/local-access 是面板新增的本地集合：老状态目录仅缺文件，读到空数组后按需创建，
+    // 因此不需要迁移，既有集合的格式保持不变。
+    for (const name of ['sessions', 'memory', 'schedules', 'messages', 'turns', 'bots', 'local-access']) {
       const path = this.file(name);
       try { await readFile(path, 'utf8'); } catch (error) {
         if (error?.code !== 'ENOENT') throw error;
@@ -164,6 +166,21 @@ export class PersonalAssistantStateStore {
       const next = { botId: id, key: memoryKey, content: value, metadata: metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? { ...metadata } : {}, updatedAt: new Date().toISOString() };
       if (index < 0) rows.push(next); else rows[index] = next;
       return next;
+    });
+  }
+
+  /**
+   * 删除一条记忆。记忆行历史上以 key 作为稳定标识（content 是正文），面板契约里的
+   * memoryId 因此按 key 解析；metadata.id 存在时也接受，兼容外部写入的行。
+   * 只做行过滤，不改变既有行结构，旧状态文件不需要迁移。
+   */
+  removeMemory({ botId, memoryId } = {}) {
+    const id = identifier(botId, 'botId');
+    const memory = identifier(memoryId, 'memoryId');
+    return this.mutate('memory', rows => {
+      const before = rows.length;
+      rows.splice(0, rows.length, ...rows.filter(row => !(row.botId === id && (row.key === memory || row.metadata?.id === memory))));
+      return before !== rows.length;
     });
   }
 

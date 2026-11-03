@@ -2,8 +2,13 @@
 import { createRequire } from 'node:module';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from './client/bot-directory.mjs';
 import { createCloudSessionTransport } from './cloud-session-transport.mjs';
+import { BotRegistry, loadBotRegistry, publicMemoryItems } from './bot-registry.mjs';
+import { createPersonalAssistantStateStore } from './persistent-state.mjs';
+import { createLocalAccess, isLocalControlOperation } from './local-access.mjs';
 /**
  * 云网关会拒掉 Node 内置（undici）WebSocket：握手成功后立即 1006 断开且不带关闭帧，
  * 面板只能看到「连接暂时不可用」。实测同一张 ticket 下浏览器、Python websockets 与 `ws`
@@ -69,11 +74,36 @@ const BINDING_REFRESH_OPERATIONS = new Set([
   'personal-assistant.settings.update',
 ]);
 const AGENT_ID = /^ar-[A-Za-z0-9-]{4,120}$/u;
+const BOT_ID = /^[a-z][a-z0-9._-]{0,63}$/u;
+// 面板新增的本机数据操作：不经过云端会话通道。云目录/状态目录不可用时降级返回，
+// 不阻断面板；只有本机授权与写操作会明确报错。
+const LOCAL_OPERATIONS = new Set([
+  'personal-assistant.bots.overview',
+  'personal-assistant.bot.detail',
+  'personal-assistant.bot.create',
+  'personal-assistant.bot.delete',
+  'personal-assistant.bot.memory.delete',
+  'personal-assistant.bot.model.update',
+  'personal-assistant.local-access.status',
+  'personal-assistant.local-access.grant',
+  'personal-assistant.local-access.revoke',
+  'personal-assistant.create.status',
+]);
+// 创建进度只观测 Host 真正能看到的阶段：Studio 的 create 是一个整体 RPC，
+// 内部 runtime/computer/assistant 阶段无法逐段回报，因此不伪造中间态。
+const CREATE_STAGES = Object.freeze([
+  Object.freeze({ id: 'instance', detail: '云端实例已创建' }),
+  Object.freeze({ id: 'runtime', detail: '运行时已初始化' }),
+  Object.freeze({ id: 'computer', detail: '云电脑已就绪' }),
+  Object.freeze({ id: 'assistant', detail: '助理已上线' }),
+]);
+const CREATE_ESTIMATED_MS = 90_000;
+const BOT_COLLECTION = 'bots';
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket',
   // 本机剪贴板只能由 Host 进程读写：Studio 的 Electron 渲染器没有 clipboard-read/
   // clipboard-write 权限，navigator.clipboard 在面板里一律被拒，⌘C/⌘V 就成了空操作。
   'personal-assistant.clipboard.read', 'personal-assistant.clipboard.write',
-  ...BINDING_OPERATIONS, ...SESSION_OPERATIONS]);
+  ...BINDING_OPERATIONS, ...SESSION_OPERATIONS, ...LOCAL_OPERATIONS]);
 const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const CLIPBOARD_MAX_BYTES = 64 * 1024;
@@ -141,11 +171,75 @@ const requireSessionId = value => {
 };
 import { createSystemFetch, trustedCAs } from './system-fetch.mjs';
 
+/**
+ * 面板本机状态的落盘目录：优先显式配置，其次云端运行时同款环境变量，
+ * 最后跟随 workspace（与 runtime 默认 `<workspace>/.agentkit/state` 一致）。
+ * 拿不到时返回空串 → 记忆/授权退化为进程内状态，不阻塞面板。
+ */
+function resolveStateRoot(config, env) {
+  for (const candidate of [config.statePath, env.ASSISTANT_STATE_PATH, env.AGENTKIT_STATE_DIR, env.PERSONAL_ASSISTANT_STATE_PATH]) {
+    const value = String(candidate ?? '').trim();
+    if (value) return value;
+  }
+  const workspace = String(config.workspace ?? env.WORKSPACE_PATH ?? '').trim();
+  return workspace ? join(workspace, '.agentkit', 'state') : '';
+}
+
+/**
+ * 把面板在本机新建/改过/删除的 Bot 覆盖到配置 registry 上。
+ * 只接受合法 botId 与白名单字段；单条损坏时跳过，不影响其它 Bot。
+ */
+function applyPersistedBots(registry, rows, deletedBots = new Set()) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
+    const botId = String(row.botId ?? '').trim();
+    if (!BOT_ID.test(botId)) continue;
+    if (row.deleted === true) { registry.remove(botId); deletedBots.add(botId); continue; }
+    if (registry.has(botId)) {
+      if (typeof row.model === 'string' && row.model.trim()) {
+        try { registry.setModel(botId, row.model); } catch { /* 单个覆盖无效时保留配置值 */ }
+      }
+      continue;
+    }
+    try {
+      registry.upsert({
+        botId,
+        displayName: typeof row.displayName === 'string' && row.displayName.trim() ? row.displayName.trim().slice(0, 120) : botId,
+        systemPromptRevision: `local:${botId}`,
+        role: 'custom',
+        ...(typeof row.model === 'string' && row.model.trim() ? { model: row.model } : {}),
+        ...(typeof row.createdAt === 'string' && row.createdAt.trim() ? { createdAt: row.createdAt } : {}),
+      });
+    } catch { /* 忽略无法归一化的本地行 */ }
+  }
+}
+
+/** 本机 Bot 覆盖/新建/删除的持久化；状态目录不可用时静默降级为内存。 */
+async function persistBotRow(stateStore, row) {
+  if (!stateStore) return false;
+  try {
+    await stateStore.mutate(BOT_COLLECTION, rows => {
+      const index = rows.findIndex(item => item && typeof item === 'object' && item.botId === row.botId);
+      if (index < 0) rows.push(row); else rows[index] = { ...rows[index], ...row };
+      return true;
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function requireBotId(value) {
+  const text = String(value ?? '').trim();
+  if (!BOT_ID.test(text)) throw fail('PERSONAL_ASSISTANT_BOT_INVALID', '助理标识无效', 400);
+  return text;
+}
+
 export const STUDIO_DESKTOP_SERVICE = 'studioPersonalAssistantDesktop';
 
 // 默认走系统信任链：内网/预发网关的证书不在 Node 内置 CA 里，直接 fetch 会 "fetch failed"。
 const defaultFetchImpl = createSystemFetch();
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0 } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, studioVersion } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -290,6 +384,346 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       version: settingsText(value.version, 40), status: settingsText(value.status, 32) || 'updating' };
   }
 
+  // —— 面板本机数据（Bot 概览/详情、本机授权、创建进度）——
+  // 这些数据不经过云端会话通道：Bot 元数据来自配置 registry 与本地覆盖，记忆/会话
+  // 计数来自 profile 状态目录；云目录不可达时只降级（degraded:true），不阻断面板。
+  const stateRoot = resolveStateRoot(config, env);
+  let servicesPromise;
+  const ensureServices = () => {
+    if (!servicesPromise) servicesPromise = createHostServices();
+    return servicesPromise;
+  };
+
+  function studioConnected() {
+    try {
+      const studio = getStudioDesktop();
+      return Boolean(studio && typeof studio.configuration === 'function' && typeof studio.issueTicket === 'function');
+    } catch { return false; }
+  }
+
+  async function createHostServices() {
+    const profileId = String(config.profileId ?? agentId ?? 'default').trim() || 'default';
+    let registry;
+    let registryError = false;
+    try { registry = botRegistry ?? loadBotRegistry({ bots: config.bots, env, profileId }); }
+    catch { registryError = true; registry = new BotRegistry({ profileId }); }
+    let store = stateStore ?? null;
+    if (!store && stateRoot) {
+      try { store = await createPersonalAssistantStateStore(stateRoot).init(); } catch { store = null; }
+    }
+    const access = localAccess ?? createLocalAccess({
+      stateStore: store,
+      probeConnection: () => studioConnected(),
+      platform: String(platform ?? process.platform),
+      studioVersion: String(studioVersion ?? config.studioVersion ?? env.STUDIO_VERSION ?? ''),
+    });
+    if (typeof access.load === 'function') await access.load();
+    const deletedBots = new Set();
+    if (store) {
+      try { applyPersistedBots(registry, await store.read(BOT_COLLECTION), deletedBots); }
+      catch { /* 覆盖数据损坏时退回配置 registry */ }
+    }
+    return Object.freeze({ registry, stateStore: store, localAccess: access, registryError, deletedBots, localDegraded: !store });
+  }
+
+  async function readLocalState(store) {
+    if (!store) return { available: false, memory: [], turns: [], schedules: 0 };
+    try {
+      const [memory, turns, schedules] = await Promise.all([
+        store.read('memory'), store.read('turns'), store.read('schedules'),
+      ]);
+      return {
+        available: true,
+        memory: Array.isArray(memory) ? memory : [],
+        turns: Array.isArray(turns) ? turns : [],
+        schedules: Array.isArray(schedules) ? schedules.length : 0,
+      };
+    } catch {
+      return { available: false, memory: [], turns: [], schedules: 0 };
+    }
+  }
+
+  /** 目录返回 id/名称，registry 提供角色/模型/能力；两边都没有的字段留空而不是编造。 */
+  function buildOverviewBots(services, directory, memoryRows) {
+    const counts = new Map();
+    for (const row of memoryRows) {
+      const id = String(row?.botId ?? '');
+      if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    const directoryById = new Map();
+    for (const item of directory) directoryById.set(item.botId, item);
+    const result = [];
+    const seen = new Set();
+    for (const bot of services.registry.list()) {
+      if (services.deletedBots.has(bot.botId)) continue;
+      const known = directoryById.get(bot.botId);
+      let capabilities = [];
+      try { capabilities = services.registry.capabilities(bot.botId); } catch { capabilities = []; }
+      result.push({
+        id: bot.botId,
+        name: known?.displayName || bot.displayName,
+        role: services.registry.roleOf(bot.botId),
+        status: bot.status ?? 'idle',
+        model: bot.model ?? '',
+        memoryCount: counts.get(bot.botId) ?? 0,
+        capabilityCount: capabilities.length,
+        computer: bot.metadata?.computer === 'connected' ? 'connected' : 'idle',
+      });
+      seen.add(bot.botId);
+    }
+    for (const item of directory) {
+      if (seen.has(item.botId) || services.deletedBots.has(item.botId)) continue;
+      result.push({
+        id: item.botId, name: item.displayName, role: result.length === 0 ? 'primary' : 'custom',
+        status: 'idle', model: '', memoryCount: counts.get(item.botId) ?? 0, capabilityCount: 0, computer: 'idle',
+      });
+      seen.add(item.botId);
+    }
+    return result;
+  }
+
+  async function publicOverview(services, signal) {
+    const local = await readLocalState(services.stateStore);
+    let directory = [];
+    let degraded = services.localDegraded || services.registryError || !local.available;
+    try {
+      const current = await binding(signal);
+      if (current.configured) directory = (await readBotDirectory(current, signal)).bots;
+      else degraded = true;
+    } catch { degraded = true; }
+    const active = [];
+    const recent = [];
+    for (const turn of local.turns) {
+      if (!turn || typeof turn !== 'object') continue;
+      const botId = String(turn.botId ?? '');
+      const title = typeof turn.metadata?.title === 'string' && turn.metadata.title.trim()
+        ? turn.metadata.title.trim().slice(0, 120) : String(turn.input ?? '').trim().slice(0, 120);
+      if (turn.status === 'queued' || turn.status === 'running') {
+        active.push({ kind: 'turn', botId, title, detail: turn.status === 'running' ? '正在执行' : '排队中' });
+      } else if (turn.status === 'completed' || turn.status === 'failed') {
+        recent.push({ id: String(turn.turnId ?? ''), title, status: turn.status === 'completed' ? 'done' : 'failed', at: String(turn.updatedAt ?? '') });
+      }
+    }
+    active.splice(8);
+    recent.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    recent.splice(8);
+    return {
+      bots: buildOverviewBots(services, directory, local.memory),
+      active,
+      recent,
+      counts: { schedules: local.schedules, memories: local.memory.length, files: 0 },
+      ...(degraded ? { degraded: true } : {}),
+    };
+  }
+
+  async function publicBotDetail(services, payload, signal) {
+    const botId = requireBotId(payload.botId);
+    let degraded = services.localDegraded || services.registryError;
+    let configured = false;
+    try {
+      configured = (await binding(signal)).configured === true;
+      if (!configured) degraded = true;
+    } catch { degraded = true; }
+    let describe;
+    try { describe = services.registry.describe(botId); } catch { describe = undefined; }
+    if (!describe) {
+      // 本机没有这个 Bot 时退回云目录确认它是否存在；目录不可达则降级返回而不是报错。
+      if (!configured) throw fail('PERSONAL_ASSISTANT_BOT_NOT_FOUND', '当前助理不存在或已被删除', 404);
+      try {
+        const listing = await readBotDirectory(await binding(signal), signal);
+        if (services.deletedBots.has(botId)) throw fail('PERSONAL_ASSISTANT_BOT_NOT_FOUND', '当前助理不存在或已被删除', 404);
+        const found = listing.bots.find(item => item.botId === botId);
+        if (!found) throw fail('PERSONAL_ASSISTANT_BOT_NOT_FOUND', '当前助理不存在或已被删除', 404);
+        describe = Object.freeze({ id: botId, name: found.displayName, role: 'custom', status: 'idle', model: '' });
+      } catch (error) {
+        if (error?.code === 'PERSONAL_ASSISTANT_BOT_NOT_FOUND') throw error;
+        degraded = true;
+        describe = Object.freeze({ id: botId, name: botId, role: 'custom', status: 'offline', model: '' });
+      }
+    }
+    let createdAt = '';
+    let capabilities = [];
+    try { createdAt = services.registry.createdAt(botId); capabilities = services.registry.capabilities(botId); } catch { /* 目录里的 Bot 没有本机定义 */ }
+    const local = await readLocalState(services.stateStore);
+    if (!local.available) degraded = true;
+    const items = publicMemoryItems(local.memory.filter(row => row?.botId === botId));
+    // 云电脑实时状态属于 broker 侧数据，面板 RPC 不代持租约：拿不到时明确返回 null，不编造。
+    return {
+      bot: describe,
+      memory: { count: items.length, items },
+      capabilities,
+      computer: null,
+      createdAt,
+      ...(degraded ? { degraded: true } : {}),
+    };
+  }
+
+  async function createBot(services, payload) {
+    const name = String(payload.name ?? '').trim();
+    if (!name || name.length > 60 || /[\u0000-\u001f\u007f]/u.test(name)) throw fail('PERSONAL_ASSISTANT_BOT_INVALID', '助理名称格式错误', 400);
+    let botId;
+    do { botId = `bot-${randomUUID().replaceAll('-', '').slice(0, 8)}`; } while (services.registry.has(botId));
+    const createdAt = new Date().toISOString();
+    services.registry.upsert({ botId, displayName: name, systemPromptRevision: `local:${botId}`, role: 'custom', createdAt });
+    await persistBotRow(services.stateStore, { botId, displayName: name, createdAt, deleted: false });
+    return { bot: { id: botId, name } };
+  }
+
+  async function deleteBot(services, payload) {
+    const botId = requireBotId(payload.botId);
+    const confirmName = String(payload.confirmName ?? '').trim();
+    if (!confirmName) throw fail('PERSONAL_ASSISTANT_BOT_CONFIRM_REQUIRED', '删除助理需要输入名称确认', 400);
+    let describe;
+    try { describe = services.registry.describe(botId); } catch { describe = undefined; }
+    if (!describe) throw fail('PERSONAL_ASSISTANT_BOT_NOT_FOUND', '当前助理不存在或已被删除', 404);
+    if (confirmName !== describe.name) throw fail('PERSONAL_ASSISTANT_BOT_CONFIRM_MISMATCH', '确认名称与助理名称不一致', 400);
+    services.registry.remove(botId);
+    services.deletedBots.add(botId);
+    await persistBotRow(services.stateStore, { botId, deleted: true, deletedAt: new Date().toISOString() });
+    return { deleted: true };
+  }
+
+  async function deleteBotMemory(services, payload) {
+    const botId = requireBotId(payload.botId);
+    const memoryId = String(payload.memoryId ?? '').trim();
+    if (!/^[a-zA-Z0-9._:-]{1,128}$/u.test(memoryId)) throw fail('PERSONAL_ASSISTANT_MEMORY_INVALID', '记忆标识无效', 400);
+    if (!services.stateStore) return { deleted: false, degraded: true };
+    try {
+      const removed = await services.stateStore.removeMemory({ botId, memoryId });
+      return removed ? { deleted: true } : { deleted: false };
+    } catch {
+      return { deleted: false, degraded: true };
+    }
+  }
+
+  async function updateBotModel(services, payload) {
+    const botId = requireBotId(payload.botId);
+    const model = String(payload.model ?? '').trim();
+    if (!model || model.length > 120 || /[\u0000-\u001f\u007f]/u.test(model)) throw fail('PERSONAL_ASSISTANT_MODEL_INVALID', '模型名称无效', 400);
+    try { services.registry.setModel(botId, model); }
+    catch { throw fail('PERSONAL_ASSISTANT_BOT_NOT_FOUND', '当前助理不存在或已被删除', 404); }
+    await persistBotRow(services.stateStore, { botId, model, updatedAt: new Date().toISOString() });
+    return { model };
+  }
+
+  async function handleLocalOperation(operation, payload, signal) {
+    const services = await ensureServices();
+    if (operation === 'personal-assistant.local-access.status') return services.localAccess.status();
+    if (operation === 'personal-assistant.local-access.grant') return services.localAccess.grant({ scopes: payload.scopes, riskConfirm: payload.riskConfirm });
+    if (operation === 'personal-assistant.local-access.revoke') return services.localAccess.revoke();
+    if (operation === 'personal-assistant.create.status') return publicCreateStatus();
+    if (operation === 'personal-assistant.bots.overview') return publicOverview(services, signal);
+    if (operation === 'personal-assistant.bot.detail') return publicBotDetail(services, payload, signal);
+    if (operation === 'personal-assistant.bot.create') return createBot(services, payload);
+    if (operation === 'personal-assistant.bot.delete') return deleteBot(services, payload);
+    if (operation === 'personal-assistant.bot.memory.delete') return deleteBotMemory(services, payload);
+    if (operation === 'personal-assistant.bot.model.update') return updateBotModel(services, payload);
+    throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
+  }
+
+  // —— 首次创建进度（只观测 Host 能看到的阶段）——
+  let createProgress;
+  function beginCreateProgress() {
+    createProgress = { startedAt: Date.now(), finishedAt: 0, instanceId: '', stage: 'instance', active: true, error: '' };
+  }
+  function completeCreateProgress(agentId) {
+    if (!createProgress) return;
+    createProgress.active = false;
+    createProgress.stage = 'done';
+    createProgress.instanceId = typeof agentId === 'string' && AGENT_ID.test(agentId) ? agentId : '';
+    createProgress.finishedAt = Date.now();
+  }
+  function failCreateProgress(error) {
+    if (!createProgress) return;
+    createProgress.active = false;
+    createProgress.stage = 'failed';
+    createProgress.error = String(error?.message ?? '创建失败').slice(0, 200);
+    createProgress.finishedAt = Date.now();
+  }
+  function publicCreateStatus() {
+    if (!createProgress) {
+      return {
+        instanceId: '', stage: 'instance',
+        stages: CREATE_STAGES.map(stage => ({ id: stage.id, status: 'pending', detail: '' })),
+        elapsedMs: 0, estimatedRemainingMs: 0,
+      };
+    }
+    const elapsedMs = Math.max(0, (createProgress.finishedAt || Date.now()) - createProgress.startedAt);
+    let stages;
+    if (createProgress.stage === 'done') {
+      stages = CREATE_STAGES.map(stage => ({ id: stage.id, status: 'done', detail: stage.detail }));
+    } else if (createProgress.stage === 'failed') {
+      stages = CREATE_STAGES.map(stage => stage.id === 'instance'
+        ? { id: 'instance', status: 'failed', detail: createProgress.error }
+        : { id: stage.id, status: 'pending', detail: '' });
+    } else {
+      stages = CREATE_STAGES.map(stage => stage.id === 'instance'
+        ? { id: 'instance', status: 'active', detail: '正在创建云端实例' }
+        : { id: stage.id, status: 'pending', detail: '' });
+    }
+    return {
+      instanceId: createProgress.instanceId,
+      stage: createProgress.stage,
+      stages,
+      elapsedMs,
+      estimatedRemainingMs: createProgress.active ? Math.max(0, CREATE_ESTIMATED_MS - elapsedMs) : 0,
+      ...(createProgress.stage === 'failed' && createProgress.error ? { error: createProgress.error } : {}),
+    };
+  }
+
+  /** 目录查询（bots.list 与 bots.overview 共用）：只回传 Bot 身份与名称。 */
+  async function readBotDirectory(current, signal) {
+    const ticket = await request('personal-assistant.desktop.ticket', { agentId: current.agentId, botId: DIRECTORY_BOT_ID, mode: 'read' }, signal);
+    if (typeof WebSocketImpl !== 'function') throw fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 503);
+    const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
+    return new Promise((resolve, reject) => {
+      let socket, settled = false, connected = false;
+      const finish = (error, rows) => {
+        if (settled) return; settled = true;
+        querySignal.removeEventListener('abort', abort);
+        try { socket?.close(1000, 'directory complete'); } catch {}
+        if (error) reject(error); else resolve(rows);
+      };
+      const abort = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT', '读取助理列表超时，请重试', 504));
+      if (querySignal.aborted) return abort();
+      querySignal.addEventListener('abort', abort, { once: true });
+      try {
+        // 内网网关是自签链：`ws` 需要显式并入系统 CA，否则 onerror 表现为目录不可用。
+        socket = new WebSocketImpl(ticket.wsUrl, ['agentkit.personal-assistant.desktop.v1', `agentkit.desktop.ticket.${ticket.ticket}`], { ca: trustedCAs() });
+      }
+      catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502)); return; }
+      socket.once?.('unexpected-response', (_request, response) => {
+        const status = Number(response.statusCode) || 502;
+        response.resume?.();
+        finish(fail(status >= 500 ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '云端拒绝读取助理列表，请检查连接授权', status >= 400 ? status : 502));
+      });
+      socket.onopen = () => { connected = true; socket.send(JSON.stringify({ type: 'bots.list' })); };
+      // 未完成握手时的不透明错误可能是鉴权拒绝，不能当作普通目录故障回退。
+      socket.onerror = () => finish(fail(connected ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '暂时无法读取助理列表，请检查连接授权后重试', 502));
+      socket.onclose = event => {
+        const closeCode = safeCloseCode(event?.code);
+        const error = fail(!connected || closeCode === 1008 ? 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED' : 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', `助理目录连接已结束${closeCode ? `（关闭码 ${closeCode}）` : ''}，请重试`, closeCode === 1008 ? 403 : 502);
+        // reason 由远端提供，可能含票据或内部信息；仅保留数值关闭码。
+        if (closeCode) error.closeCode = closeCode;
+        finish(error);
+      };
+      socket.onmessage = event => {
+        try {
+          if (typeof event.data !== 'string' || event.data.length > 64 * 1024) throw new Error('invalid directory');
+          const value = JSON.parse(event.data);
+          if (value.type === 'bots') finish(null, { bots: publicBotDirectory(value.bots), ...(Array.isArray(value.features) && value.features.includes('desktop-handoff/v1') ? { features: ['desktop-handoff/v1'] } : {}) });
+          else if (value.type === 'error') {
+            if (value.code === 'DESKTOP_MESSAGE_UNSUPPORTED') finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED', '当前云端版本尚不支持助理列表', 409));
+            else {
+              const status = Number(value.status) || 400;
+              finish(fail(status >= 500 ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '云端拒绝读取助理列表，请检查连接授权', status));
+            }
+          }
+        } catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_INVALID', '助理目录格式不兼容，请更新云端助理后重试', 502)); }
+      };
+    });
+  }
+
   /** 页面 RPC 的统一入口：只负责打点，具体分发在 dispatch()。打点只含操作名与耗时，
    *  请求参数、绑定信息与凭据都不落日志（先测量后优化，别删）。 */
   // session.events 是 ~600ms 一次的轮询，逐条打点会以 1.7 条/秒淹没 Studio 日志；
@@ -314,6 +748,13 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
 
   async function dispatch(operation, payload = {}, signal, onBindingMs = () => {}) {
     if (!plain(payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求参数格式错误');
+    // 本机控制类 operation 先做授权校验：未授权一律 403，绝不依赖 UI 置灰。
+    // 已授权但尚未实现的操作仍按「不支持」处理，避免把未知操作当成已放行能力。
+    if (isLocalControlOperation(operation)) {
+      const services = await ensureServices();
+      services.localAccess.assertAuthorized();
+      throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
+    }
     if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
     // 本机剪贴板不依赖云端绑定，先于 binding() 处理：面板刚打开、账号还没绑定时也能用。
     if (operation === 'personal-assistant.clipboard.read') return readHostClipboard();
@@ -322,6 +763,8 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       await writeHostClipboard(payload.text);
       return { written: true };
     }
+    // 面板本机数据同样不依赖云端绑定：绑定/目录不可达时在内部降级（degraded:true）。
+    if (LOCAL_OPERATIONS.has(operation)) return handleLocalOperation(operation, payload, signal);
     // 写操作强制向 Studio 重新确认绑定；随后立刻清空缓存，让紧接着的读也读到新实例。
     const refreshBinding = BINDING_REFRESH_OPERATIONS.has(operation);
     const bindingStartedAt = Date.now();
@@ -338,6 +781,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       if (typeof studio[bindingMethod] !== 'function') throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', '请更新 Studio 云连接服务', 503);
       const created = operation === 'personal-assistant.desktop.create';
       const closing = operation === 'personal-assistant.desktop.destroy';
+      if (created) beginCreateProgress();
       if (closing) {
         const confirm = payload.confirmAgentId;
         // Closing frees a paid cloud resource: never accept an implicit target.
@@ -361,9 +805,11 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       let value;
       try { value = await studio[bindingMethod](input, deadline); }
       catch (error) {
+        if (created) failCreateProgress(error);
         const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 503;
         throw fail(error?.code || 'PERSONAL_ASSISTANT_BINDING_FAILED', String(error?.message || '个人助理连接失败').slice(0, 240), status);
       }
+      if (created) completeCreateProgress(value?.agentId);
       if (bindingMethod === 'status') return publicBindingStatus(value);
       if (bindingMethod === 'destroy') return { configured: false, mode: 'studio', ...(value?.closed === true ? { closed: true } : {}) };
       if (bindingMethod === 'settings') return publicSettings(value);
@@ -377,56 +823,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     };
     if (operation === 'personal-assistant.bots.list') {
       if (!current.configured) return { bots: [], directoryAvailable: false };
-      const ticket = await request('personal-assistant.desktop.ticket', { agentId: current.agentId, botId: DIRECTORY_BOT_ID, mode: 'read' }, signal);
-      if (typeof WebSocketImpl !== 'function') throw fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 503);
-      const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000);
-      const directory = await new Promise((resolve, reject) => {
-        let socket, settled = false, connected = false;
-        const finish = (error, rows) => {
-          if (settled) return; settled = true;
-          querySignal.removeEventListener('abort', abort);
-          try { socket?.close(1000, 'directory complete'); } catch {}
-          if (error) reject(error); else resolve(rows);
-        };
-        const abort = () => finish(fail('PERSONAL_ASSISTANT_DIRECTORY_TIMEOUT', '读取助理列表超时，请重试', 504));
-        if (querySignal.aborted) return abort();
-        querySignal.addEventListener('abort', abort, { once: true });
-        try {
-          // 内网网关是自签链：`ws` 需要显式并入系统 CA，否则 onerror 表现为目录不可用。
-          socket = new WebSocketImpl(ticket.wsUrl, ['agentkit.personal-assistant.desktop.v1', `agentkit.desktop.ticket.${ticket.ticket}`], { ca: trustedCAs() });
-        }
-        catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', '暂时无法读取助理列表，请重试', 502)); return; }
-        socket.once?.('unexpected-response', (_request, response) => {
-          const status = Number(response.statusCode) || 502;
-          response.resume?.();
-          finish(fail(status >= 500 ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '云端拒绝读取助理列表，请检查连接授权', status >= 400 ? status : 502));
-        });
-        socket.onopen = () => { connected = true; socket.send(JSON.stringify({ type: 'bots.list' })); };
-        // 未完成握手时的不透明错误可能是鉴权拒绝，不能当作普通目录故障回退。
-        socket.onerror = () => finish(fail(connected ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '暂时无法读取助理列表，请检查连接授权后重试', 502));
-        socket.onclose = event => {
-          const closeCode = safeCloseCode(event?.code);
-          const error = fail(!connected || closeCode === 1008 ? 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED' : 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE', `助理目录连接已结束${closeCode ? `（关闭码 ${closeCode}）` : ''}，请重试`, closeCode === 1008 ? 403 : 502);
-          // reason 由远端提供，可能含票据或内部信息；仅保留数值关闭码。
-          if (closeCode) error.closeCode = closeCode;
-          finish(error);
-        };
-        socket.onmessage = event => {
-          try {
-            if (typeof event.data !== 'string' || event.data.length > 64 * 1024) throw new Error('invalid directory');
-            const value = JSON.parse(event.data);
-            if (value.type === 'bots') finish(null, { bots: publicBotDirectory(value.bots), ...(Array.isArray(value.features) && value.features.includes('desktop-handoff/v1') ? { features: ['desktop-handoff/v1'] } : {}) });
-            else if (value.type === 'error') {
-              if (value.code === 'DESKTOP_MESSAGE_UNSUPPORTED') finish(fail('PERSONAL_ASSISTANT_DIRECTORY_UNSUPPORTED', '当前云端版本尚不支持助理列表', 409));
-              else {
-                const status = Number(value.status) || 400;
-                finish(fail(status >= 500 ? 'PERSONAL_ASSISTANT_DIRECTORY_UNAVAILABLE' : 'PERSONAL_ASSISTANT_DIRECTORY_REFUSED', '云端拒绝读取助理列表，请检查连接授权', status));
-              }
-            }
-          } catch { finish(fail('PERSONAL_ASSISTANT_DIRECTORY_INVALID', '助理目录格式不兼容，请更新云端助理后重试', 502)); }
-        };
-      });
-      return { ...directory, directoryAvailable: true };
+      return { ...await readBotDirectory(current, signal), directoryAvailable: true };
     }
     if (!current.configured) throw fail('PERSONAL_ASSISTANT_GATEWAY_UNCONFIGURED', '个人助理尚未绑定云端实例', 409);
     if (payload.agentId && payload.agentId !== current.agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', '云端实例与 Host 绑定不一致', 403);
@@ -458,7 +855,16 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     ws.protocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
     return { ticket: data.Ticket, expiresAt: data.ExpiresAt, agentId, botId, wsUrl: ws.href, protocol: 'agentkit.personal-assistant.desktop.v1', leaseId: data.LeaseId || null, readOnly: payload.mode === 'read' };
   }
-  return Object.freeze({ request, dispose: () => cloudSessions.dispose() });
+  return Object.freeze({
+    request,
+    dispose: () => {
+      // 撤销授权时中止所有本机任务；服务尚未初始化时无需清理。
+      try {
+        if (servicesPromise) void servicesPromise.then(services => services.localAccess?.dispose?.()).catch(() => {});
+      } catch { /* 清理失败不影响卸载 */ }
+      cloudSessions.dispose();
+    },
+  });
 }
 
 export function registerPersonalAssistantHostGateway(ctx, config = {}, { sessionChannel, channelOptions } = {}) {
@@ -481,7 +887,9 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}, { session
       if (body?.payload?.operation !== 'personal-assistant.file.upload' && Buffer.byteLength(text) > 16_384) throw fail('PERSONAL_ASSISTANT_REQUEST_TOO_LARGE', '请求过大', 413);
       if (!plain(body) || body.type !== 'client-request' || typeof body.rpcId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/u.test(body.rpcId) || body.method !== 'personal-assistant' || !plain(body.payload)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '请求格式错误');
       rpcId = body.rpcId;
-      if (!OPERATIONS.has(body.payload.operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
+      // local-control.* 不进入白名单，但要交给网关做授权校验：未授权必须是 403，
+      // 而不是在 Connection 层就变成 404。已授权但未实现的仍返回 404。
+      if (!OPERATIONS.has(body.payload.operation) && !isLocalControlOperation(body.payload.operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
       return respond({ ok: true, value: await gateway.request(body.payload.operation, body.payload.payload ?? {}, request.signal) });
     } catch (error) {
       return respond({ ok: false, error: { code: error.code || 'PERSONAL_ASSISTANT_GATEWAY_FAILED', message: error.message || '云电脑连接失败', details: { status: error.status || 500, ...(safeCloseCode(error.closeCode) ? { closeCode: error.closeCode } : {}) } } });
