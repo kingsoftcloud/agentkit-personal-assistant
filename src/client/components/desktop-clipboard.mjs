@@ -57,6 +57,20 @@ export function pasteShortcutEvents() {
   ]);
 }
 
+/**
+ * 云端桌面里的复制快捷键也始终是 Linux 的 Control+C。
+ * 宿主是 macOS 时，页面收到的是 ⌘C，但不能把 Super_L 发给 X11；
+ * Super_L+C 不会触发大多数 Linux 应用的复制动作。
+ */
+export function copyShortcutEvents() {
+  return Object.freeze([
+    Object.freeze({ type: 'key', action: 'down', key: 'Control_L' }),
+    Object.freeze({ type: 'key', action: 'down', key: 'c' }),
+    Object.freeze({ type: 'key', action: 'up', key: 'c' }),
+    Object.freeze({ type: 'key', action: 'up', key: 'Control_L' }),
+  ]);
+}
+
 /** 把云端的错误码翻成用户能照做的中文；英文原文只作为兜底。 */
 export function clipboardFriendlyError(error) {
   const code = String(error?.code || '');

@@ -8,6 +8,7 @@ import {
   MAX_CLIPBOARD_BYTES,
   clipboardFriendlyError,
   clipboardTextOf,
+  copyShortcutEvents,
   copyCloudClipboard,
   createClipboardChannel,
   isCopyShortcut,
@@ -25,6 +26,12 @@ test('云端桌面是 Linux：粘贴快捷键固定 Control_L+v，host 是 macOS
   assert.deepEqual(pasteShortcutEvents().map(event => `${event.action}:${event.key}`),
     ['down:Control_L', 'down:v', 'up:v', 'up:Control_L']);
   assert.ok(Object.isFrozen(pasteShortcutEvents()));
+});
+
+test('云端桌面是 Linux：复制快捷键固定 Control_L+c，macOS 的 ⌘C 不转成 Super_L', () => {
+  assert.deepEqual(copyShortcutEvents().map(event => `${event.action}:${event.key}`),
+    ['down:Control_L', 'down:c', 'up:c', 'up:Control_L']);
+  assert.ok(Object.isFrozen(copyShortcutEvents()));
 });
 
 test('只听 ⌘V / Ctrl+V；裸 v、带 Shift、输入法组合期间都不抢', () => {

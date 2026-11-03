@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>本机授权</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif;font-size:13px;color:#17202c;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+ul,ol{margin:0;padding:0;list-style:none}
+summary{cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:'▸';display:inline-block;width:12px;color:#76808e}
+details[open] summary::before{content:'▾'}
+a{color:#2f6bff;text-decoration:none}
+a:hover{color:#1f54cc}
+</style>
+</helmet>
+<div style="position:relative;width:720px;height:920px;box-sizing:border-box;display:flex;flex-direction:column;background:#ffffff;border:1px solid #d8dee8;overflow:hidden">
+
+  <header style="flex:none;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;border-bottom:1px solid #d8dee8">
+    <div style="display:flex;align-items:center;gap:8px;min-width:0">
+      <span style="font-size:14px;font-weight:600;letter-spacing:-0.01em">个人助理</span>
+      <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#536174">
+        <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#067647"></span>
+        2 个 Bot · 1 个运行中
+      </span>
+    </div>
+    <div style="flex:none;display:flex;align-items:center;gap:12px">
+      <button type="button" style="display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 8px;border:1px solid #d8dee8;border-radius:8px;background:#f4f6fa;font-size:11px;color:#17202c;cursor:pointer">
+        <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#067647;box-shadow:0 0 0 3px color-mix(in srgb,#067647 16%,transparent)"></span>
+        本机已授权
+        <svg aria-hidden="true" width="10" height="10" viewBox="0 0 12 12" fill="none" style="color:#76808e"><path d="M2.6 4.4 6 7.8l3.4-3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <button type="button" style="display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 12px;border:0;border-radius:8px;background:#17202c;color:#ffffff;font-size:12px;font-weight:500;cursor:pointer">
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M6 2.2v7.6M2.2 6h7.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        新建 Bot
+      </button>
+    </div>
+  </header>
+
+  <!-- 背景内容（被弹层压暗） -->
+  <main aria-hidden="true" style="flex:1;min-height:0;display:flex;flex-direction:column;gap:16px;padding:16px;opacity:0.32;pointer-events:none">
+    <section style="border:1px solid #d8dee8;border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span style="width:36px;height:36px;border-radius:999px;background:#17202c"></span>
+        <div style="flex:1;display:flex;flex-direction:column;gap:6px">
+          <div style="height:12px;width:96px;border-radius:4px;background:#c8cfda"></div>
+          <div style="height:10px;width:220px;border-radius:4px;background:#e5e9f0"></div>
+        </div>
+        <span style="width:64px;height:32px;border-radius:8px;background:#17202c"></span>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding-top:14px;border-top:1px solid #eef1f6">
+        <div style="height:34px;border-radius:8px;background:#f4f6fa"></div>
+        <div style="height:34px;border-radius:8px;background:#f4f6fa"></div>
+        <div style="height:34px;border-radius:8px;background:#f4f6fa"></div>
+      </div>
+    </section>
+    <div style="height:64px;border:1px solid #e5e9f0;border-radius:12px"></div>
+    <div style="height:180px;border-radius:12px;background:#f4f6fa"></div>
+  </main>
+
+  <!-- 授权弹层 -->
+  <div style="position:absolute;top:58px;right:12px;width:344px;background:#ffffff;border:1px solid #d8dee8;border-radius:12px;box-shadow:0 18px 40px rgba(23,32,44,0.16),0 2px 8px rgba(23,32,44,0.06);padding:14px;display:flex;flex-direction:column;gap:12px">
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <span aria-hidden="true" style="flex:none;width:30px;height:30px;border-radius:8px;display:grid;place-items:center;background:#f4f6fa;border:1px solid #e5e9f0">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><rect x="1.8" y="2.8" width="12.4" height="8.4" rx="1.6" stroke="#536174" stroke-width="1.3"/><path d="M5.6 13.6h4.8" stroke="#536174" stroke-width="1.3" stroke-linecap="round"/></svg>
+      </span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600">本机 Studio</div>
+        <div style="font-size:11px;color:#76808e;line-height:1.7">macOS 15.4 · Studio 1.2.3</div>
+      </div>
+      <span style="flex:none;border-radius:999px;padding:1px 8px;font-size:11px;line-height:1.7;background:color-mix(in srgb,#067647 12%,transparent);color:#067647">已连接</span>
+    </div>
+
+    <div style="border-top:1px solid #eef1f6"></div>
+
+    <div style="display:flex;align-items:flex-start;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600">控制本机</div>
+        <div style="font-size:11px;color:#76808e;line-height:1.7;margin-top:2px">允许助理在本机 Studio 发起新会话、操作本地窗口与文件。</div>
+      </div>
+      <span aria-hidden="true" style="flex:none;margin-top:2px;width:36px;height:20px;border-radius:999px;background:#067647;position:relative">
+        <span style="position:absolute;top:2px;right:2px;width:16px;height:16px;border-radius:999px;background:#ffffff"></span>
+      </span>
+    </div>
+
+    <ul style="display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:10px;background:#f7f9fc">
+      <li style="display:flex;align-items:center;gap:8px;font-size:11px;color:#33415a">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.6 6.2 4.8 8.4 9.4 3.8" stroke="#067647" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        发起新会话
+      </li>
+      <li style="display:flex;align-items:center;gap:8px;font-size:11px;color:#33415a">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.6 6.2 4.8 8.4 9.4 3.8" stroke="#067647" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        操作本地窗口（点击、输入、快捷键）
+      </li>
+      <li style="display:flex;align-items:center;gap:8px;font-size:11px;color:#33415a">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.6 6.2 4.8 8.4 9.4 3.8" stroke="#067647" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        读写本地文件（仅限你选择的目录）
+      </li>
+      <li style="display:flex;align-items:center;gap:8px;font-size:11px;color:#33415a">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><path d="M2.6 6.2 4.8 8.4 9.4 3.8" stroke="#067647" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        高风险操作前先问我
+      </li>
+    </ul>
+
+    <button type="button" style="width:100%;height:34px;border:1px solid color-mix(in srgb,#b42318 32%,transparent);border-radius:8px;background:#ffffff;color:#b42318;font-size:12px;font-weight:500;cursor:pointer">取消授权</button>
+
+    <div style="display:flex;align-items:flex-start;gap:6px">
+      <svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex:none;margin-top:2px;color:#76808e"><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.2v3.4M8 5.2v.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      <div style="flex:1;min-width:0;font-size:11px;color:#76808e;line-height:1.7">取消后，正在运行的本机任务会立即中止；云端会话与记忆不受影响。</div>
+    </div>
+
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:10px;border-top:1px solid #eef1f6">
+      <span style="font-size:11px;color:#76808e">授权于今天 14:20</span>
+      <button type="button" style="border:0;background:transparent;padding:2px;font-size:11px;color:#2f6bff;cursor:pointer">打开本机设置</button>
+    </div>
+
+  </div>
+
+  <footer style="position:absolute;left:0;right:0;bottom:0;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:7px 12px;border-top:1px solid #d8dee8;font-size:12px;color:#536174;background:#ffffff">
+    <details>
+      <summary>诊断</summary>
+      <div style="padding-top:8px;line-height:1.8">
+        <div>本机授权：control（已授权）</div>
+        <div>授权范围：session.create / window.input / file.read-write</div>
+        <div>高风险确认：开启</div>
+      </div>
+    </details>
+    <small style="opacity:0.75">构建 开发模式</small>
+  </footer>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":720,"height":920}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

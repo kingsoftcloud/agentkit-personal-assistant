@@ -1,0 +1,28 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-11-03T09:10:00Z" },
+  "title": "个人助理面板原型",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Onboarding.dc.html": { "x": 0, "y": 0, "w": 720, "h": 920, "title": "01 开通引导" },
+    "Create.dc.html": { "x": 800, "y": 0, "w": 720, "h": 920, "title": "02 首次创建" },
+    "Bots.dc.html": { "x": 1600, "y": 0, "w": 720, "h": 920, "title": "03 Bot 列表" },
+    "BotDetail.dc.html": { "x": 2400, "y": 0, "w": 720, "h": 920, "title": "04 Bot 详情" },
+    "Conversation.dc.html": { "x": 3200, "y": 0, "w": 720, "h": 920, "title": "05 对话" },
+    "Desktop.dc.html": { "x": 4000, "y": 0, "w": 720, "h": 920, "title": "06 云电脑" },
+    "LocalAccess.dc.html": { "x": 4800, "y": 0, "w": 720, "h": 920, "title": "07 本机授权" },
+    "Settings.dc.html": { "x": 5600, "y": 0, "w": 720, "h": 920, "title": "08 设置" }
+  },
+  "order": ["Onboarding.dc.html", "Create.dc.html", "Bots.dc.html", "BotDetail.dc.html", "Conversation.dc.html", "Desktop.dc.html", "LocalAccess.dc.html", "Settings.dc.html"],
+  "notes": {
+    "row-title": {
+      "x": 0,
+      "y": -268,
+      "text": "个人助理 · 优化目标态（八视图）",
+      "kind": "title1",
+      "maxW": 6320
+    }
+  },
+  "designSystems": []
+}

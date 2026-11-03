@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>对话</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif;font-size:13px;color:#17202c;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+ul,ol{margin:0;padding:0;list-style:none}
+summary{cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+a{color:#2f6bff;text-decoration:none}
+a:hover{color:#1f54cc}
+@keyframes pa-pulse{0%,100%{opacity:1}50%{opacity:0.35}}
+</style>
+</helmet>
+<div style="width:720px;height:920px;box-sizing:border-box;display:flex;flex-direction:column;background:#ffffff;border:1px solid #d8dee8;overflow:hidden">
+
+  <header style="flex:none;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;border-bottom:1px solid #d8dee8">
+    <div style="display:flex;align-items:center;gap:8px;min-width:0">
+      <span style="font-size:14px;font-weight:600;letter-spacing:-0.01em">个人助理</span>
+      <span style="font-size:12px;color:#536174;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">云端常驻，关掉窗口也会继续</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;flex:none">
+      <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#536174;white-space:nowrap;margin-right:2px">
+        <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#067647"></span>
+        本机已授权
+      </span>
+      <button type="button" style="height:32px;padding:0 10px;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;color:#17202c;font-size:12px;cursor:pointer">新会话</button>
+      <button type="button" style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;color:#17202c;font-size:12px;cursor:pointer">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" style="color:#536174"><rect x="1.8" y="2.8" width="12.4" height="8.4" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M5.6 13.6h4.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        云电脑
+      </button>
+    </div>
+  </header>
+
+  <div style="flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;gap:14px;padding:16px 20px">
+
+    <div style="display:flex;justify-content:flex-end">
+      <div style="max-width:86%;padding:9px 12px;border-radius:12px;line-height:1.7;background:color-mix(in srgb, #2f6bff 12%, transparent)">帮我把这周的周报整理一下，发到云电脑的 ~/reports 目录</div>
+    </div>
+
+    <div style="line-height:1.7">好，我先看一下工作区里有哪些记录。</div>
+
+    <div style="max-width:86%;display:flex;gap:10px;padding:10px 12px;border:1px solid #d8dee8;border-radius:10px;background:#f4f6fa">
+      <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" style="flex:none;margin-top:2px;color:#536174"><rect x="1.8" y="2.8" width="12.4" height="8.4" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M4.6 6.2l1.8 1.6 1.8-1.6M8.2 7.8v2.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <span style="font-size:12px;font-weight:600">执行云端命令</span>
+          <span style="font-size:11px;color:#067647">已完成</span>
+        </div>
+        <code style="display:block;margin-top:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#536174;white-space:pre-wrap;overflow-wrap:anywhere">ls ~/workspace/notes · 6 条记录</code>
+      </div>
+    </div>
+
+    <div style="line-height:1.7">
+      找到 6 条记录，合并成一份周报，包含 3 个部分：
+      <ul style="margin:6px 0 0;display:flex;flex-direction:column;gap:4px">
+        <li style="display:flex;gap:8px"><span aria-hidden="true" style="flex:none;width:4px;height:4px;border-radius:999px;background:#76808e;margin-top:9px"></span><span>本周完成的 5 项任务</span></li>
+        <li style="display:flex;gap:8px"><span aria-hidden="true" style="flex:none;width:4px;height:4px;border-radius:999px;background:#76808e;margin-top:9px"></span><span>待跟进 2 项，含 1 个跨团队依赖</span></li>
+        <li style="display:flex;gap:8px"><span aria-hidden="true" style="flex:none;width:4px;height:4px;border-radius:999px;background:#76808e;margin-top:9px"></span><span>下周计划的 3 个里程碑</span></li>
+      </ul>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px">
+        <svg aria-hidden="true" width="13" height="13" viewBox="0 0 16 16" fill="none" style="color:#2f6bff"><path d="M8 2.4v8.2M4.6 7.4 8 10.8l3.4-3.4M2.8 13.2h10.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <a href="#">week-45.md</a>
+        <span style="color:#76808e">· 已写入 ~/reports</span>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:flex-end">
+      <div style="max-width:86%;padding:9px 12px;border-radius:12px;line-height:1.7;background:color-mix(in srgb, #2f6bff 12%, transparent)">顺便把上周的也按同样格式补一份</div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #d8dee8;border-radius:10px;background:#ffffff;max-width:86%">
+      <span aria-hidden="true" style="flex:none;width:8px;height:8px;border-radius:999px;background:#2f6bff;animation:pa-pulse 1.2s ease-in-out infinite"></span>
+      <span style="flex:1;min-width:0;font-size:12px;color:#536174">正在操作云电脑 · 正在写入 week-44.md</span>
+      <button type="button" style="flex:none;display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border:1px solid #d8dee8;border-radius:999px;background:#ffffff;color:#17202c;font-size:12px;cursor:pointer">
+        <svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="2.2" y="2.2" width="5.6" height="5.6" rx="1" stroke="currentColor" stroke-width="1.4"/></svg>
+        停止
+      </button>
+    </div>
+
+  </div>
+
+  <div style="flex:none;padding:8px 16px 14px">
+    <div style="display:flex;align-items:center;gap:6px;padding:0 2px 6px;font-size:11px;color:#946200">
+      <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#946200"></span>
+      已排队 1 条，本轮结束后自动发送
+      <button type="button" style="border:0;background:transparent;padding:0 2px;font-size:11px;color:#536174;text-decoration:underline;cursor:pointer">撤回</button>
+    </div>
+
+    <div style="max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:6px;border:1px solid #d8dee8;border-radius:16px;padding:10px 10px 8px 12px;background:#ffffff">
+
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid #d8dee8;border-radius:10px;background:#f4f6fa;align-self:flex-start;font-size:11px;color:#536174">
+        <svg aria-hidden="true" width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex:none"><path d="M9.4 1.8H4.6c-.9 0-1.6.7-1.6 1.6v9.2c0 .9.7 1.6 1.6 1.6h6.8c.9 0 1.6-.7 1.6-1.6V5.4l-3.6-3.6Z" stroke="#536174" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.2 2v3.4h3.3" stroke="#536174" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        会议记录.md
+        <span style="color:#76808e">18 KB</span>
+        <button type="button" aria-label="移除附件" style="border:0;background:transparent;padding:0;color:#76808e;cursor:pointer;line-height:1">×</button>
+      </div>
+
+      <textarea aria-label="给个人助理发消息" rows="1" placeholder="本轮进行中：现在发送会排队，本轮结束后自动发出" style="width:100%;box-sizing:border-box;min-height:24px;border:0;outline:0;background:transparent;color:#17202c;font:inherit;font-size:13px;line-height:1.7;resize:none;padding:2px 2px 0"></textarea>
+
+      <div style="display:flex;align-items:center;gap:8px">
+        <button type="button" aria-label="添加附件" style="flex:none;width:32px;height:32px;display:grid;place-items:center;border:1px solid #d8dee8;border-radius:999px;background:transparent;color:#536174;cursor:pointer;padding:0">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3.4v9.2M3.4 8h9.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+        <span style="flex:none;border-radius:999px;padding:1px 8px;font-size:11px;line-height:18px;background:color-mix(in srgb, #946200 14%, transparent);color:#946200">排队中 1</span>
+        <span style="flex:1"></span>
+        <button type="button" aria-label="发送消息（排队中 1 条）" style="flex:none;width:32px;height:32px;display:grid;place-items:center;border:1px dashed #17202c;border-radius:999px;background:transparent;color:#17202c;cursor:pointer;padding:0">
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 12.6V3.4M4.2 7.2 8 3.4l3.8 3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":720,"height":920}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

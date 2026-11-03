@@ -186,6 +186,92 @@ const styles = {
 
 const text = value => (typeof value === 'string' ? value : '');
 
+const SESSION_POINTER_PREFIX = 'agentkit.personal-assistant.current-session.v1';
+const sessionPointerKey = scope => {
+  const agentId = text(scope?.agentId), botId = text(scope?.botId);
+  return agentId && botId ? `${SESSION_POINTER_PREFIX}:${encodeURIComponent(agentId)}:${encodeURIComponent(botId)}` : '';
+};
+const readSessionPointer = scope => {
+  const key = sessionPointerKey(scope);
+  if (!key) return '';
+  try { return text(globalThis.localStorage?.getItem(key)); } catch { return ''; }
+};
+const writeSessionPointer = (scope, sessionId) => {
+  const key = sessionPointerKey(scope), value = text(sessionId);
+  if (!key || !value) return;
+  try { globalThis.localStorage?.setItem(key, value); } catch { /* 宿主可能禁用存储，不影响云端会话 */ }
+};
+const clearSessionPointer = scope => {
+  const key = sessionPointerKey(scope);
+  if (!key) return;
+  try { globalThis.localStorage?.removeItem(key); } catch { /* 宿主可能禁用存储 */ }
+};
+const sessionFailure = (code, message, status = 503) => Object.assign(new Error(message), { code, status });
+
+/**
+ * 本地快照缓存（stale-while-revalidate）：面板重新打开时先画上次看到的历史，再向云端
+ * 校准。只缓存渲染需要的最小结构，并容忍存储不可用：配额满、隐私模式、宿主禁用
+ * localStorage 都静默退化成「没有缓存」，绝不能因此打断真正的会话。
+ */
+const SESSION_SNAPSHOT_VERSION = 1;
+const SESSION_SNAPSHOT_LIMIT = 50;
+const SESSION_SNAPSHOT_TEXT_LIMIT = 4000;
+const SESSION_SNAPSHOT_BYTES_LIMIT = 256 * 1024;
+const SESSION_SNAPSHOT_WRITE_INTERVAL_MS = 1500;
+// 与 sessionPointerKey 共用 PREFIX 与 scope 编码，避免两套 key 规则各自漂移。
+const sessionSnapshotKey = (scope, sessionId) => {
+  const base = sessionPointerKey(scope), id = text(sessionId);
+  return base && id ? `${base}:snapshot:${encodeURIComponent(id)}` : '';
+};
+const byteLength = value => (typeof TextEncoder === 'function' ? new TextEncoder().encode(value).length : value.length);
+const removeSessionSnapshot = (scope, sessionId) => {
+  const key = sessionSnapshotKey(scope, sessionId);
+  if (!key) return;
+  try { globalThis.localStorage?.removeItem(key); } catch { /* 宿主可能禁用存储 */ }
+};
+const readSessionSnapshot = (scope, sessionId) => {
+  const key = sessionSnapshotKey(scope, sessionId);
+  if (!key) return null;
+  let raw;
+  try { raw = globalThis.localStorage?.getItem(key); } catch { return null; }
+  if (!raw) return null;
+  try {
+    // 体积/结构任何一项不合法都整体丢弃，不做部分修复，避免坏数据反复渲染。
+    if (byteLength(raw) >= SESSION_SNAPSHOT_BYTES_LIMIT) throw new Error('oversized snapshot');
+    const value = JSON.parse(raw);
+    if (value?.version !== SESSION_SNAPSHOT_VERSION || value.sessionId !== text(sessionId)
+      || !Array.isArray(value.messages) || value.messages.length === 0 || value.messages.length > SESSION_SNAPSHOT_LIMIT) throw new Error('invalid snapshot');
+    const messages = value.messages.map((row, index) => ({
+      id: text(row?.id) || `history-${index}`,
+      role: ['user', 'assistant', 'step'].includes(text(row?.role)) ? text(row?.role) : 'assistant',
+      text: text(row?.text),
+      done: true,
+    }));
+    if (messages.every(row => !row.text)) throw new Error('empty snapshot');
+    return { messages };
+  } catch {
+    removeSessionSnapshot(scope, sessionId);
+    return null;
+  }
+};
+const writeSessionSnapshot = (scope, sessionId, messages) => {
+  const key = sessionSnapshotKey(scope, sessionId);
+  if (!key) return;
+  const rows = (Array.isArray(messages) ? messages : [])
+    .filter(row => row && text(row.text))
+    .slice(-SESSION_SNAPSHOT_LIMIT)
+    .map(row => ({ id: text(row.id), role: text(row.role) || 'assistant', text: text(row.text).slice(0, SESSION_SNAPSHOT_TEXT_LIMIT) }));
+  // 空会话不写缓存：下次打开照样要校准，写一份空快照只会占存储。
+  if (rows.length === 0) return;
+  try {
+    const raw = JSON.stringify({ version: SESSION_SNAPSHOT_VERSION, sessionId: String(sessionId), savedAt: Date.now(), messages: rows });
+    if (byteLength(raw) >= SESSION_SNAPSHOT_BYTES_LIMIT) { removeSessionSnapshot(scope, sessionId); return; }
+    globalThis.localStorage?.setItem(key, raw);
+  } catch { /* 配额满/隐私模式：静默降级为无缓存 */ }
+};
+const sameSnapshotMessages = (before, after) => Array.isArray(before) && before.length === after.length
+  && after.every((row, index) => before[index]?.id === row.id && before[index]?.role === row.role && before[index]?.text === row.text);
+
 /** 与 DSH 原生对话框一致的发送箭头。 */
 const sendGlyph = h => h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
   h('path', { d: 'M12 19V5M5 12l7-7 7 7' }));
@@ -198,9 +284,13 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
   const [phase, setPhase] = useState('loading');
+  // 本地快照只是「先画出来」；calibrated 表示云端 snapshot 已经回来、cursor 可信。
+  // 校准前不启动 session.events 轮询，避免拿缓存里的旧 cursor 去撞 SESSION_CURSOR_STALE。
+  const [calibrated, setCalibrated] = useState(false);
   const [error, setError] = useState('');
   const [sessions, setSessions] = useState([]);
   const [sessionId, setSessionId] = useState('');
+  const [runtimeInstanceId, setRuntimeInstanceId] = useState('');
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [attachments, setAttachments] = useState([]);
@@ -227,10 +317,28 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   const followLatestRef = useRef(true);
   const sessionRef = useRef('');
   sessionRef.current = sessionId;
+  const messagesRef = useRef([]);
+  messagesRef.current = messages;
+  const snapshotWriteAtRef = useRef(0);
+  const pollTraceTicksRef = useRef(0);
 
   const call = useCallback(async (operation, payload = {}) => {
     if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
-    return request(operation, payload);
+    const startedAt = Date.now();
+    try {
+      return await request(operation, payload);
+    } finally {
+      // 打点：与 Host 侧同一条 event，只输出操作名与耗时，参数与凭据不落日志。
+      // session.events 轮询只留慢请求与 1/20 采样，避免刷屏（口径与 Host 侧一致）。
+      try {
+        const totalMs = Date.now() - startedAt;
+        const poll = operation === 'personal-assistant.session.events';
+        if (poll) pollTraceTicksRef.current += 1;
+        if (!poll || totalMs >= 300 || pollTraceTicksRef.current % 20 === 0) {
+          console.info(JSON.stringify({ event: 'personal-assistant.rpc', operation, source: 'client', totalMs }));
+        }
+      } catch { /* 打点绝不能影响请求本身 */ }
+    }
   }, [request]);
 
   const mergeEvents = useCallback(events => {
@@ -284,28 +392,70 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     setSessionId(id);
     setPhase('loading');
     setError('');
+    setCalibrated(false);
     cursorRef.current = 0;
     followLatestRef.current = true;
     setMessages([]);
+    // 先回显本地快照（stale-while-revalidate）：网络快时几乎无感，慢时用户立刻看到历史。
+    // 只按 scope+sessionId 命中；应用新快照时仍走 aliveRef/sessionRef/generation 三重守卫。
+    const cached = readSessionSnapshot(scope, id);
+    if (cached) {
+      setMessages(cached.messages);
+      setPhase('ready');
+    }
     try {
       const snapshot = await call('personal-assistant.session.snapshot', { sessionId: id });
       if (!aliveRef.current || sessionRef.current !== id || generation !== generationRef.current) return;
+      setRuntimeInstanceId(text(snapshot?.runtimeInstanceId));
       cursorRef.current = Number(snapshot?.cursor) || 0;
       const history = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
-      setMessages(history.map((message, index) => ({
+      const calibratedMessages = history.map((message, index) => ({
         id: text(message?.id) || `history-${index}`,
         role: text(message?.role) || 'assistant',
         text: text(message?.text),
         done: true,
-      })));
+      }));
+      // 与回显内容一致就不重建数组，避免历史区整块替换导致的闪烁。
+      if (!sameSnapshotMessages(cached?.messages, calibratedMessages)) setMessages(calibratedMessages);
       setAwaiting(snapshot.turns?.some(turn => ['queued', 'running'].includes(turn.status)) || false);
+      writeSessionPointer(scope, id);
+      if (calibratedMessages.length > 0) writeSessionSnapshot(scope, id, calibratedMessages);
+      else removeSessionSnapshot(scope, id);
+      snapshotWriteAtRef.current = Date.now();
       setPhase('ready');
+      setCalibrated(true);
     } catch (failure) {
       if (!aliveRef.current || generation !== generationRef.current) return;
+      if (['SESSION_NOT_FOUND', 'DSH_SESSION_NOT_FOUND'].includes(String(failure?.code || ''))) {
+        clearSessionPointer(scope);
+        removeSessionSnapshot(scope, id);
+        setMessages([]);
+      }
       setPhase('error');
       setError(failure?.message || '无法读取会话内容');
     }
-  }, [call]);
+  }, [call, scope]);
+
+  const createSession = useCallback(async () => {
+    if (!aliveRef.current) return;
+    if (sendingRef.current || awaitingRef.current || queueRef.current.length > 0) {
+      setQueueNotice('当前会话还有进行中的任务，请等待完成后再新建会话');
+      return;
+    }
+    setPhase('loading');
+    setError('');
+    try {
+      const created = await call('personal-assistant.session.create', {});
+      const createdId = text(created?.sessionId);
+      if (!createdId) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_CREATE_INVALID', '云端没有返回有效的新会话标识');
+      setSessions(previous => [...previous.filter(row => text(row?.sessionId) !== createdId), { sessionId: createdId, title: text(created?.title) || '新会话' }]);
+      await openSession(createdId);
+    } catch (failure) {
+      if (!aliveRef.current) return;
+      setPhase('error');
+      setError(failure?.message || '新会话创建失败，请重试');
+    }
+  }, [call, openSession]);
 
   const bootstrap = useCallback(async () => {
     setPhase('loading');
@@ -314,20 +464,29 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     try {
       const listed = await call('personal-assistant.sessions.list');
       if (!aliveRef.current) return;
-      const available = Array.isArray(listed?.sessions) ? listed.sessions : [];
+      if (!Array.isArray(listed?.sessions)) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_LIST_INVALID', '云端会话目录格式无效，请重试');
+      if (listed.sessions.some(row => !row || typeof row !== 'object' || !text(row.sessionId))) {
+        throw sessionFailure('PERSONAL_ASSISTANT_SESSION_LIST_INVALID', '云端会话目录包含无效会话，请重试');
+      }
+      const available = listed.sessions;
+      setRuntimeInstanceId(text(listed.runtimeInstanceId));
       setSessions(available);
-      if (available.length > 0) { await openSession(text(available[0].sessionId)); return; }
-      const created = await call('personal-assistant.session.create', {});
-      if (!aliveRef.current) return;
-      const createdId = text(created?.sessionId);
-      setSessions(createdId ? [{ sessionId: createdId, title: text(created?.title) || '新会话' }] : []);
-      await openSession(createdId);
+      if (available.length > 0) {
+        const remembered = readSessionPointer(scope);
+        const selected = available.find(row => text(row.sessionId) === remembered) || available[0];
+        await openSession(text(selected.sessionId));
+        return;
+      }
+      // 有过成功打开的会话却突然拿到空目录，通常是 PVC/状态目录/Bot 范围出了问题。
+      // 不再静默创建一个空会话；用户可以通过头部的“新会话”显式确认创建。
+      if (readSessionPointer(scope)) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_STATE_MISSING', '云端历史会话暂时不可见，请检查实例状态后重试');
+      await createSession();
     } catch (failure) {
       if (!aliveRef.current) return;
       setPhase('error');
       setError(failure?.message || '会话通道暂时不可用');
     }
-  }, [call, openSession]);
+  }, [call, createSession, openSession, scope]);
 
   useEffect(() => {
     aliveRef.current = true;
@@ -339,8 +498,9 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   }, [bootstrap]);
 
   // 事件增量：宿主侧按 cursor 返回增量，空增量也要前进 cursor。
+  // 本地快照回显后 cursor 还不可信，必须等 snapshot 校准完（calibrated）再开轮询。
   useEffect(() => {
-    if (phase !== 'ready' || !sessionId) return undefined;
+    if (phase !== 'ready' || !sessionId || !calibrated) return undefined;
     let cancelled = false;
     let timer = null;
     const tick = async () => {
@@ -371,7 +531,16 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     };
     timer = setTimeout(tick, 200);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [phase, sessionId, call, mergeEvents, openSession]);
+  }, [phase, sessionId, call, mergeEvents, openSession, calibrated]);
+
+  // 增量到达后节流落一次本地快照；写失败静默降级（见 writeSessionSnapshot）。
+  useEffect(() => {
+    if (!calibrated || phase !== 'ready' || !sessionId) return;
+    const now = Date.now();
+    if (now - snapshotWriteAtRef.current < SESSION_SNAPSHOT_WRITE_INTERVAL_MS) return;
+    snapshotWriteAtRef.current = now;
+    writeSessionSnapshot(scope, sessionId, messagesRef.current);
+  }, [messages, calibrated, phase, sessionId, scope]);
 
   useEffect(() => {
     // 只移动自己拥有的消息区，不能让 scrollIntoView 连带滚动宿主和输入框。
@@ -520,9 +689,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     h('h1', { style: styles.title }, '个人助理'),
     h('span', { style: styles.status }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
     h('span', { style: styles.spacer }),
+    h('button', { type: 'button', 'data-window-drag-recall': '', disabled: phase === 'loading' || sending || awaiting || queue.length > 0, onClick: () => void createSession(), 'aria-label': '新建会话', title: queue.length > 0 ? '请等待排队消息发送后再新建会话' : '新建云端会话', style: styles.ghost }, '新会话'),
     onOpenComputer ? h('button', { type: 'button', 'data-window-drag-recall': '', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
 
-  return h('section', { 'data-personal-assistant-conversation': 'true', style: styles.page, onClick: async event => {
+  return h('section', { 'data-personal-assistant-conversation': 'true', 'data-agent-id': text(scope?.agentId) || undefined, 'data-bot-id': text(scope?.botId) || undefined, 'data-session-id': sessionId || undefined, 'data-runtime-instance-id': runtimeInstanceId || undefined, style: styles.page, onClick: async event => {
     const link = event.target.closest?.('a[href^="cloud-file:"]');
     if (!link) return;
     event.preventDefault();

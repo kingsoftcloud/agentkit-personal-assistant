@@ -35,7 +35,8 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
     selectedBot: () => selectedBotId,
     session: input => request('personal-assistant.session.create', { ...input, botId: input?.botId ?? selectedBotId }),
     listSessions: botId => request('personal-assistant.sessions.list', { botId: botId ?? selectedBotId }),
-    createSession: input => request('personal-assistant.sessions.create', { ...input, botId: input?.botId ?? selectedBotId }),
+    // 网关公开的是单数 session.create；旧的 sessions.create 从未进入云端会话通道。
+    createSession: input => request('personal-assistant.session.create', { ...input, botId: input?.botId ?? selectedBotId }),
     listMessages: sessionId => request('personal-assistant.sessions.messages.list', { sessionId, botId: selectedBotId }),
     appendMessage: (sessionId, input) => request('personal-assistant.sessions.messages.append', { sessionId, ...input, botId: input?.botId ?? selectedBotId }),
     listTurns: sessionId => request('personal-assistant.sessions.turns.list', { sessionId, botId: selectedBotId }),
@@ -69,7 +70,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -268,19 +269,13 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     for (const event of events) sent = input(event) || sent;
     return sent;
   };
-  // ⌘C：先把按键原样交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
-  // 之前只读剪贴板不转发按键，用户按 ⌘C 等于没复制，还会在输入框里反复触发按键。
+  // ⌘C：先把复制按键交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
+  // 云端桌面始终是 Linux，不能把 macOS 的 Meta 映射为 Super_L，否则 Linux 应用不会执行复制。
   const copyCloudClipboardToLocal = async () => {
-    const modifier = /Mac|iPhone|iPad/u.test(String(globalThis.navigator?.platform || '')) ? 'Meta' : 'Control';
     if (!state.current.pressed.has('_copyShortcut')) {
       state.current.pressed.add('_copyShortcut');
       try {
-        sendDesktopKeys([
-          { type: 'key', action: 'down', key: modifier },
-          { type: 'key', action: 'down', key: 'c' },
-          { type: 'key', action: 'up', key: 'c' },
-          { type: 'key', action: 'up', key: modifier },
-        ]);
+        sendDesktopKeys(copyShortcutEvents());
         await new Promise(resolve => setTimeout(resolve, 150));
       } finally { state.current.pressed.delete('_copyShortcut'); }
     }
@@ -426,7 +421,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       socket.onclose = event => {
         if (!valid()) return;
         if (current.suspended && event.code !== 1000) { clearTimeout(current.firstFrame); current.firstFrame = null; current.socket = null; setPhase('dormant'); return; }
-        current.session = null; clearTimeout(current.firstFrame); current.firstFrame = null;
+        current.session = null; clipboardRef.current?.rejectAll(); clearTimeout(current.firstFrame); current.firstFrame = null;
         if (!current.reconnectAllowed || event.code === 1000) { ended(); return; }
         if (document.hidden) { setPhase('hidden'); return; }
         const count = ++current.retries; setAttempt(count);
