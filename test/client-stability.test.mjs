@@ -653,3 +653,30 @@ test('构建标记按本机时区显示：UTC 构建串不能让用户看到 8 �
   assert.equal(shown, `${String(local.getHours()).padStart(2, '0')}:${String(local.getMinutes()).padStart(2, '0')}`);
   assert.equal(localBuildLabel('开发模式'), '开发模式', '构建串不可解析时原样回退，不能显示 Invalid Date');
 });
+
+test('宿主的 ⌘ 键本身绝不转发：Linux 里它等于 Super_L，按住会让之后所有 Ctrl 组合失效', async t => {
+  const fx = await drivePanelToReady(await mountActivePanel(t));
+  const keyEvents = () => fx.socket.sent
+    .map(item => { try { return JSON.parse(String(item)); } catch { return null; } })
+    .filter(item => item?.type === 'input' && item.event?.type === 'key');
+  fx.input.props.onKeyDown({ key: 'Meta', type: 'keydown', metaKey: true, preventDefault() {} });
+  fx.input.props.onKeyUp({ key: 'Meta', type: 'keyup', metaKey: true, preventDefault() {} });
+  await fx.mount();
+  assert.deepEqual(keyEvents(), [], '⌘/Win 键不能作为 Super_L 发进云桌面');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});
+
+test('⌘ + 字母翻译成一次原子 ctrl+X（Linux 只认 Ctrl），不把 Super 和字母分两条发', async t => {
+  const fx = await drivePanelToReady(await mountActivePanel(t));
+  const keyEvents = () => fx.socket.sent
+    .map(item => { try { return JSON.parse(String(item)); } catch { return null; } })
+    .filter(item => item?.type === 'input' && item.event?.type === 'key');
+  const event = { key: 'a', type: 'keydown', metaKey: true, preventDefault() { this.defaultPrevented = true; } };
+  fx.input.props.onKeyDown(event);
+  await fx.mount();
+  assert.deepEqual(keyEvents().map(item => `${item.event.action}:${item.event.key}`), ['tap:ctrl+a']);
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});

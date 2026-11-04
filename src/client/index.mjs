@@ -160,7 +160,8 @@ const onboardingStyle = {
   diag: { alignSelf: 'center', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' },
 };
 
-const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
+// 故意不映射 Meta：⌘ 在 Linux 里没有对应键，映射成 Super_L 只会在云端卡住它。
+const keyNames = { Control: 'Control_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
 
 export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page', nativeFullscreen = false, connectionDot = null, onBack = null } = {}) {
   const R = clientReact || globalThis.React;
@@ -619,12 +620,22 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   };
   const key = event => {
     if (state.current.composition || event.isComposing || event.nativeEvent?.isComposing || event.key === 'Process' || event.key === 'Unidentified') return;
+    // 宿主的 ⌘/Win 键本身绝不能转发：Linux 里它等于 Super_L，按下去就卡住，
+    // 之后所有 Ctrl 组合都会变成 Super+Ctrl+X 而被应用忽略——网页正文复制失效就是这么来的。
+    if (event.key === 'Meta' || event.key === 'OS') return;
     // 画布上的 ⌘V/Ctrl+V 是"把本地剪贴板贴进云电脑"，不能把裸按键转给 Linux 桌面（它要的是 Ctrl+V）。
     if (isPasteShortcut(event)) { event.preventDefault(); void pasteLocalClipboardToCloud(); return; }
     if (isCopyShortcut(event)) {
       event.preventDefault();
       // 长按/重复的 keydown 不再触发第二次复制。
       if (event.type === 'keydown' && !event.repeat) void copyCloudClipboardToLocal();
+      return;
+    }
+    // ⌘ + 字符：Linux 应用认的是 Ctrl，翻译成一次原子按下（'ctrl+a'），
+    // 而不是把 Super 和字母分两条消息发过去——两条消息云端会并发处理，顺序不保证。
+    if (event.metaKey && !event.ctrlKey && !event.altKey && event.key.length === 1) {
+      event.preventDefault();
+      if (event.type === 'keydown' && !event.repeat) input({ type: 'key', action: 'tap', key: `ctrl+${event.key.toLowerCase()}` });
       return;
     }
     const modified = event.ctrlKey || event.metaKey || event.altKey;
