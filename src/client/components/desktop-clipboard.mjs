@@ -25,6 +25,92 @@ const byteLength = value => {
 export const clipboardTextOf = value => (typeof value === 'string' ? value : String(value?.text ?? ''));
 
 /**
+ * 乱码自愈：把「UTF-8 字节被当成单字节编码解码」的文本还原回原文。
+ *
+ * 线上两条链路的指纹非常明确：
+ *   ‰Ω†Â•Ω  ←  「你好」（E4 BD A0 E5 A5 BD 被按 MacRoman 解码）
+ *   ？？？？  ←  中文逐字符变成问号（有损编码，不可逆，只能拦不能修）
+ * 前者可逆：按同一张单字节表把每个字符反查成字节，再按 UTF-8 解码即可拿回原文。
+ * 只有「文本里没有中日韩字符 + 出现乱码指纹区字符 + 反查结果是合法 UTF-8」时才动手，
+ * 正常的中文、英文、法文内容一个字节都不会被改。
+ */
+const SINGLE_BYTE_TABLES = (() => {
+  // 真正的 latin-1 表必须手搓：TextDecoder('iso-8859-1') 按规范被别名到 windows-1252，
+  // 而 0x80-0x9F 的 C1 控制字符在两者里解释完全不同，latin1 转坏的中文只有这张表能反查。
+  const latin1 = new Map();
+  for (let byte = 0x80; byte < 0x100; byte += 1) latin1.set(String.fromCharCode(byte), byte);
+  const tables = [Object.freeze({ label: 'latin1', map: latin1 })];
+  for (const label of ['macintosh', 'windows-1252']) {
+    try {
+      const decoder = new TextDecoder(label);
+      const map = new Map();
+      for (let byte = 0x80; byte < 0x100; byte += 1) {
+        const char = decoder.decode(Uint8Array.of(byte));
+        if (char && !map.has(char)) map.set(char, byte);
+      }
+      tables.push(Object.freeze({ label, map }));
+    } catch { /* 运行时没有这张表就跳过，不影响另一张 */ }
+  }
+  return Object.freeze(tables);
+})();
+const CJK_PATTERN = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/u;
+const MOJIBAKE_SIGNATURE = /[\u00a0-\u00ff\u0152-\u0178\u2000-\u206f]/u;
+const hasCjk = text => CJK_PATTERN.test(text);
+const looksLikeMojibake = text => !hasCjk(text) && MOJIBAKE_SIGNATURE.test(text);
+function encodeSingleByte(text, table) {
+  const bytes = new Uint8Array(text.length);
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const code = char.charCodeAt(0);
+    // ASCII 在所有单字节编码里都是恒等的，表里只收了 0x80-0xFF。
+    const byte = code < 0x80 ? code : table.map.get(char);
+    if (byte === undefined) return null;
+    bytes[index] = byte;
+  }
+  return bytes;
+}
+/**
+ * 候选文本的"像正文"程度。同一串乱码常常能被多张单字节表解释（MacRoman 的 0xCC
+ * 和 CP1252 的 0xC3 都是「Ã」），必须打分挑最像正文的那个，不能先到先得。
+ */
+function textPlausibility(text) {
+  let score = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code < 0x80) score += 1;
+    else if (code >= 0x0300 && code <= 0x036f) score -= 6; // 组合变音符：选错表的典型症状
+    else if (CJK_PATTERN.test(char)) score += 4;
+    else score -= 1;
+  }
+  return score;
+}
+/** 还原被单字节编码转坏的中文；认不出来就原样返回，绝不猜。 */
+export function repairClipboardText(value) {
+  let text = String(value ?? '');
+  // 最多两轮：双重转坏（utf-8 → 单字节 → 再编码一次）需要连着还原两次。
+  // 最多三轮：双重转坏（utf-8 → 单字节 → 再编码一次）要连着还原两次才能见到原文。
+  for (let round = 0; round < 3; round += 1) {
+    if (!looksLikeMojibake(text)) break;
+    let best = null;
+    let bestScore = textPlausibility(text);
+    for (const table of SINGLE_BYTE_TABLES) {
+      const bytes = encodeSingleByte(text, table);
+      if (!bytes) continue;
+      try {
+        const candidate = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        if (!candidate || candidate === text) continue;
+        const score = textPlausibility(candidate);
+        // 只接受「比原文更像正文」的还原：fatal 解码已经挡掉了绝大多数误判。
+        if (score > bestScore) { best = candidate; bestScore = score; }
+      } catch { /* 这条编码解释不通，换下一条 */ }
+    }
+    if (best === null) break;
+    text = best;
+  }
+  return text;
+}
+
+/**
  * 回声窗口：粘贴把文本写进云电脑剪贴板后，紧接着的「复制」如果读到同一段文本，
  * 说明应用并没有真正复制，只是把刚写进去的内容原样读回（X11 selection 变了而已）。
  * 这时不能再写回本机，否则两端来回覆盖，用户原本的本机剪贴板会被静默替换。
@@ -247,6 +333,8 @@ export async function pasteToCloud({ readLocal, writeCloud, readCloud, sendKeys,
   let text = '';
   try { text = await read(); }
   catch (error) { notify(clipboardFriendlyError(error) || '浏览器不允许读取剪贴板，请按 ⌘V / Ctrl+V 再试'); return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' }; }
+  // 本机剪贴板里的中文如果已经被转成乱码，先还原再写进云端，避免把坏内容运过去。
+  text = repairClipboardText(text);
   if (!text) { notify('本地剪贴板是空的，没有可粘贴的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
   if (byteLength(text) > MAX_CLIPBOARD_BYTES) { notify('剪贴板内容超过 64 KiB，云电脑剪贴板放不下'); return { ok: false, code: 'CLIPBOARD_TOO_LARGE' }; }
   try { await writeCloud(text); }
@@ -287,8 +375,9 @@ export async function copyCloudClipboard({ readCloud, writeLocal, notify = () =>
     try { value = await readCloud(); failure = null; }
     // 保留**首个**失败：轮询到后面可能换成「控制权变更」等次生错误，那不是用户该看到的原因。
     catch (error) { if (!failure) failure = error; continue; }
-    text = clipboardTextOf(value);
-    if (hasPrevious && text === previousText) continue;
+    // 乱码自愈：云端字节可能在某一段被按单字节编码解码过，还原后再写回本机。
+    text = repairClipboardText(clipboardTextOf(value));
+    if (hasPrevious && text === repairClipboardText(previousText)) continue;
     break;
   }
   if (failure) {

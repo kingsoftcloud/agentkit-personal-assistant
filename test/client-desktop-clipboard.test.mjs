@@ -9,6 +9,7 @@ import {
   clipboardFriendlyError,
   clipboardTextOf,
   copyShortcutEvents,
+  repairClipboardText,
   copyCloudClipboard,
   createClipboardChannel,
   isCopyShortcut,
@@ -246,4 +247,40 @@ test('⌘C / Ctrl+C 只处理组合键，裸 c、Shift、输入法组合都不�
   assert.equal(isCopyShortcut({ key: 'c', ctrlKey: true, shiftKey: true }), false);
   assert.equal(isCopyShortcut({ key: 'c', ctrlKey: true, isComposing: true }), false);
   assert.equal(isCopyShortcut({ key: 'v', ctrlKey: true }), false);
+});
+
+test('乱码自愈：把 MacRoman 型乱码还原成中文（用户实测样本 ‰Ω†Â•Ω）', () => {
+  assert.equal(repairClipboardText('‰Ω†Â•Ω'), '你好');
+});
+
+test('乱码自愈：单级与双级 latin1 乱码都能还原，正常文本一个字都不动', () => {
+  const once = Buffer.from('中文测试', 'utf8').toString('latin1');
+  const twice = Buffer.from(once, 'utf8').toString('latin1');
+  assert.equal(repairClipboardText(once), '中文测试');
+  assert.equal(repairClipboardText(twice), '中文测试');
+  for (const clean of ['你好', '中文测试文字 ABC 123', 'hello world', 'Привет', 'café']) {
+    assert.equal(repairClipboardText(clean), clean, `正常文本被改动了: ${clean}`);
+  }
+});
+
+test('复制方向：云端返回乱码时先还原再写本机剪贴板', async () => {
+  const written = [];
+  const result = await copyCloudClipboard({
+    readCloud: async () => ({ text: '‰Ω†Â•Ω' }),
+    writeLocal: async text => { written.push(text); },
+    notify: () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(written, ['你好']);
+});
+
+test('粘贴方向：本机剪贴板是乱码时还原后再写进云端', async () => {
+  const written = [];
+  const result = await pasteToCloud({
+    readLocal: async () => '‰Ω†Â•Ω',
+    writeCloud: async text => { written.push(text); },
+    notify: () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(written, ['你好']);
 });
