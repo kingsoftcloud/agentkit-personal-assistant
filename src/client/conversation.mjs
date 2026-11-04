@@ -72,8 +72,24 @@ const TURN_ERROR_TEXT = {
   DSH_TURN_NOT_ACCEPTED: '云端没有接受这一轮对话，请重新发送',
   DSH_SESSION_NOT_FOUND: '会话不存在或已被删除',
 };
-const turnErrorText = error => {
-  const value = String(error || '').trim();
+/** 云端 turn.error 既可能是字符串，也可能是 { code, message } 对象。
+ * 直接 String(object) 会渲染成「[object Object]」——用户就完全看不到失败原因了。 */
+const turnErrorValue = error => {
+  if (typeof error === 'string') return error.trim();
+  if (error && typeof error === 'object') {
+    const candidates = [error.code, error.message, error.error, error.reason];
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+      if (candidate && typeof candidate === 'object' && typeof candidate.message === 'string' && candidate.message.trim()) return candidate.message.trim();
+    }
+    return '';
+  }
+  return error == null ? '' : String(error).trim();
+};
+/** 只取错误码，用于瞬态错误判定（对象形态同样成立）。 */
+const turnErrorCode = error => (error && typeof error === 'object' && typeof error.code === 'string' ? error.code.trim() : turnErrorValue(error));
+export const turnErrorText = error => {
+  const value = turnErrorValue(error);
   if (!value) return '请检查任务状态后重试';
   if (TURN_ERROR_TEXT[value]) return TURN_ERROR_TEXT[value];
   // 纯大写错误码对用户没有意义；短句/中文错误保持原文。
@@ -685,7 +701,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
             ? `${active.progress.state === 'running' ? '正在' : '已完成'}${labels[tool] || (tool.startsWith('cloud_browser_') ? '操作云端浏览器' : '执行工具')}`
             : '');
           const visibleFailures = page.turns
-            .filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn?.status) && !TRANSIENT_TURN_ERRORS.has(String(turn?.error || '')))
+            .filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn?.status) && !TRANSIENT_TURN_ERRORS.has(turnErrorCode(turn?.error)))
             .map(turn => ({ type: 'step', id: `turn-status-${turn.turnId}`, text: `任务${turn.status === 'failed' ? '失败' : '已中断'}：${turnErrorText(turn.error)}` }));
           mergeEvents(visibleFailures);
         }

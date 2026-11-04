@@ -33,6 +33,17 @@ const SYNC = [
   'dist/client.js',              // 客户端产物（build:client 生成，dist 被 gitignore）
 ];
 
+/**
+ * 可选：云桌面侧代码（desktop-session / desktop-ws / assistant-runtime）。
+ * 只在这些文件确实由本地安装副本提供时才需要 —— 用 --with-runtime 显式开启。
+ * 它们跑在云桌面里，改完必须重启/重建云桌面会话才会加载新代码。
+ */
+const RUNTIME = [
+  'runtime/desktop-session.mjs',   // 剪贴板 UTF-8 解码链、locale 探测
+  'runtime/desktop-ws.mjs',        // WS 帧 FIN/续帧处理
+  'runtime/assistant-runtime.mjs', // 定时任务幂等/重试/暂停
+];
+
 const fail = message => { throw new Error(message); };
 
 async function parseArgs(argv) {
@@ -40,6 +51,7 @@ async function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--apply') { options.apply = true; continue; }
+    if (flag === '--with-runtime') { options.withRuntime = true; continue; }
     if (flag === '--rollback') { options.rollback = argv[++i]; continue; }
     if (flag === '--profile') { options.profile = argv[++i]; continue; }
     fail(`未知参数 ${flag}`);
@@ -53,9 +65,9 @@ async function exists(path) {
 }
 
 /** 收集要同步的真实文件（目录递归展开）。 */
-async function collect() {
+async function collect(extra = []) {
   const files = [];
-  for (const entry of SYNC) {
+  for (const entry of [...SYNC, ...extra]) {
     const absolute = join(root, entry);
     if (!await exists(absolute)) throw fail(`源文件缺失：${entry}（先跑 npm run build:client）`);
     const stat = await fs.stat(absolute);
@@ -88,7 +100,7 @@ async function main() {
   const target = resolve(profile, 'node_modules', PKG);
   if (!await exists(target)) fail(`目标包目录不存在：${target}`);
 
-  const files = await collect();
+  const files = await collect(options.withRuntime ? RUNTIME : []);
   const stamp = new Date().toISOString().replace(/[-:T]/gu, '').slice(0, 13);
   const backupDir = join(target, `.dev-backup-${stamp}`);
 
@@ -96,7 +108,7 @@ async function main() {
     const source = resolve(options.rollback);
     if (!await exists(source)) fail(`备份目录不存在：${source}`);
     let restored = 0;
-    for (const relative of await collect()) {
+    for (const relative of await collect(RUNTIME)) {
       const from = join(source, relative);
       if (!await exists(from)) continue;
       await fs.copyFile(from, join(target, relative));
@@ -110,6 +122,7 @@ async function main() {
     mode: options.apply ? 'apply' : 'dry-run',
     target,
     files,
+    runtime: options.withRuntime ? 'included（改完需重启云桌面会话）' : 'skipped（加 --with-runtime 才同步）',
     backup: options.apply ? backupDir : '(dry-run 不写)',
     hint: options.apply ? `回滚：node scripts/install-dev.mjs --profile ${options.profile} --rollback ${backupDir}` : '确认后加 --apply',
   }, null, 2));
