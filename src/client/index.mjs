@@ -81,6 +81,13 @@ import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
 export const PERSONAL_ASSISTANT_CLIENT_BUILD = typeof __PA_CLIENT_BUILD__ === 'string' ? __PA_CLIENT_BUILD__ : '开发模式';
+/** 构建标记按本机时区显示（构建串是 UTC，直接截断会让用户看到 8 小时前的时间）。 */
+export function localBuildLabel(build) {
+  const time = new Date(build);
+  if (Number.isNaN(time.getTime())) return String(build || '开发模式');
+  const pad = value => String(value).padStart(2, '0');
+  return `${pad(time.getHours())}:${pad(time.getMinutes())}`;
+}
 const FIRST_FRAME_TIMEOUT_MS = 12_000;
 let clientReact;
 export function setClientReactRuntime(runtime) { clientReact = runtime; }
@@ -712,6 +719,11 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         phase === 'unconfigured' && (bindingReason === 'credential-unavailable' || candidateCount > 0) ? h('button', { style: buttonStyle, disabled: Boolean(busy), onClick: () => void bindAssistant('connect') }, busy === 'connect' ? '正在获取…' : bindingReason === 'credential-unavailable' ? '重新获取连接凭证' : '连接已发现的个人助理') : null,
         h('button', { style: { ...buttonStyle, background: 'transparent' }, disabled: Boolean(busy), onClick: () => void refreshConnection() }, '检查开通状态'),
         busy ? h('span', { role: 'status', style: { color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12 } }, '处理中，请稍候…') : null) : null) : null,
+    // 可见的构建标记：面板是否加载了新代码不该靠猜（支持排障时也能一眼比对）。
+    h('span', { 'data-personal-assistant-build-badge': PERSONAL_ASSISTANT_CLIENT_BUILD, 'aria-hidden': true,
+      style: { position: 'absolute', left: 6, bottom: 4, zIndex: 3, pointerEvents: 'none', fontSize: 10, lineHeight: '12px',
+        padding: '1px 5px', borderRadius: 4, color: '#fff', background: '#0f172acc', fontFamily: 'ui-monospace, monospace' } },
+      `构建 ${localBuildLabel(PERSONAL_ASSISTANT_CLIENT_BUILD)}`),
     h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !controlRef.current.snapshot.available && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onPaste: event => { const text = event.clipboardData?.getData?.('text/plain') ?? ''; if (!text) return; event.preventDefault(); void pasteTextToCloud(text); }, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
   const secondaryInk = 'var(--dsw-alias-label-secondary, #536174)';
   const ghostStyle = { ...buttonStyle, background: 'transparent', color: 'inherit', border: ui.border };

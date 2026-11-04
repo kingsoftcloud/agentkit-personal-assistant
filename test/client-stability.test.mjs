@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PersonalAssistantPanel, PersonalAssistantShell, setClientReactRuntime } from '../src/client/index.mjs';
+import { PersonalAssistantPanel, PersonalAssistantShell, setClientReactRuntime, localBuildLabel } from '../src/client/index.mjs';
 import { PersonalAssistantConversation } from '../src/client/conversation.mjs';
 
 /* ----------------------------- 夹具 ----------------------------- */
@@ -644,4 +644,12 @@ test('面板自己的输入框里 ⌘C 不抢：保留浏览器原生复制粘�
   assert.equal(event.defaultPrevented, false);
   assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
   fx.view.unmount();
+});
+
+test('构建标记按本机时区显示：UTC 构建串不能让用户看到 8 小时前的时间', () => {
+  assert.match(localBuildLabel('2026-11-04T04:44:34.393Z'), /^\d{2}:\d{2}$/u);
+  const shown = localBuildLabel('2026-11-04T04:44:34.393Z');
+  const local = new Date('2026-11-04T04:44:34.393Z');
+  assert.equal(shown, `${String(local.getHours()).padStart(2, '0')}:${String(local.getMinutes()).padStart(2, '0')}`);
+  assert.equal(localBuildLabel('开发模式'), '开发模式', '构建串不可解析时原样回退，不能显示 Invalid Date');
 });
