@@ -473,3 +473,59 @@ EXIT=0
 6. **E7 的显示边界（已收口）**：客户端对 413 不再回退 navigator，computer 侧栏与 page 整页两个变体都渲染可读提示；提示条与连接 notice 一样只在 `active`（已建连/重连中/休眠/恢复中）时显示，未连接状态不会触发剪贴板链路，因此无需提示。
 7. **reconcile 会重新 arm 所有 pending 行**：同 key 的 `scheduleOnce` 会替换旧定时器，不会双发，但每次 reconcile 会重置该定时器的触发时刻（仍以 `nextRunAt` 为准）。
 8. **构建产物未更新**：按 Lead 要求本次未跑 `npm run build:client`；`dist/client.js` 尚未包含 task-6 的 413 改动与 page 变体提示条，面板实机验证前需统一重建。
+
+---
+
+## 6. 第二轮：用户实测反馈的三类问题（2026-11-04）
+
+用户实测：「中文复制粘贴还是乱码」「对话偶尔直接报错不干活」「多轮对话不稳定」。
+**重要前提**：用户当时测的是 Studio 里已安装的 **0.1.13 发布版**，本分支的改动尚未同步进去，所以这三条是发布版就有的缺陷，被本轮修复覆盖。
+
+### 6.1 中文剪贴板乱码（3 个缺陷叠加）
+
+| # | 根因 | 证据 | 状态 |
+| --- | --- | --- | --- |
+| C1 | 读路径硬解 UTF-8：`xclip -o` 原始字节被 `execFile` 默认 `encoding:'utf8'` 解码，非法字节变 U+FFFD 且不可逆 | GBK「中文」= `d6 d0 ce c4` → `Buffer.toString('utf8')` = `����` | 已修：UTF-8(fatal) → GB18030(fatal) → latin1 解码链 |
+| C2 | WS `parseFrames` 忽略 FIN/续帧，分片 JSON 被当完整消息解析，多字节字符跨分片被撕开 | 旧 parser 实跑分片用例：服务端回 `INVALID_JSON` 并超时 | 已修：RFC 6455 续帧累积 + 控制帧穿透 + 1MiB 上限 |
+| C3 | `LANG='zh_CN.UTF-8'` 写死且继承的 `LC_CTYPE` 会覆盖它；镜像未生成该 locale 时应用按错误 charset 处理 | 代码审计 + locale 探测矩阵用例 | 已修：`locale -a` 探测 → zh_CN.UTF-8 / C.UTF-8 / 其它 utf8 回退，显式设 `LC_CTYPE` |
+
+附加加固：`ownClipboard` 的回读校验从**字符串比较**改为 **Buffer 字节比较**（旧比较在出现 U+FFFD 时仍然"相等"，会掩盖问题）；新增 `stats().clipboard.read = { bytes, encoding, target, targets }` 运行时诊断，出问题时可直接定位是哪一跳。
+
+**`STRING` target 的限制（不是 bug）**：xclip 0.13 的 `-target` 只接受单个 atom，TARGETS 只广告 `{TARGETS, 该 atom}`，任何 target 请求都回同一份 UTF-8 字节。所以只请求 `STRING`(latin1) 的老应用（xterm、部分 Java Swing）粘贴中文必然显示 `ä¸æ–‡` 或失败——latin1 装不下 CJK。`-target UTF8_STRING,STRING` 是**静默炸弹**（广告一个没人认识的 atom，全应用粘贴失效且自读回仍通过），已加回归用例禁止。真正兼容 STRING-only 应用需镜像打包 master xclip（`-alt-text`）或自建多 target 的 selection owner。
+
+**部署边界**：C1/C2/C3 的代码在 `runtime/`，属于**云桌面镜像**（`src/cloud-computer-tools.mjs:7`：image owns computer-agentd），本地安装不生效，需要重建/更新云端镜像。本机侧（Host 读写的解码链）随插件安装即生效。
+
+### 6.2 对话偶发报错 / 多轮不稳定（8 个根因）
+
+| # | 症状 | 根因 |
+| --- | --- | --- |
+| D1 | 不干活 | 快照校准失败直接 `setPhase('error')`，`calibrated` 永不 true，增量轮询（受 `calibrated` 门控）永不启动 |
+| D2 | 不干活 | 会话目录 `sessions.list` 一次抖动就整页报错，无自动重试，缓存回显也被盖掉 |
+| D3 | 报错 + 永久停摆（最致命） | 轮询 catch 里直接取 `failure.code`，RPC 层 reject(null/字符串) 时 catch 内再次 TypeError 逃逸成 unhandledRejection；reschedule 写在 catch 之后 → 之后轮次永不执行 |
+| D4 | 假失败 | `turn.submit` 返回 504（云端可能已接受）被当硬失败，显示「重试发送」气泡 |
+| D5 | 多轮不稳定 | 切会话时在途请求返回后无条件覆盖 `cursorRef`，旧增量写进新会话 |
+| D6 | 多轮不稳定 | `CURSOR_STALE` 重开会话时若快照再失败 → 回到 D1 死锁 |
+| D7 | 多轮不稳定 | 失败后固定 600ms 继续打云端，无退避 |
+| D8 | 多轮不稳定 | 快照 1.5s 节流窗口内直接 return 且不补尾写 → 最后一轮消息永不进缓存 |
+
+修复：校准/目录退避自动重试（有缓存保持 ready 只提示）；轮询 tick 全 try/catch + **finally 必 reschedule** + 指数退避 1.2s→15s；四重 `stale()` 守卫（cancelled + alive + generation + session）丢弃旧会话响应含 cursor；`CURSOR_STALE` 走同一套自愈校准；超时/503/abort 走幂等队列重发并复用同一 `clientTurnId`；快照节流补尾写。性能优化（快照回显、1.5s 节流、采样打点）全部保留。
+
+### 6.3 本轮新增用例与结果
+
+- `test/clipboard-utf8-fidelity.test.mjs`（8）：每跳字节断言（含 WS 半包切在汉字 UTF-8 中间、FIN=0 续帧、64 KiB 字节口径、GBK 来源还原）。
+- `test/clipboard-utf8-decoding.test.mjs`（9）：解码链、locale 探测矩阵、单 target 约束、Windows UTF-16LE 命令。
+- `test/client-conversation-recovery.test.mjs`（10）：D1–D8 逐条复现（1–8 在旧代码上实测 RED），含端到端「故障恢复后多轮对话继续」。
+
+`npm test`：**433 tests / 431 pass / 0 fail / 2 skipped**；`npm run check`：**EXIT=0**。
+
+同时修了工程问题：`package.json` 的 `check` 是手写长链，曾出现同一文件重复三次、两个文件挤进一条命令（`local-access.mjs` 实际未被语法检查）且 `runtime/desktop-session.mjs`、`desktop-ws.mjs` 从未被检查；改为 `scripts/check.mjs` 遍历 `src/` + `runtime/` 自动纳入新文件。
+
+### 6.4 仍无法覆盖
+
+1. STRING-only 老应用粘贴中文（xclip 0.13 限制，需镜像升级或自建 owner）。
+2. 镜像无 zh_CN.UTF-8 时回退 C.UTF-8：字节安全但界面英文，依赖 locale 默认 charset 的程序（Java）需镜像补 locale。
+3. GB18030 兜底是启发式，Big5/Shift-JIS 可能解错（但不再产生 U+FFFD）。
+4. INCR 大文本路径未覆盖；>64 KiB 云端→本机按字节截断不撕字符但丢尾部。
+5. Windows `-EncodedCommand` 仅参数级单测。
+6. Host 单请求 15s 超时 vs 云端 busy 重试预算（20×1s）临界仍可能 504；客户端已幂等重发对账，根治需服务端收敛。
+7. 云端 events 的 cursor 是消息数组下标，snapshot/events 交错理论上仍可能重复或漏一条。

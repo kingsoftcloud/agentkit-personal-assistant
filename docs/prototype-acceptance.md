@@ -2,7 +2,7 @@
 
 > 分支 **`feat/pa-prototype`**（未合并到 main，可随时丢弃）
 > 基线 `ab94635` → 最新 `a241cb8`，共 7 个提交，43 个文件、+7547 行
-> 自测结论：`npm test` **406 项 / 404 通过 / 0 失败 / 2 skipped**，`npm run check` **EXIT=0**，`npm run build:client` 成功（`dist/client.js` 187,794 字节）
+> 自测结论：`npm test` **433 项 / 431 通过 / 0 失败 / 2 skipped**，`npm run check` **EXIT=0**，`npm run build:client` 成功（`dist/client.js` 189,769 字节）
 
 ---
 
@@ -80,6 +80,19 @@ node scripts/install-dev.mjs --profile ~/.dsh/profiles/desktop-agentkit-studio -
 - 对话页挂载/卸载 20 次：卸载后不再发 `session.events`；云电脑面板连接/卸载 20 次：socket 关闭、定时器与监听器归零。
 - RPC 失败可恢复：`desktop.ticket` 首次失败仍显示可操作界面，重试可进入就绪。
 - 重开面板：先回显上次的 Bot 列表与计数，再后台校准；校准失败保留缓存并提示，不会退回开通报板（本轮修的 G3.5）。
+
+---
+
+### 3.4 第二轮：你实测反馈的问题（中文乱码 / 对话报错 / 多轮不稳定）
+
+这三条是**已安装的 0.1.13 发布版**就有的缺陷（当时本分支尚未同步）。本轮已修：
+
+- **中文乱码 = 3 个缺陷叠加**：① `xclip -o` 的原始字节被硬按 UTF-8 解码，GBK 内容直接变 `����` 且不可逆 → 改为 UTF-8(fatal) → GB18030 → latin1 解码链；② WS 解析器忽略 FIN/续帧，分片 JSON 与跨分片的多字节字符被撕开 → 按 RFC 6455 重写；③ `LANG=zh_CN.UTF-8` 写死、镜像没这个 locale 时应用按错字符集处理 → 改为 `locale -a` 探测 + `C.UTF-8` 回退 + 锁 `LC_CTYPE`。另外把回读校验从字符串比较改成**字节比较**（旧写法在出现 U+FFFD 时仍判定"相等"，掩盖问题）。
+- **对话偶发报错/不干活 = 4 条根因**：快照校准失败 → `calibrated` 永不为 true → 增量轮询永远不启动；目录请求抖动 → 整页报错无重试；轮询 catch 里对非 Error 拒绝值二次抛错 → unhandledRejection 且**永不重排下一轮**（最致命）；`turn.submit` 504（云端实际可能已接受）被当硬失败。
+- **多轮不稳定 = 4 条根因**：切会话时在途响应无条件覆盖 cursor、旧增量写进新会话；`CURSOR_STALE` 重开会话再失败即死锁；失败后固定 600ms 无退避；快照 1.5s 节流丢尾写。
+- 修复原则：校准/目录/轮询全部**退避自愈且不会永久停摆**，四重守卫丢弃旧会话响应，发送超时走幂等重发（复用同一 `clientTurnId`），性能优化一个没回退。
+
+**生效范围（重要）**：对话自愈在本机插件里，`install-dev --apply` + Cmd+R 即生效；剪贴板的三个修复都在 `runtime/`，属于**云桌面镜像**（`src/cloud-computer-tools.mjs:7`），需要重建/更新云端镜像才生效，本机安装只覆盖 Host 侧读写解码。
 
 ---
 
