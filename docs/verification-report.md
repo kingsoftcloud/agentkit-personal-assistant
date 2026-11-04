@@ -579,3 +579,20 @@ EXIT=0
 - 粘贴方向加了**写入回读对账**：写进云端剪贴板再读回来，内容不一致就取消 Ctrl+V 并提示
   「云端把剪贴板内容转坏了」。云桌面旧 agentd 的字符集硬解会在这里当场暴露，
   而不是变成应用里的一串 `????`。
+
+### 7.6 预发热替换（2026-11-04 11:48）
+
+定位到算力集群 `~/.kube/config-2fc1210d`（管理集群 `agentengine-pre` 只是控制面，agent 实例在算力集群），
+用户云电脑 Pod：`ar-20261030133714-7396d2ae-0`，两容器 `agent-runtime` + `personal-assistant-computer`，
+`runtime-version 0.1.45`。Pod 内 `grep -c decodeClipboardBuffer` = **0**，确认线上是旧代码。
+
+容器是 `tini → sh(entrypoint) → agentd` 单进程监工，`/opt` 不在卷上，直接杀 agentd 会容器重建、改动丢失。
+因此热替换做法：**先 `kill -STOP` 冻结 entrypoint**，再停旧 agentd、用原环境变量与参数在独立会话拉起新 agentd，
+容器不退出。备份在 PVC `/var/lib/agentkit/computer/hotpatch-backup-20261104-114748`。
+
+回滚：`kill -CONT 7` → entrypoint 退出 → 容器重启 → 回到镜像原状（旧代码）。
+
+替换后在真实 Pod 内验证：`/health` `desktopReady:true`；`decodeClipboardBuffer(GBK 字节)` 返回
+`{"text":"中文测试","encoding":"gb18030"}`，UTF-8 返回 `encoding:"utf8"`；桌面 locale 探测为 `zh_CN.UTF-8`。
+
+注意：这是**临时验证手段**，Pod 重建即失效；正式修复仍须走镜像发布（新 digest → 运行时 catalog）。
