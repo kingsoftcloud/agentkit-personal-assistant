@@ -34,12 +34,12 @@ test('唯一云端绑定传入原生工作面板，重开与收起只操作同�
   assert.deepEqual(h.workbench.getSnapshot().binding.scope, scope);
   assert.equal(h.workbench.getSnapshot().binding.request, request);
   h.workbench.collapse(); h.workbench.open();
+  // open() 只切前台，不能再强制展开：展开/全屏归 DSH 原生控件，插件越权会让每次打开都变全屏。
   assert.deepEqual(h.opens, [
     { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
     { panelId: 'personal-assistant', expanded: false },
     { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
-    { panelId: 'personal-assistant', expanded: true },
-  ]);
+  ], 'open() 不得再下发 expanded=true');
   h.workbench.dispose();
 });
 

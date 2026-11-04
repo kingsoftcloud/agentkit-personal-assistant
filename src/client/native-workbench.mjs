@@ -36,8 +36,9 @@ export function createAssistantWorkbench({ sidebarRight, slots, panelId = ASSIST
       requireAvailable();
       if (!binding) return;
       reveal();
-      // 用户显式打开云电脑时默认展开原生右侧栏（DSH 负责真正的全屏外观与宽度）。
-      sidebarRight.setPanelExpanded(panelId, true);
+      // 只把原生侧栏 tab 切到前台，展开/全屏由 DSH 自己的控件和用户决定。
+      // 之前这里调 setPanelExpanded(panelId, true) 强制展开，导致每次打开云电脑都变成
+      // 全屏外观——插件越权控制了布局，和本文件开头「不拥有布局、全屏」的约定相反。
     },
     collapse() { requireAvailable(); sidebarRight.setPanelExpanded(panelId, false); },
     dispose() {
