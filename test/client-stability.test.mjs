@@ -165,6 +165,15 @@ class FakeEventTarget {
     for (const [key, list] of this.listeners) if (key.startsWith(`${type}:`)) total += list.length;
     return total;
   }
+  /** 测试里模拟 window blur / document visibilitychange：按注册顺序派发给所有监听器。 */
+  dispatchEvent(event) {
+    const type = typeof event === 'string' ? event : event.type;
+    for (const [key, list] of this.listeners) {
+      if (!key.startsWith(`${type}:`)) continue;
+      for (const listener of [...list]) listener(event);
+    }
+    return true;
+  }
 }
 
 /** 面板需要的浏览器外壳：document/window/WebSocket；不提供 ResizeObserver（可选依赖）。 */
@@ -556,6 +565,83 @@ test('page 变体（整页桌面 tab）Host 读取剪贴板 413：不退回浏�
   assert.ok(fx.requests.includes('personal-assistant.clipboard.read'), '粘贴应先通过 Host 读本机剪贴板');
   assert.deepEqual(fx.navigatorReads, [], 'Host 已明确回 413，page 变体也不能退回 navigator.clipboard');
   assert.match(fx.view.text(), /剪贴板内容超过 64 KiB/u, '整页桌面 tab 里也要能看到可读提示，不能静默');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});
+
+/** 把面板从「已断开重连中」推到「已就绪可控制」：input() 只在这个状态下才转发。 */
+async function drivePanelToReady(fx) {
+  fx.socket.readyState = 1;
+  fx.socket.onopen?.();
+  await fx.mount();
+  fx.socket.onmessage({ data: JSON.stringify({ type: 'ready', sessionId: 'session-test', readOnly: false, display: { width: 1280, height: 800 } }) });
+  await fx.mount();
+  return fx;
+}
+
+test('按键抬起丢失时必须补发抬起：否则云端 X11 自动重复会疯狂输入', async t => {
+  const fx = await drivePanelToReady(await mountActivePanel(t));
+  const inputEvents = () => fx.socket.sent
+    .map(item => { try { return JSON.parse(String(item)); } catch { return null; } })
+    .filter(item => item?.type === 'input' && item.event?.type === 'key');
+  // 普通字符走文本通道不转发按键；方向键这类才会走 key 事件。
+  fx.input.props.onKeyDown({ key: 'ArrowLeft', type: 'keydown', preventDefault() {} });
+  await fx.mount();
+  assert.ok(inputEvents().some(item => item.event.action === 'down' && item.event.key === 'Left'), '按下应转发给云桌面');
+  // 用户在面板外点了一下：keyup 永远不会到达浏览器，面板必须自己补。
+  fx.dom.window.dispatchEvent({ type: 'blur' });
+  await fx.mount();
+  assert.ok(inputEvents().some(item => item.event.action === 'up' && item.event.key === 'Left'), '失焦必须补发抬起');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});
+
+test('按键 2.5 秒没有任何事件就自动抬起：兜住连接抖动丢掉的抬起', async t => {
+  const fx = await drivePanelToReady(await mountActivePanel(t));
+  const inputEvents = () => fx.socket.sent
+    .map(item => { try { return JSON.parse(String(item)); } catch { return null; } })
+    .filter(item => item?.type === 'input' && item.event?.type === 'key');
+  fx.input.props.onKeyDown({ key: 'ArrowRight', type: 'keydown', preventDefault() {} });
+  await fx.mount();
+  assert.ok(inputEvents().some(item => item.event.action === 'down' && item.event.key === 'Right'));
+  await new Promise(resolve => setTimeout(resolve, 2700));
+  await fx.mount();
+  assert.ok(inputEvents().some(item => item.event.action === 'up' && item.event.key === 'Right'), '超时未收到抬起时必须自动释放');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});
+
+test('焦点不在输入框时 ⌘C 仍然复制云电脑内容：发一条原子 tap ctrl+c', async t => {
+  const fx = await drivePanelToReady(await mountActivePanel(t));
+  const before = fx.requests.length;
+  // 用户刚点过面板别处，焦点不在隐藏输入框：事件只到 document。
+  const event = { type: 'keydown', key: 'c', metaKey: true, target: { tagName: 'DIV' }, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+  fx.dom.document.dispatchEvent(event);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  // 云端剪贴板走 WS：先回答复制前的基线读取，复制按键才会发出去。
+  const decode = item => { try { return JSON.parse(String(item)); } catch { return null; } };
+  const read = fx.socket.sent.map(decode).find(item => item?.type === 'clipboard.read');
+  assert.ok(read, '⌘C 应先读取云端剪贴板作为基线');
+  fx.socket.onmessage({ data: JSON.stringify({ type: 'clipboard.response', requestId: read.requestId, ok: true, value: { text: '旧内容' } }) });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const keys = fx.socket.sent
+    .map(item => { try { return JSON.parse(String(item)); } catch { return null; } })
+    .filter(item => item?.type === 'input' && item.event?.type === 'key');
+  assert.deepEqual(keys.map(item => `${item.event.action}:${item.event.key}`), ['tap:ctrl+c'],
+    '复制必须是一条原子事件：拆成多条时云端并发处理会导致乱序与卡键');
+  assert.equal(event.defaultPrevented, true, '交给云电脑后要阻止浏览器自己的复制');
+  assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
+  fx.view.unmount();
+});
+
+test('面板自己的输入框里 ⌘C 不抢：保留浏览器原生复制粘贴', async t => {
+  const fx = await drivePanelToReady(await mountActivePanel(t));
+  const before = fx.requests.length;
+  const event = { type: 'keydown', key: 'c', metaKey: true, target: { tagName: 'TEXTAREA' }, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+  fx.dom.document.dispatchEvent(event);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.deepEqual(fx.requests.slice(before), [], '聊天输入框里的 ⌘C 必须保持原生行为');
+  assert.equal(event.defaultPrevented, false);
   assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
   fx.view.unmount();
 });

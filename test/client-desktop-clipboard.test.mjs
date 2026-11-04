@@ -29,8 +29,8 @@ test('云端桌面是 Linux：粘贴快捷键固定 Control_L+v，host 是 macOS
 });
 
 test('云端桌面是 Linux：复制快捷键固定 Control_L+c，macOS 的 ⌘C 不转成 Super_L', () => {
-  assert.deepEqual(copyShortcutEvents().map(event => `${event.action}:${event.key}`),
-    ['down:Control_L', 'down:c', 'up:c', 'up:Control_L']);
+  // 一条 tap 事件 = 云端一次 pressKey，内部 keydown/keyup 各一次 xdotool 调用，顺序有保证。
+  assert.deepEqual(copyShortcutEvents().map(event => `${event.action}:${event.key}`), ['tap:ctrl+c']);
   assert.ok(Object.isFrozen(copyShortcutEvents()));
 });
 

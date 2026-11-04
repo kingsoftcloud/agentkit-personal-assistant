@@ -123,12 +123,12 @@ export function pasteShortcutEvents() {
  * Super_L+C 不会触发大多数 Linux 应用的复制动作。
  */
 export function copyShortcutEvents() {
-  return Object.freeze([
-    Object.freeze({ type: 'key', action: 'down', key: 'Control_L' }),
-    Object.freeze({ type: 'key', action: 'down', key: 'c' }),
-    Object.freeze({ type: 'key', action: 'up', key: 'c' }),
-    Object.freeze({ type: 'key', action: 'up', key: 'Control_L' }),
-  ]);
+  // 必须是一条原子事件：客户端的每个 input 事件各自走一趟 WS + broker 往返，
+  // 拆成 down/up 四条时云端是并发处理、xdotool 各自独立结束，顺序不受保证——
+  // 轻则 c 没带 Ctrl（复制不生效），重则 c↑ 先于 c↓ 执行（c 永远按着，X11 自动重复）。
+  // 云端 pressKey 的 tap 特别处理 Ctrl+c：keydown Control_L c / keyup c Control_L，
+  // 各自一次 xdotool 调用，顺序由进程本身保证。
+  return Object.freeze([Object.freeze({ type: 'key', action: 'tap', key: 'ctrl+c' })]);
 }
 
 /** 把云端的错误码翻成用户能照做的中文；英文原文只作为兜底。 */

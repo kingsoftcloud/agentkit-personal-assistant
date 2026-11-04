@@ -516,15 +516,27 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     void refreshConnection(controller.signal);
     const interval = setInterval(() => { if (current.mounted) setFps(current.frames); current.frames = 0; }, 1000);
     const visibility = () => {
-      if (document.hidden) { releaseControl(); send({ type: 'pause' }); }
+      if (document.hidden) { releasePressedKeys(); releaseControl(); send({ type: 'pause' }); }
       else if (current.socket?.readyState === 1) send({ type: 'resume' });
       else if (current.reconnectAllowed && current.config?.configured && current.session === null && current.socket) void open(current.mode, true);
     };
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => { if (current.lastDrawnFrame) { current.pendingFrame = current.lastDrawnFrame; void drawLatest(); } }) : null;
     if (canvasRef.current) observer?.observe(canvasRef.current);
-    const blur = () => releaseControl();
-    const outside = event => { if (!viewRef.current?.contains(event.target)) releaseControl(); };
-    document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('pointerdown', outside, true);
+    const blur = () => { releasePressedKeys(); releaseControl(); };
+    const outside = event => { if (!viewRef.current?.contains(event.target)) { releasePressedKeys(); releaseControl(); } };
+    // 快捷键兜底：焦点不在隐藏输入框时（用户可能刚点过对话区），⌘C/⌘V 仍应作用到云电脑。
+    // 走到这里时隐藏输入框已经把事件 preventDefault 过，说明正常路径处理完了，不重复执行。
+    // 面板自己的文本输入框保留原生复制粘贴，绝不抢。
+    const shortcut = event => {
+      if (event.type !== 'keydown' || event.defaultPrevented) return;
+      if (!isCopyShortcut(event) && !isPasteShortcut(event)) return;
+      const target = event.target;
+      const tag = String(target?.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable === true) return;
+      if (!current.session || current.readOnly) return;
+      key(event);
+    };
+    document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', shortcut);
     return () => {
       current.mounted = false;
       // E5：剪贴板提示的 4s 定时器属于本面板，卸载时清掉并置空引用，避免残留回调写已卸载状态。
@@ -532,8 +544,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       observer?.disconnect();
       if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame);
       if (current.wheelFrame) cancelAnimationFrame(current.wheelFrame);
-      controller.abort(); close(false); clearInterval(interval);
-      document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true);
+      controller.abort(); releasePressedKeys(); clearKeyWatchdogs(); close(false); clearInterval(interval);
+      document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', shortcut);
     };
   }, [request]);
   const point = event => mapDisplayPoint({ clientX: event.clientX, clientY: event.clientY, rect: canvasRef.current.getBoundingClientRect(), display: state.current.display });
@@ -561,6 +573,43 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     if (event.type === 'pointerdown') { inputRef.current?.focus(); canvasRef.current?.setPointerCapture(event.pointerId); if (input({ type: 'button', action: 'down', button, ...point(event) })) current.buttons.add(button); }
     else { input({ type: 'button', action: 'up', button, ...point(event) }); current.buttons.delete(button); if (canvasRef.current?.hasPointerCapture(event.pointerId)) canvasRef.current.releasePointerCapture(event.pointerId); }
   };
+  // 云端桌面是 X11：只按下、不发抬起，系统会**自动重复**这个键——用户看到的就是
+  // 「疯狂输入某个字符，我根本没动键盘」。失焦、面板隐藏、连接抖动都可能吞掉那一条抬起。
+  const KEY_STUCK_MS = 2500;
+  const keyTimers = () => {
+    const current = state.current;
+    if (!(current.keyTimers instanceof Map)) current.keyTimers = new Map();
+    return current.keyTimers;
+  };
+  const releasePressedKeys = () => {
+    const current = state.current;
+    const keys = [...current.pressed];
+    if (!keys.length) return;
+    for (const name of keys) current.pressed.delete(name);
+    for (const name of keys) { try { input({ type: 'key', action: 'up', key: name }); } catch { /* 通道已断：云端会由下一次连接重置 */ } }
+  };
+  const clearKeyWatchdogs = () => {
+    const timers = keyTimers();
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
+  };
+  /** 每次按键事件（含自动重复）续命；真卡住时补一次抬起，避免 X11 无限重复。 */
+  const armKeyWatchdog = name => {
+    const timers = keyTimers();
+    const previous = timers.get(name);
+    if (previous) clearTimeout(previous);
+    timers.set(name, setTimeout(() => {
+      timers.delete(name);
+      if (!state.current.pressed.has(name)) return;
+      state.current.pressed.delete(name);
+      try { input({ type: 'key', action: 'up', key: name }); } catch { /* ignore */ }
+    }, KEY_STUCK_MS));
+  };
+  const disarmKeyWatchdog = name => {
+    const timers = keyTimers();
+    const timer = timers.get(name);
+    if (timer) { clearTimeout(timer); timers.delete(name); }
+  };
   const key = event => {
     if (state.current.composition || event.isComposing || event.nativeEvent?.isComposing || event.key === 'Process' || event.key === 'Unidentified') return;
     // 画布上的 ⌘V/Ctrl+V 是"把本地剪贴板贴进云电脑"，不能把裸按键转给 Linux 桌面（它要的是 Ctrl+V）。
@@ -578,8 +627,14 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     event.preventDefault();
     const name = keyNames[event.key] || event.key;
     if (!/^[A-Za-z0-9_]+$/u.test(name)) return;
-    if (event.type === 'keydown') { if (!event.repeat && input({ type: 'key', action: 'down', key: name })) state.current.pressed.add(name); }
-    else { input({ type: 'key', action: 'up', key: name }); state.current.pressed.delete(name); }
+    if (event.type === 'keydown') {
+      if (!event.repeat && input({ type: 'key', action: 'down', key: name })) state.current.pressed.add(name);
+      armKeyWatchdog(name);
+    } else {
+      disarmKeyWatchdog(name);
+      input({ type: 'key', action: 'up', key: name });
+      state.current.pressed.delete(name);
+    }
   };
   const stateText = { loading: '正在检查助理状态', idle: '准备连接', dormant: '已空闲', resuming: '正在恢复桌面', unconfigured: '个人助理尚未开通', empty: '暂时没有可用助理', 'directory-error': '暂时无法读取助理列表', connecting: '正在启动云电脑', readonly: '只读旁观', ready: '正在控制云电脑', reconnecting: '正在恢复连接', hidden: '画面已暂停', closed: '桌面连接已结束', error: '连接暂时不可用' }[phase];
   const buttonStyle = { ...ui, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', font: 'inherit' };
