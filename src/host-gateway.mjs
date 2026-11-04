@@ -127,7 +127,9 @@ export function decodeClipboardBytes(value) {
  * 直接按 UTF-8 读会把中文变成乱码；显式把 OutputEncoding 切成 UTF-8。
  */
 export const windowsClipboardReadArgs = () => Object.freeze(['-NoProfile', '-NonInteractive', '-Command',
-  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -Raw']);
+  // 设置输出编码失败（个别重定向/宿主组合会抛「句柄无效」）不能让整条读取挂掉：
+  // 包一层 try 后即便退回系统代码页，decodeClipboardBytes 的 GB18030 回退也能还原中文。
+  'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }; Get-Clipboard -Raw']);
 /**
  * 写回使用 -EncodedCommand（UTF-16LE base64）。原来的 `Set-Clipboard -Value ${JSON.stringify(text)}`
  * 是拼一条 PowerShell 命令行：文本里的双引号、反引号、$ 变量会被 PowerShell 解释，
