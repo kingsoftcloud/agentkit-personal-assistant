@@ -86,6 +86,40 @@ const QUEUE_FLUSH_DELAY_MS = 400;
 const QUEUE_MAX_ATTEMPTS = 8;
 const QUEUE_RETRY_DELAY_MS = 1500;
 
+/**
+ * 事件轮询：正常 600ms 一次；失败后指数退避。
+ * 一次抖动（15s 超时、连接重建、5xx）不能让轮询永久停摆——那是「发出去了但没有任何回复」
+ * 的直接原因；也不能按正常间隔继续打云端，避免故障期间放大压力。
+ */
+const POLL_INTERVAL_MS = 600;
+const POLL_BACKOFF_BASE_MS = 1200;
+const POLL_BACKOFF_MAX_MS = 15_000;
+/**
+ * 校准（session.snapshot）失败后的自动重试间隔。快照只负责「先画出来」：
+ * 失败时保留缓存内容继续退避重试，绝不能把面板永久停在报错页、也不能因此不启动增量。
+ */
+const CALIBRATE_RETRY_DELAYS_MS = [400, 1000, 2000, 4000, 8000];
+const CALIBRATE_RETRY_MAX_MS = 15_000;
+/** 会话目录（sessions.list）失败后的自动重试间隔，语义同校准。 */
+const BOOTSTRAP_RETRY_DELAYS_MS = [400, 1200, 3000, 8000];
+
+/**
+ * 发送失败里可安全重试的瞬时错误：云端按 clientTurnId 幂等，重试用同一标识不会重复建轮。
+ * 典型场景：Host→云端 15s 超时，但云端其实已经接受并开始跑这一轮。
+ */
+const RETRYABLE_SUBMIT_CODES = new Set([
+  'PERSONAL_ASSISTANT_CLOUD_SESSION_TIMEOUT',
+  'PERSONAL_ASSISTANT_CLOUD_SESSION_UNAVAILABLE',
+  'PERSONAL_ASSISTANT_REQUEST_ABORTED',
+  'DSH_SESSION_CONTROLLER_UNAVAILABLE',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'EPIPE',
+]);
+const retryableSubmitStatus = status => [408, 429, 502, 503, 504].includes(Number(status));
+const failureCodeOf = failure => (failure && typeof failure === 'object' ? text(failure.code) : '');
+const failureTextOf = (failure, fallback) => (failure && typeof failure === 'object' ? text(failure.message) : '') || fallback;
+
 const styles = {
   page: {
     flex: '1 1 0px', height: '100%', maxHeight: '100%', minHeight: 0, minWidth: 0,
@@ -352,6 +386,12 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   messagesRef.current = messages;
   const snapshotWriteAtRef = useRef(0);
   const pollTraceTicksRef = useRef(0);
+  // 校准/目录失败后的自动重试定时器：独立于排队重试，卸载时必须清掉（否则会泄漏定时器）。
+  const calibrateTimerRef = useRef(null);
+  const calibrateAttemptRef = useRef(0);
+  const bootstrapAttemptRef = useRef(0);
+  // bootstrap 每次运行一个世代：慢请求晚到的失败不能覆盖新一轮已经成功的结果。
+  const flowRef = useRef(0);
   // 记录上一次的授权状态：只有 true → false 才是「撤销」，
   // 首次挂载时 already-false 不算撤销，不插系统提示。
 
@@ -373,6 +413,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       } catch { /* 打点绝不能影响请求本身 */ }
     }
   }, [request]);
+
+  const clearCalibrateTimer = useCallback(() => {
+    if (calibrateTimerRef.current) { clearTimeout(calibrateTimerRef.current); calibrateTimerRef.current = null; }
+  }, []);
 
   const mergeEvents = useCallback(events => {
     if (!Array.isArray(events) || events.length === 0) return;
@@ -422,6 +466,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     } else if (previousSession && previousSession !== id) setQueueNotice('');
     sessionRef.current = id;
     const generation = ++generationRef.current;
+    // 会话切换/重开也算一次新流程：让还在等重试的 bootstrap 世代作废。
+    flowRef.current += 1;
+    clearCalibrateTimer();
+    calibrateAttemptRef.current = 0;
     setSessionId(id);
     setPhase('loading');
     setError('');
@@ -436,38 +484,69 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       setMessages(cached.messages);
       setPhase('ready');
     }
-    try {
-      const snapshot = await call('personal-assistant.session.snapshot', { sessionId: id });
-      if (!aliveRef.current || sessionRef.current !== id || generation !== generationRef.current) return;
-      setRuntimeInstanceId(text(snapshot?.runtimeInstanceId));
-      cursorRef.current = Number(snapshot?.cursor) || 0;
-      const history = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
-      const calibratedMessages = history.map((message, index) => ({
-        id: text(message?.id) || `history-${index}`,
-        role: text(message?.role) || 'assistant',
-        text: text(message?.text),
-        done: true,
-      }));
-      // 与回显内容一致就不重建数组，避免历史区整块替换导致的闪烁。
-      if (!sameSnapshotMessages(cached?.messages, calibratedMessages)) setMessages(calibratedMessages);
-      setAwaiting(snapshot.turns?.some(turn => ['queued', 'running'].includes(turn.status)) || false);
-      writeSessionPointer(scope, id);
-      if (calibratedMessages.length > 0) writeSessionSnapshot(scope, id, calibratedMessages);
-      else removeSessionSnapshot(scope, id);
-      snapshotWriteAtRef.current = Date.now();
-      setPhase('ready');
-      setCalibrated(true);
-    } catch (failure) {
-      if (!aliveRef.current || generation !== generationRef.current) return;
-      if (['SESSION_NOT_FOUND', 'DSH_SESSION_NOT_FOUND'].includes(String(failure?.code || ''))) {
-        clearSessionPointer(scope);
-        removeSessionSnapshot(scope, id);
-        setMessages([]);
+
+    /** 只有这一次 openSession 仍然是当前会话时才允许写状态。 */
+    const stale = () => !aliveRef.current || generation !== generationRef.current || sessionRef.current !== id;
+
+    /** 校准失败：退避重试。快照只用于「先画出来」，绝不能因此让增量通道永久关闭。 */
+    const retryLater = attempt => {
+      if (stale() || calibrateTimerRef.current) return;
+      const delay = CALIBRATE_RETRY_DELAYS_MS[Math.min(attempt, CALIBRATE_RETRY_DELAYS_MS.length - 1)] ?? CALIBRATE_RETRY_MAX_MS;
+      calibrateTimerRef.current = setTimeout(() => {
+        calibrateTimerRef.current = null;
+        if (stale()) return;
+        void calibrate(attempt + 1);
+      }, delay);
+    };
+
+    const calibrate = async attempt => {
+      try {
+        const snapshot = await call('personal-assistant.session.snapshot', { sessionId: id });
+        if (stale()) return;
+        clearCalibrateTimer();
+        calibrateAttemptRef.current = 0;
+        setRuntimeInstanceId(text(snapshot?.runtimeInstanceId));
+        const snapshotCursor = Number(snapshot?.cursor);
+        cursorRef.current = Number.isSafeInteger(snapshotCursor) && snapshotCursor >= 0 ? snapshotCursor : 0;
+        const history = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
+        const calibratedMessages = history.map((message, index) => ({
+          id: text(message?.id) || `history-${index}`,
+          role: text(message?.role) || 'assistant',
+          text: text(message?.text),
+          done: true,
+        }));
+        // 与回显内容一致就不重建数组，避免历史区整块替换导致的闪烁。
+        if (!sameSnapshotMessages(cached?.messages, calibratedMessages)) setMessages(calibratedMessages);
+        setAwaiting(Array.isArray(snapshot?.turns) && snapshot.turns.some(turn => ['queued', 'running'].includes(turn?.status)));
+        writeSessionPointer(scope, id);
+        if (calibratedMessages.length > 0) writeSessionSnapshot(scope, id, calibratedMessages);
+        else removeSessionSnapshot(scope, id);
+        snapshotWriteAtRef.current = Date.now();
+        setError('');
+        setPhase('ready');
+        setCalibrated(true);
+      } catch (failure) {
+        if (stale()) return;
+        calibrateAttemptRef.current = attempt;
+        if (['SESSION_NOT_FOUND', 'DSH_SESSION_NOT_FOUND'].includes(failureCodeOf(failure))) {
+          clearSessionPointer(scope);
+          removeSessionSnapshot(scope, id);
+          setMessages([]);
+          setCalibrated(false);
+          setPhase('error');
+          setError(failureTextOf(failure, '无法读取会话内容'));
+          return;
+        }
+        // 有缓存就继续按「先画出来」的状态展示：报错只作为提示，后台继续退避重试校准。
+        setCalibrated(false);
+        if (cached) setPhase('ready');
+        else setPhase('error');
+        setError(failureTextOf(failure, '暂时无法校准会话，正在自动重试…'));
+        retryLater(attempt);
       }
-      setPhase('error');
-      setError(failure?.message || '无法读取会话内容');
-    }
-  }, [call, scope]);
+    };
+    await calibrate(0);
+  }, [call, clearCalibrateTimer, scope]);
 
   const createSession = useCallback(async () => {
     if (!aliveRef.current) return;
@@ -491,6 +570,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   }, [call, openSession]);
 
   const bootstrap = useCallback(async () => {
+    const flow = ++flowRef.current;
+    /** 只有这一次 bootstrap 仍然是当前流程（没被新流程/会话切换/卸载取代）时才写状态。 */
+    const stale = () => !aliveRef.current || flow !== flowRef.current;
+    clearCalibrateTimer();
     setPhase('loading');
     setError('');
     if (!aliveRef.current) return;
@@ -504,14 +587,27 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       setMessages(cached.messages);
       setPhase('ready');
     }
+    /** 目录/入口失败：退避后自动重来一次完整 bootstrap，不能把面板永久停在报错页。 */
+    const retryLater = () => {
+      if (stale() || calibrateTimerRef.current) return;
+      const attempt = bootstrapAttemptRef.current;
+      bootstrapAttemptRef.current = attempt + 1;
+      const delay = BOOTSTRAP_RETRY_DELAYS_MS[Math.min(attempt, BOOTSTRAP_RETRY_DELAYS_MS.length - 1)];
+      calibrateTimerRef.current = setTimeout(() => {
+        calibrateTimerRef.current = null;
+        if (!aliveRef.current) return;
+        void bootstrap();
+      }, delay);
+    };
     try {
       const listed = await call('personal-assistant.sessions.list');
-      if (!aliveRef.current) return;
+      if (stale()) return;
       if (!Array.isArray(listed?.sessions)) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_LIST_INVALID', '云端会话目录格式无效，请重试');
       if (listed.sessions.some(row => !row || typeof row !== 'object' || !text(row.sessionId))) {
         throw sessionFailure('PERSONAL_ASSISTANT_SESSION_LIST_INVALID', '云端会话目录包含无效会话，请重试');
       }
       const available = listed.sessions;
+      bootstrapAttemptRef.current = 0;
       setRuntimeInstanceId(text(listed.runtimeInstanceId));
       setSessions(available);
       if (available.length > 0) {
@@ -528,20 +624,25 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       if (readSessionPointer(scope)) throw sessionFailure('PERSONAL_ASSISTANT_SESSION_STATE_MISSING', '云端历史会话暂时不可见，请检查实例状态后重试');
       await createSession();
     } catch (failure) {
-      if (!aliveRef.current) return;
-      setPhase('error');
-      setError(failure?.message || '会话通道暂时不可用');
+      if (stale()) return;
+      // 有缓存时保留已回显的内容（只提示，不整页报错），后台继续自动重试。
+      setPhase(cached ? 'ready' : 'error');
+      setError(failureTextOf(failure, '会话通道暂时不可用'));
+      retryLater();
     }
-  }, [call, createSession, initialSessionId, openSession, scope]);
+  }, [call, clearCalibrateTimer, createSession, initialSessionId, openSession, scope]);
 
   useEffect(() => {
     aliveRef.current = true;
     void bootstrap();
     return () => {
       aliveRef.current = false;
+      // 作废所有在途流程，避免慢请求晚到的失败覆盖下一轮已经成功的结果。
+      flowRef.current += 1;
+      clearCalibrateTimer();
       if (retryTimerRef.current) { clearTimeout(retryTimerRef.current); retryTimerRef.current = null; }
     };
-  }, [bootstrap]);
+  }, [bootstrap, clearCalibrateTimer]);
 
   // 撤销本机授权：在对话流插入一条系统提示（契约第 4 章第 4 条）。
   // revokedAt 由面板外壳维护，同一会话里只插一条；撤销后首次进入对话也会补上。
@@ -556,45 +657,72 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   // 本地快照回显后 cursor 还不可信，必须等 snapshot 校准完（calibrated）再开轮询。
   useEffect(() => {
     if (phase !== 'ready' || !sessionId || !calibrated) return undefined;
+    const generation = generationRef.current;
+    const activeSession = sessionId;
     let cancelled = false;
     let timer = null;
+    let failures = 0;
+    /** 这次轮询是否仍然属于当前会话：切换会话/重开会话/卸载后，旧请求的结果一律丢弃。 */
+    const stale = () => cancelled || !aliveRef.current
+      || generation !== generationRef.current || sessionRef.current !== activeSession;
     const tick = async () => {
+      let delay = POLL_INTERVAL_MS;
+      let stop = false;
       try {
-        const page = await call('personal-assistant.session.events', { sessionId, cursor: cursorRef.current });
-        if (cancelled) return;
-        cursorRef.current = Number(page?.cursor ?? cursorRef.current) || 0;
+        const page = await call('personal-assistant.session.events', { sessionId: activeSession, cursor: cursorRef.current });
+        // 关键：请求在途时可能已经切了会话/重开了会话，旧增量绝不能写进新会话，也不能污染它的游标。
+        if (stale()) return;
+        failures = 0;
+        const nextCursor = Number(page?.cursor);
+        if (Number.isSafeInteger(nextCursor) && nextCursor >= 0) cursorRef.current = nextCursor;
         mergeEvents(page?.events);
         if (Array.isArray(page.turns)) {
-          setAwaiting(page.turns.some(turn => ['queued', 'running'].includes(turn.status)));
-          const active = page.turns.findLast(turn => ['queued', 'running'].includes(turn.status));
+          setAwaiting(page.turns.some(turn => ['queued', 'running'].includes(turn?.status)));
+          const active = page.turns.findLast(turn => ['queued', 'running'].includes(turn?.status));
           const labels = { cloud_computer: '操作云电脑', cloud_workspace: '处理云端文件', cloud_bash: '执行云端命令', cloud_run_code: '运行云端代码', assistant_schedule: '设置云端任务' };
           const tool = active?.progress?.tool;
-          setProgressText(tool ? `${active.progress.state === 'running' ? '正在' : '已完成'}${labels[tool] || (tool.startsWith('cloud_browser_') ? '操作云端浏览器' : '执行工具')}` : '');
+          setProgressText(typeof tool === 'string' && tool
+            ? `${active.progress.state === 'running' ? '正在' : '已完成'}${labels[tool] || (tool.startsWith('cloud_browser_') ? '操作云端浏览器' : '执行工具')}`
+            : '');
           const visibleFailures = page.turns
-            .filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn.status) && !TRANSIENT_TURN_ERRORS.has(String(turn.error || '')))
+            .filter(turn => ['failed', 'interrupted', 'cancelled'].includes(turn?.status) && !TRANSIENT_TURN_ERRORS.has(String(turn?.error || '')))
             .map(turn => ({ type: 'step', id: `turn-status-${turn.turnId}`, text: `任务${turn.status === 'failed' ? '失败' : '已中断'}：${turnErrorText(turn.error)}` }));
           mergeEvents(visibleFailures);
         }
         setError('');
       } catch (failure) {
-        if (!cancelled) {
-          if (failure.code === 'SESSION_CURSOR_STALE') { void openSession(sessionId); return; }
-          setError(failure.message || '云端连接中断，正在恢复；任务不会改到本机执行');
+        // 失败值可能是 null/字符串（RPC 层不保证抛 Error）：这里绝不能二次抛错，
+        // 否则 async tick 变成 unhandledRejection，轮询再也不会被安排下一次。
+        if (stale()) return;
+        if (failureCodeOf(failure) === 'SESSION_CURSOR_STALE') {
+          stop = true;
+          void openSession(activeSession);
+        } else {
+          failures += 1;
+          delay = Math.min(POLL_BACKOFF_BASE_MS * 2 ** (failures - 1), POLL_BACKOFF_MAX_MS);
+          setError(failureTextOf(failure, '云端连接中断，正在恢复；任务不会改到本机执行'));
         }
+      } finally {
+        // 一次失败不能永久停摆：除非会话已失效或有新的校准流程接手，否则一定安排下一次。
+        if (!stop && !stale()) timer = setTimeout(tick, delay);
       }
-      if (!cancelled) timer = setTimeout(tick, 600);
     };
     timer = setTimeout(tick, 200);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [phase, sessionId, call, mergeEvents, openSession, calibrated]);
 
   // 增量到达后节流落一次本地快照；写失败静默降级（见 writeSessionSnapshot）。
+  // 节流窗口内的最后一条消息不能丢：补一次尾写，避免重开面板时缓存停在中途。
   useEffect(() => {
-    if (!calibrated || phase !== 'ready' || !sessionId) return;
-    const now = Date.now();
-    if (now - snapshotWriteAtRef.current < SESSION_SNAPSHOT_WRITE_INTERVAL_MS) return;
-    snapshotWriteAtRef.current = now;
-    writeSessionSnapshot(scope, sessionId, messagesRef.current);
+    if (!calibrated || phase !== 'ready' || !sessionId) return undefined;
+    const write = () => {
+      snapshotWriteAtRef.current = Date.now();
+      writeSessionSnapshot(scope, sessionId, messagesRef.current);
+    };
+    const wait = SESSION_SNAPSHOT_WRITE_INTERVAL_MS - (Date.now() - snapshotWriteAtRef.current);
+    if (wait <= 0) { write(); return undefined; }
+    const timer = setTimeout(write, wait);
+    return () => clearTimeout(timer);
   }, [messages, calibrated, phase, sessionId, scope]);
 
   useEffect(() => {
@@ -626,6 +754,11 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   // 409 不一定都是"忙"，但把 409 当忙处理最坏只是多退避几次；反过来误判成失败会直接吞掉用户消息。
   const isBusyFailure = failure => Number(failure?.status) === 409
     || /SESSION_BUSY|active turn|正忙|处理中/u.test(`${failure?.code || ''} ${failure?.message || ''}`);
+  // 瞬时/结果不明（Host→云端 15s 超时、连接重建、5xx）：云端按 clientTurnId 幂等，
+  // 重试用同一标识不会重复建轮，所以走队列退避重发，而不是给用户一个「失败」气泡。
+  const isRetryableSubmitFailure = failure => isBusyFailure(failure)
+    || RETRYABLE_SUBMIT_CODES.has(failureCodeOf(failure))
+    || retryableSubmitStatus(failure?.status);
 
   /** 真正发一轮：乐观气泡 → 上传待发附件 → turn.submit；失败原因交回排队层决定重试还是报错。 */
   const sendTurn = async (item, { restoreDraft = false } = {}) => {
@@ -647,34 +780,36 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
         outboxRef.current.set(current.clientTurnId, current);
       }
       const receipt = await call('personal-assistant.turn.submit', { sessionId: current.sessionId, text: current.text, clientTurnId: current.clientTurnId, attachments });
-      if (!aliveRef.current) return { ok: true, item: current };
+      // 请求在途时可能已经切换/重开了会话：结果只对原会话有意义，不能把状态写进新会话。
+      if (!aliveRef.current || sessionRef.current !== current.sessionId) return { ok: true, item: current };
       outboxRef.current.delete(current.clientTurnId);
       setMessages(previous => previous.map(row => row.clientTurnId === current.clientTurnId ? { ...row, status: 'accepted', turnId: receipt.turnId } : row));
       return { ok: true, item: current };
     } catch (failure) {
-      if (!aliveRef.current) return { ok: false, failure, item: current };
-      // 忙：说明服务端认为还有回合在跑，保持"进行中"而不是假装失败；其余失败才复位等待态。
-      setAwaiting(isBusyFailure(failure));
-      // 忙失败会转成排队（内容已在气泡里），不再同时塞回输入框，避免一份内容出现两处。
-      if (restoreDraft && !isBusyFailure(failure)) setDraft(value => value || current.text);
-      setMessages(previous => previous.map(row => row.clientTurnId === current.clientTurnId ? { ...row, status: 'failed', failure: failure.message || '发送结果待确认，重试将复用原标识' } : row));
+      if (!aliveRef.current || sessionRef.current !== current.sessionId) return { ok: false, failure, item: current };
+      // 瞬时/结果不明的失败保持"进行中"，交给队列层退避重发；只有明确失败才复位等待态、还原草稿。
+      const retryable = isRetryableSubmitFailure(failure);
+      setAwaiting(retryable);
+      // 会转成排队重试的失败（忙/超时）不再把内容塞回输入框，避免一份内容出现两处。
+      if (restoreDraft && !retryable) setDraft(value => value || current.text);
+      setMessages(previous => previous.map(row => row.clientTurnId === current.clientTurnId ? { ...row, status: 'failed', failure: failureTextOf(failure, '发送结果待确认，重试将复用原标识') } : row));
       return { ok: false, failure, item: current };
     } finally { if (aliveRef.current) setSending(false); }
   };
 
   /** 没发出去的消息回到队首退避重试；到上限就把内容还给输入框，绝不静默丢弃。 */
-  const requeueForRetry = (item, failure) => {
+  const requeueForRetry = (item, failure, retryReason = '云电脑仍在处理上一轮') => {
     const attempts = (item.attempts || 0) + 1;
     outboxRef.current.delete(item.clientTurnId);
     setMessages(previous => previous.filter(row => row.clientTurnId !== item.clientTurnId));
     if (attempts > QUEUE_MAX_ATTEMPTS) {
-      setQueueNotice(`排队消息多次未发出（${failure?.message || '云电脑仍忙'}），已放回输入框，请手动重试`);
+      setQueueNotice(`消息多次未发出（${failureTextOf(failure, '云电脑仍忙')}），已放回输入框，请手动重试`);
       setDraft(value => value || item.text);
       return;
     }
     commitQueue([{ ...item, attempts }, ...queueRef.current]);
     const wait = (QUEUE_RETRY_DELAY_MS * Math.min(attempts, 3) / 1000).toFixed(1);  // 1.5 / 3.0 / 4.5 秒
-    setQueueNotice(`云电脑仍在处理上一轮，消息已排队，约 ${wait} 秒后自动重发`);
+    setQueueNotice(`${retryReason}，消息已排队，约 ${wait} 秒后自动重发`);
     clearRetryTimer();
     retryTimerRef.current = setTimeout(() => { retryTimerRef.current = null; void attemptQueuedHead(true); }, QUEUE_RETRY_DELAY_MS * Math.min(attempts, 3));
   };
@@ -693,8 +828,8 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     try {
       const result = await sendTurn(head);
       if (result.ok) return true;
-      if (isBusyFailure(result.failure)) requeueForRetry(result.item || head, result.failure);
-      else setQueueNotice(`排队消息发送失败：${result.failure?.message || '请点击重试'}`);
+      if (isRetryableSubmitFailure(result.failure)) requeueForRetry(result.item || head, result.failure, isBusyFailure(result.failure) ? '云电脑仍在处理上一轮' : '发送响应超时');
+      else setQueueNotice(`排队消息发送失败：${failureTextOf(result.failure, '请点击重试')}`);
       return false;
     } finally { flushingRef.current = false; }
   };
@@ -720,7 +855,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     }
     setDraft(''); setAttachments([]); setError(''); setQueueNotice('');
     const result = await sendTurn({ clientTurnId: crypto.randomUUID(), text: content, sessionId, uploads, attempts: 0 }, { restoreDraft: true });
-    if (!result.ok && isBusyFailure(result.failure)) requeueForRetry(result.item, result.failure);
+    if (!result.ok && isRetryableSubmitFailure(result.failure)) requeueForRetry(result.item, result.failure, isBusyFailure(result.failure) ? '云电脑仍在处理上一轮' : '发送响应超时');
   };
 
   // 回合结束（events 的 turns 回到空闲）后自动推进队列：每发一条就等它这一轮结束，连续多条自然串行。
@@ -765,7 +900,10 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     } catch (failure) { setError(failure.message || '云端文件下载失败'); }
   } }, header,
     h('style', null, '@keyframes pa-awaiting { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }@keyframes pa-skeleton { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }'),
-    error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } }, error) : null,
+    // 有缓存时校准失败只做提示：保留已回显的内容，并可手动触发一次重新校准（后台本来也在自动重试）。
+    error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } },
+      h('span', null, error),
+      !calibrated ? h('button', { type: 'button', style: { ...styles.ghost, marginLeft: 8 }, onClick: () => void bootstrap() }, '重新校准') : null) : null,
     h('div', { ref: scrollerRef, 'data-personal-assistant-messages': 'true', style: styles.scroller, onScroll: event => {
       const element = event.currentTarget;
       followLatestRef.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64;

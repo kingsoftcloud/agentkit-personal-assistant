@@ -108,30 +108,60 @@ const fail = (code, message, status = 400) => Object.assign(new Error(message), 
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const CLIPBOARD_MAX_BYTES = 64 * 1024;
 const CLIPBOARD_TIMEOUT_MS = 2000;
+/** 本机剪贴板命令的原始字节按 UTF-8 → GB18030 → latin1 逐级解码，和云端 selection 读取同一口径。 */
+const CLIPBOARD_ENCODINGS = Object.freeze(['utf-8', 'gb18030']);
+export function decodeClipboardBytes(value) {
+  if (typeof value === 'string') return value;
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value ?? '');
+  if (!buffer.length) return '';
+  for (const encoding of CLIPBOARD_ENCODINGS) {
+    // ignoreBOM:true 与 Buffer.toString('utf8') 一致：合法 BOM 属于正文，不能被吞掉。
+    try { return new TextDecoder(encoding, { fatal: true, ignoreBOM: true }).decode(buffer); }
+    catch { /* 该编码解释不了这份字节，继续回退 */ }
+  }
+  // latin1 逐字节映射：内容仍然可逆，且不会出现 U+FFFD 这种不可恢复的替换字符。
+  return buffer.toString('latin1');
+}
+/**
+ * Windows PowerShell 5.1 把 stdout 重定向时按系统代码页（中文为 CP936）编码，
+ * 直接按 UTF-8 读会把中文变成乱码；显式把 OutputEncoding 切成 UTF-8。
+ */
+export const windowsClipboardReadArgs = () => Object.freeze(['-NoProfile', '-NonInteractive', '-Command',
+  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -Raw']);
+/**
+ * 写回使用 -EncodedCommand（UTF-16LE base64）。原来的 `Set-Clipboard -Value ${JSON.stringify(text)}`
+ * 是拼一条 PowerShell 命令行：文本里的双引号、反引号、$ 变量会被 PowerShell 解释，
+ * 中文虽然能过，但引号和 $ 会把内容写坏。单引号串 + '' 转义 + base64 传参不再经过任何 shell 解析。
+ */
+export const windowsClipboardWriteArgs = value => Object.freeze(['-NoProfile', '-NonInteractive', '-EncodedCommand',
+  Buffer.from(`Set-Clipboard -Value '${String(value ?? '').replace(/'/gu, "''")}'`, 'utf16le').toString('base64')]);
 const runClipboardReader = promisify(execFile);
 // execFile 在 stdout 超过 maxBuffer 时抛 ERR_CHILD_PROCESS_STDIO_MAXBUFFER；它说明「内容太大」，
 // 而不是「剪贴板坏了」，必须映射成 413 让面板给出「超过 64 KiB」的可照做提示。
 const isClipboardTooLarge = error => error?.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' || /maxbuffer/iu.test(String(error?.message || ''));
 /** Host 是普通 Node 进程：直接调系统剪贴板命令，不依赖浏览器权限。 */
 async function readHostClipboard({ execFileImpl = runClipboardReader } = {}) {
-  const options = { timeout: CLIPBOARD_TIMEOUT_MS, maxBuffer: CLIPBOARD_MAX_BYTES, windowsHide: true };
+  // encoding:'buffer'：剪贴板命令吐的是原始字节，先按字节收下来再决定用哪种字符集解码。
+  // 用默认 encoding:'utf8' 会把 GBK/latin1 字节直接替换成 U+FFFD，中文就丢了。
+  const options = { timeout: CLIPBOARD_TIMEOUT_MS, maxBuffer: CLIPBOARD_MAX_BYTES, windowsHide: true, encoding: 'buffer' };
   try {
     if (process.platform === 'darwin') {
       const { stdout } = await execFileImpl('/usr/bin/pbpaste', [], options);
-      return { text: String(stdout ?? '') };
+      return { text: decodeClipboardBytes(stdout) };
     }
     if (process.platform === 'win32') {
-      const { stdout } = await execFileImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-Clipboard -Raw'], options);
-      return { text: String(stdout ?? '').replace(/\r\n$/u, '') };
+      const { stdout } = await execFileImpl('powershell.exe', windowsClipboardReadArgs(), options);
+      return { text: decodeClipboardBytes(stdout).replace(/\r\n$/u, '') };
     }
     try {
       const { stdout } = await execFileImpl('wl-paste', ['--no-newline'], options);
-      return { text: String(stdout ?? '') };
+      return { text: decodeClipboardBytes(stdout) };
     } catch (error) {
       // 超长是内容问题，换 xclip 也一样超；直接上抛给外层映射 413，不误报「不可用」。
       if (isClipboardTooLarge(error)) throw error;
-      const { stdout } = await execFileImpl('xclip', ['-selection', 'clipboard', '-o'], options);
-      return { text: String(stdout ?? '') };
+      // 显式要 UTF8_STRING：不写就依赖 xclip 的默认 target，不同版本行为不一致。
+      const { stdout } = await execFileImpl('xclip', ['-selection', 'clipboard', '-o', '-target', 'UTF8_STRING'], options);
+      return { text: decodeClipboardBytes(stdout) };
     }
   } catch (error) {
     if (isClipboardTooLarge(error)) throw fail('PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE', '本机剪贴板内容超过 64 KiB，无法读取', 413);
@@ -155,14 +185,14 @@ async function writeHostClipboard(text, { execFileImpl = runClipboardReader } = 
   try {
     if (process.platform === 'darwin') return await pipeToClipboardWriter('/usr/bin/pbcopy', [], value);
     if (process.platform === 'win32') {
-      await execFileImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Set-Clipboard -Value ${JSON.stringify(value)}`],
-        { timeout: CLIPBOARD_TIMEOUT_MS, windowsHide: true });
+      await execFileImpl('powershell.exe', windowsClipboardWriteArgs(value), { timeout: CLIPBOARD_TIMEOUT_MS, windowsHide: true });
       return;
     }
     try {
       return await pipeToClipboardWriter('wl-copy', [], value);
     } catch {
-      return await pipeToClipboardWriter('xclip', ['-selection', 'clipboard'], value);
+      // stdin 用 utf8 写入；显式 target 让旧版/新版 xclip 都把字节标成 UTF8_STRING。
+      return await pipeToClipboardWriter('xclip', ['-selection', 'clipboard', '-target', 'UTF8_STRING'], value);
     }
   } catch {
     throw fail('PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE', '本机剪贴板暂时不可用', 503);
@@ -766,7 +796,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (operation === 'personal-assistant.clipboard.read') return readHostClipboard({ execFileImpl: clipboardExecFile });
     if (operation === 'personal-assistant.clipboard.write') {
       if (typeof payload.text !== 'string') throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '剪贴板内容格式错误');
-      await writeHostClipboard(payload.text);
+      await writeHostClipboard(payload.text, { execFileImpl: clipboardExecFile });
       return { written: true };
     }
     // 面板本机数据同样不依赖云端绑定：绑定/目录不可达时在内部降级（degraded:true）。
