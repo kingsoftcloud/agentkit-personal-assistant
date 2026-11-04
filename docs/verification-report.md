@@ -529,3 +529,40 @@ EXIT=0
 5. Windows `-EncodedCommand` 仅参数级单测。
 6. Host 单请求 15s 超时 vs 云端 busy 重试预算（20×1s）临界仍可能 504；客户端已幂等重发对账，根治需服务端收敛。
 7. 云端 events 的 cursor 是消息数组下标，snapshot/events 交错理论上仍可能重复或漏一条。
+
+## 7. 第三轮：部署边界与真机 A/B（2026-11-04）
+
+### 7.1 结论先行
+
+用户在本机安装新面板后仍报「中文复制粘贴乱码、对话偶发失败」。核查发现：**云端镜像锁定的仍然是 `main@30e98c9`（2026-11-02），比修复分支落后 10 个提交**。因此第二轮的修复全部没有生效——本地面板再新，云端执行体仍是旧逻辑。
+
+| 镜像 | 锁定提交 | 影响的修复 |
+| --- | --- | --- |
+| `deploy/personal-assistant-runtime` | `30e98c91` | 对话轮次稳定性、定时任务路由与重试 |
+| `deploy/personal-assistant-computer` | `30e98c91` | 桌面剪贴板 UTF-8 解码链、WS 续帧、locale 探测 |
+
+两个镜像都在 `agentengine-images` 仓库，制品由本仓库 `npm run build:artifacts`（要求 Node 22）产出 tar，镜像把 tar 解到 `/opt/agentkit/personal-assistant-computer`。本仓库 CI 只构建客户端与跑测试，**不含镜像构建**，所以「装插件」不会更新云端。
+
+### 7.2 真机 A/B 证据
+
+用 Node 22 重建制品（`sha256 1615790f…`，含 `decodeClipboardBuffer`/`pickDesktopLocale`），在本机以 amd64 构建出
+`pa-computer:verify` 镜像，再在原生 arm64 容器里装 Xvfb/xclip/xterm，用同一份剪贴板字节分别喂给
+**部署版 `30e98c9`** 和**当前分支**的 `runtime/desktop-session.mjs`：
+
+| 剪贴板字节 | 来源场景 | 部署版 `30e98c9` | 当前分支 |
+| --- | --- | --- | --- |
+| `e4b8ade69687e6b58be8af95`（UTF-8） | Chromium / GTK 应用 | `中文测试` | `中文测试` |
+| `d6d0cec4b2e2cad4`（GBK） | locale 非 UTF-8 的老应用 | `���Ĳ���` | `中文测试` |
+| 纯 ASCII | 任意 | 正确 | 正确 |
+
+写方向两者都是正确 UTF-8 字节，`TARGETS` 只广告 `{TARGETS, UTF8_STRING}`（xclip 0.13 的既有限制，见 §6.4）。
+**结论：GBK 字节在部署版被硬按 UTF-8 解码成 U+FFFD，正是用户看到的乱码形态；当前分支的解码链可完整还原。**
+
+### 7.3 镜像重建的两个硬约束
+
+1. **Debian 包版本已翻页**：`sources.lock.json` 钉的 `chromium=156.0.8078.73-1~deb12u1`、`chromium-l10n` 已从 bookworm-security 下架，现存 `156.0.8078.79-1~deb12u1`。直接重建会在 apt 阶段 `exit 100`；按 README 约定必须同时 bump ARG、`sources.lock.json` 和镜像 digest，并重跑云电脑冒烟。
+2. **发布不由本仓库完成**：`agentengine-images` 只提供构建合同（Dockerfile + sources.lock），没有推送/滚动脚本；本机 `~/.kube/agentengine-{pre,online}` 两个集群里也没有 personal-assistant 工作负载，云电脑由上层平台拉起。
+
+### 7.4 顺带修复
+
+云端 `turns[].error` 既可能是字符串也可能是 `{code,message}` 对象，旧代码 `String(error)` 渲染成 `[object Object]`，用户完全看不到失败原因。已改为提取 `code`/`message`/嵌套 `error.message` 并映射为中文，`TRANSIENT_TURN_ERRORS` 判定同步改为按错误码（对象形态同样成立），新增 7 条用例。
