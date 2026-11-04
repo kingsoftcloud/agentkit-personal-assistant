@@ -135,6 +135,15 @@ export const windowsClipboardReadArgs = () => Object.freeze(['-NoProfile', '-Non
  */
 export const windowsClipboardWriteArgs = value => Object.freeze(['-NoProfile', '-NonInteractive', '-EncodedCommand',
   Buffer.from(`Set-Clipboard -Value '${String(value ?? '').replace(/'/gu, "''")}'`, 'utf16le').toString('base64')]);
+/**
+ * macOS 的 pbpaste/pbcopy 在没有显式文本编码时按 **MacRoman** 读写剪贴板：
+ * 中文读出来逐字变成「????」，写进去则变成「‰Ω†Â•Ω」，而剪贴板里 utf8/ut16 口味
+ * 本身是好的——两个命令自洽、和原生应用却对不上，用户看到的就是复制粘贴全乱码。
+ * 这两个命令都尊重 __CF_USER_TEXT_ENCODING：0x1F5 是系统脚本槽位，
+ * 0x08000100 是 kCFStringEncodingUTF8，钉死成 UTF-8 后两个方向都正常。
+ */
+const DARWIN_CLIPBOARD_ENCODING = '0x1F5:0x08000100:0';
+const darwinClipboardEnv = () => ({ ...process.env, __CF_USER_TEXT_ENCODING: DARWIN_CLIPBOARD_ENCODING });
 const runClipboardReader = promisify(execFile);
 // execFile 在 stdout 超过 maxBuffer 时抛 ERR_CHILD_PROCESS_STDIO_MAXBUFFER；它说明「内容太大」，
 // 而不是「剪贴板坏了」，必须映射成 413 让面板给出「超过 64 KiB」的可照做提示。
@@ -146,7 +155,8 @@ async function readHostClipboard({ execFileImpl = runClipboardReader } = {}) {
   const options = { timeout: CLIPBOARD_TIMEOUT_MS, maxBuffer: CLIPBOARD_MAX_BYTES, windowsHide: true, encoding: 'buffer' };
   try {
     if (process.platform === 'darwin') {
-      const { stdout } = await execFileImpl('/usr/bin/pbpaste', [], options);
+      // 不带 env 的话 pbpaste 会把中文按 MacRoman 输出成一串「?」，直接丢字。
+      const { stdout } = await execFileImpl('/usr/bin/pbpaste', [], { ...options, env: darwinClipboardEnv() });
       return { text: decodeClipboardBytes(stdout) };
     }
     if (process.platform === 'win32') {
@@ -168,12 +178,12 @@ async function readHostClipboard({ execFileImpl = runClipboardReader } = {}) {
     throw fail('PERSONAL_ASSISTANT_CLIPBOARD_UNAVAILABLE', '本机剪贴板暂时不可用', 503);
   }
 }
-function pipeToClipboardWriter(command, args, value) {
+function pipeToClipboardWriter(command, args, value, { env } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
     const finish = error => { if (settled) return; settled = true; clearTimeout(timer); if (error) reject(error); else resolve(); };
     const timer = setTimeout(() => { child.kill?.('SIGKILL'); finish(new Error('clipboard write timeout')); }, CLIPBOARD_TIMEOUT_MS);
-    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
+    const child = spawn(command, args, { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, ...(env ? { env } : {}) });
     child.once('error', error => finish(error));
     child.once('exit', code => finish(code === 0 ? null : new Error(`clipboard writer exited ${code}`)));
     child.stdin?.end(value);
@@ -183,7 +193,9 @@ async function writeHostClipboard(text, { execFileImpl = runClipboardReader } = 
   const value = String(text ?? '');
   if (Buffer.byteLength(value, 'utf8') > CLIPBOARD_MAX_BYTES) throw fail('PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE', '剪贴板内容超过 64 KiB', 413);
   try {
-    if (process.platform === 'darwin') return await pipeToClipboardWriter('/usr/bin/pbcopy', [], value);
+    // 写方向同理：不带 env 时 pbcopy 会把 UTF-8 当成 MacRoman 存进去，
+    // 原生应用粘出来就是「‰Ω†Â•Ω」。
+    if (process.platform === 'darwin') return await pipeToClipboardWriter('/usr/bin/pbcopy', [], value, { env: darwinClipboardEnv() });
     if (process.platform === 'win32') {
       await execFileImpl('powershell.exe', windowsClipboardWriteArgs(value), { timeout: CLIPBOARD_TIMEOUT_MS, windowsHide: true });
       return;

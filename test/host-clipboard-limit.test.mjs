@@ -75,3 +75,21 @@ test('Host 读取本机剪贴板成功：透传文本，且读路径同样在绑
   const gateway = createPersonalAssistantHostGateway(config, { env: {}, clipboardExecFile: async () => ({ stdout: '从本机复制的内容\n' }) });
   assert.deepEqual(await gateway.request('personal-assistant.clipboard.read'), { text: '从本机复制的内容\n' });
 });
+
+// macOS 的 pbpaste/pbcopy 默认按 MacRoman 处理文本：中文读出来是「????」、写进去是
+// 「‰Ω†Â•Ω」。必须显式带上 __CF_USER_TEXT_ENCODING 的 UTF-8 编码才能两个方向都对。
+test('macOS 读本机剪贴板时显式指定 UTF-8 文本编码', { skip: process.platform !== 'darwin' }, async () => {
+  const calls = [];
+  const gateway = createPersonalAssistantHostGateway(config, {
+    env: {},
+    clipboardExecFile: async (command, args, options) => {
+      calls.push({ command, args, env: options?.env });
+      return { stdout: Buffer.from('你好世界', 'utf8') };
+    },
+  });
+  const value = await gateway.request('personal-assistant.clipboard.read');
+  assert.equal(value.text, '你好世界');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, '/usr/bin/pbpaste');
+  assert.equal(calls[0].env?.__CF_USER_TEXT_ENCODING, '0x1F5:0x08000100:0');
+});
