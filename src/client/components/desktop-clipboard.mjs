@@ -47,6 +47,27 @@ export function createClipboardEchoGuard({ windowMs = CLIPBOARD_ECHO_WINDOW_MS, 
 }
 
 const defaultEchoGuard = createClipboardEchoGuard();
+const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * 应用把内容发布到 X selection 是**异步**的：合成 Ctrl+C 之后立刻读云端剪贴板，
+ * 拿到的往往还是上一次的内容。150ms 一把梭的写法让「应用根本没复制」和「读得太早」
+ * 看起来一模一样——用户看到的就是「网页正文根本没法复制」。
+ * 这里按调用方给的间隔轮询，直到内容相对复制前的基线发生变化。
+ */
+export const COPY_POLL_DELAYS_MS = Object.freeze([140, 200, 280, 400, 600]);
+
+/** 写进云端剪贴板的内容再读回来是否已经变了形；读回失败/为空都不算不一致（不阻断流程）。 */
+async function clipboardRoundTripMismatch({ readCloud, text, verifyDelayMs = 0, sleep = defaultSleep }) {
+  try {
+    if (verifyDelayMs) await sleep(verifyDelayMs);
+    const value = clipboardTextOf(await readCloud());
+    if (!value) return null;
+    // 云端可能统一行尾；除此之外任何差异都意味着字符集被动过。
+    const normalize = input => String(input ?? '').replace(/\r\n/gu, '\n');
+    return normalize(value) === normalize(text) ? null : value;
+  } catch { return null; }
+}
 
 /** 按 UTF-8 字符边界截断，保证不产生半个汉字（与云端 desktop-session 的截断口径一致）。 */
 export function truncateUtf8(text, maxBytes = MAX_CLIPBOARD_BYTES) {
@@ -216,8 +237,12 @@ export function isCopyShortcut(event) {
 /**
  * 粘贴：本地剪贴板 → 云电脑剪贴板 → 云桌面 Ctrl+V。
  * notify 负责把结果写进面板上的轻提示；返回结构化结果方便调用方/测试断言。
+ *
+ * 传了 readCloud 时，写完会回读一次做**字节级对账**：云端旧版本的桌面 agentd 把剪贴板
+ * 字节硬按 UTF-8 解码（GBK/latin1 都解坏），写进去的中文读回来已经不是原文。这时继续按
+ * Ctrl+V 只会把乱码贴进应用，所以宁可停在提示上，也不要让用户以为粘贴成功。
  */
-export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = () => {}, echoGuard = defaultEchoGuard } = {}) {
+export async function pasteToCloud({ readLocal, writeCloud, readCloud, sendKeys, notify = () => {}, echoGuard = defaultEchoGuard, verifyDelayMs = 80, sleep = defaultSleep } = {}) {
   const read = readLocal || (() => readLocalClipboard());
   let text = '';
   try { text = await read(); }
@@ -227,6 +252,13 @@ export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = (
   try { await writeCloud(text); }
   catch (error) { notify(clipboardFriendlyError(error) || '写入云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
   echoGuard.remember(text);
+  if (typeof readCloud === 'function') {
+    const mismatch = await clipboardRoundTripMismatch({ readCloud, text, verifyDelayMs, sleep });
+    if (mismatch) {
+      notify('云端把剪贴板内容转坏了（读回来与写入不一致），已取消粘贴；升级云电脑镜像前请改用文件或对话传输');
+      return { ok: false, code: 'CLIPBOARD_ROUNDTRIP_MISMATCH', expected: text, actual: mismatch };
+    }
+  }
   if (typeof sendKeys === 'function') {
     let sent = false;
     try { sent = sendKeys(pasteShortcutEvents()) !== false; }
@@ -239,14 +271,37 @@ export async function pasteToCloud({ readLocal, writeCloud, sendKeys, notify = (
   return { ok: true };
 }
 
-/** 复制：云电脑剪贴板 → 本地剪贴板。 */
-export async function copyCloudClipboard({ readCloud, writeLocal, notify = () => {}, echoGuard = defaultEchoGuard } = {}) {
+/** 复制：云电脑剪贴板 → 本地剪贴板。
+ * 传了 previousText（复制前云端剪贴板的内容）时会轮询到内容变化为止：
+ * 否则「应用没响应复制」会被误判成「复制成功」，把旧内容写回本机剪贴板。 */
+export async function copyCloudClipboard({ readCloud, writeLocal, notify = () => {}, echoGuard = defaultEchoGuard, previousText = undefined, pollDelays = COPY_POLL_DELAYS_MS, sleep = defaultSleep } = {}) {
   const write = writeLocal || (text => writeLocalClipboard(text));
+  const hasPrevious = typeof previousText === 'string';
   let value;
-  try { value = await readCloud(); }
-  catch (error) { notify(clipboardFriendlyError(error) || '读取云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_READ_FAILED' }; }
-  const text = clipboardTextOf(value);
+  let text = '';
+  let failure = null;
+  // 第一次立即读；只有已知基线时才值得等应用把 selection 换掉。
+  const delays = hasPrevious ? [0, ...pollDelays] : [0];
+  for (const delay of delays) {
+    if (delay) await sleep(delay);
+    try { value = await readCloud(); failure = null; }
+    // 保留**首个**失败：轮询到后面可能换成「控制权变更」等次生错误，那不是用户该看到的原因。
+    catch (error) { if (!failure) failure = error; continue; }
+    text = clipboardTextOf(value);
+    if (hasPrevious && text === previousText) continue;
+    break;
+  }
+  if (failure) {
+    notify(clipboardFriendlyError(failure) || '读取云电脑剪贴板失败，请重试');
+    // 对外保持稳定的业务码：具体原因已经在提示文案里，调用方只需要知道「读失败了」。
+    return { ok: false, code: 'CLIPBOARD_READ_FAILED' };
+  }
   if (!text) { notify('云电脑剪贴板是空的，没有可复制的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
+  // 轮询到超时还是复制前那一段：应用没有响应这次复制，别把旧内容当成本次的结果。
+  if (hasPrevious && text === previousText) {
+    notify('云桌面没有响应这次复制，请先在云桌面里选中内容，再按 ⌘C');
+    return { ok: false, code: 'CLIPBOARD_NOT_COPIED', text };
+  }
   // 读回的是刚粘贴进去的内容：应用没有真正复制，别用回声覆盖本机剪贴板。
   if (echoGuard.isEcho(text)) { notify('云电脑剪贴板里还是本机刚粘贴的内容，没有可复制的新内容'); return { ok: true, echoed: true, text }; }
   const truncated = byteLength(text) > MAX_CLIPBOARD_BYTES;

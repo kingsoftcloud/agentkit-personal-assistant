@@ -522,10 +522,22 @@ test('Host 写入本机剪贴板返回 413：不退回浏览器剪贴板，面�
   assert.ok(fx.input, '桌面视图应渲染隐藏输入框来接收复制快捷键');
   fx.input.props.onKeyDown({ key: 'c', metaKey: true, type: 'keydown', preventDefault() {} });
   await new Promise(resolve => setTimeout(resolve, 220)); // 合成复制按键后有 150ms 窗口
-  const sent = fx.socket.sent.map(item => String(item)).map(item => { try { return JSON.parse(item); } catch { return null; } }).filter(Boolean);
-  const readMessage = sent.find(item => item.type === 'clipboard.read');
-  assert.ok(readMessage, '⌘C 应先向云桌面请求剪贴板内容');
-  fx.socket.onmessage({ data: JSON.stringify({ type: 'clipboard.response', requestId: readMessage.requestId, ok: true, value: { text: '云端应用里复制的内容' } }) });
+  // ⌘C 现在分两步读：先读复制前的基线，发完合成 Ctrl+C 后再读「变化后的内容」。
+  const answered = new Set();
+  const allSent = () => fx.socket.sent.map(item => String(item)).map(item => { try { return JSON.parse(item); } catch { return null; } }).filter(Boolean);
+  const answerReads = text => {
+    let answeredAny = false;
+    for (const item of allSent()) {
+      if (item.type !== 'clipboard.read' || answered.has(item.requestId)) continue;
+      answered.add(item.requestId);
+      answeredAny = true;
+      fx.socket.onmessage({ data: JSON.stringify({ type: 'clipboard.response', requestId: item.requestId, ok: true, value: { text } }) });
+    }
+    return answeredAny;
+  };
+  assert.ok(answerReads('复制前的旧内容'), '⌘C 应先向云桌面请求剪贴板内容');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(answerReads('云端应用里复制的内容'), '合成复制按键后应再读一次云端剪贴板');
   await new Promise(resolve => setTimeout(resolve, 50));
   await fx.mount();
   assert.ok(fx.requests.includes('personal-assistant.clipboard.write'), '复制方向应写 Host 本机剪贴板');

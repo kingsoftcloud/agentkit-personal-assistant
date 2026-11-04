@@ -76,7 +76,7 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard, clipboardTextOf } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
@@ -282,14 +282,17 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   // ⌘C：先把复制按键交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
   // 云端桌面始终是 Linux，不能把 macOS 的 Meta 映射为 Super_L，否则 Linux 应用不会执行复制。
   const copyCloudClipboardToLocal = async () => {
+    let previousText;
     if (!state.current.pressed.has('_copyShortcut')) {
       state.current.pressed.add('_copyShortcut');
       try {
+        // 先记下复制前的云端剪贴板：应用把内容发布到 selection 是异步的，
+        // 没有基线就分不清「应用没复制」和「读得太早」。
+        try { previousText = clipboardTextOf(await clipboardRef.current.read()); } catch { previousText = undefined; }
         sendDesktopKeys(copyShortcutEvents());
-        await new Promise(resolve => setTimeout(resolve, 150));
       } finally { state.current.pressed.delete('_copyShortcut'); }
     }
-    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
+    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify, previousText });
   };
   // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
   // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。
@@ -316,6 +319,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const pasteLocalClipboardToCloud = () => pasteToCloud({
     readLocal: () => readHostClipboard(),
     writeCloud: text => clipboardRef.current.write(text),
+    readCloud: () => clipboardRef.current.read(),
     sendKeys: sendDesktopKeys,
     notify: clipboardNotify,
   });
@@ -324,6 +328,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const pasteTextToCloud = text => pasteToCloud({
     readLocal: async () => String(text ?? ''),
     writeCloud: value => clipboardRef.current.write(value),
+    readCloud: () => clipboardRef.current.read(),
     sendKeys: sendDesktopKeys,
     notify: clipboardNotify,
   });
