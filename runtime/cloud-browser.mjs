@@ -16,6 +16,8 @@ export const BROWSER_TOOLS = Object.freeze([
 const DEFAULT_CHROMIUM = '/usr/bin/chromium';
 const DEFAULT_PROXY = 'socks5://127.0.0.1:8899';
 const LOAD_TIMEOUT_MS = 20_000;
+const DEFAULT_NAVIGATION_MIN_INTERVAL_MS = 800;
+const DEFAULT_CHALLENGE_COOLDOWN_MS = 30_000;
 export const MAX_SNAPSHOT_BYTES = 32 * 1024;
 export const MAX_SCREENSHOT_BASE64 = 4 * 1024 * 1024;
 export const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
@@ -27,9 +29,25 @@ const MAX_SELECTOR_BYTES = 1024;
 const MAX_TITLE_BYTES = 1024;
 const VIEWPORT = Object.freeze({ width: 1280, height: 800 });
 const IDLE_TIMEOUT_MS = 600_000;
+const CHALLENGE_WARNING = '检测到验证码或站点风控页，已暂停自动点击/输入；请在可见云浏览器中手动完成验证后再继续';
 
 const fail = (message, code = 'ASSISTANT_BROWSER_REFUSED') => Object.assign(new Error(message), { code });
 const delay = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms));
+
+/**
+ * 识别常见验证码/反自动化页面。这里只做合规的风险提示与停手，
+ * 不尝试绕过验证码、伪造浏览器指纹或自动提交验证。
+ */
+export function detectBrowserChallenge({ url = '', title = '', text = '' } = {}) {
+  const haystack = [url, title, text].map(value => String(value ?? '')).join('\n').slice(0, 16_384);
+  if (!haystack) return null;
+  const patterns = [
+    /captcha|re-?captcha|hcaptcha|verify\s+(?:you\s+are\s+)?human|security\s+check|unusual\s+traffic|access\s+denied|too\s+many\s+requests|rate\s*limit|challenge/iu,
+    /验证码|人机验证|滑块验证|安全验证|访问频繁|异常流量|请求过于频繁|(?:请|需要)(?:完成|通过)(?:验证码|人机|安全|滑块)验证|风控/iu,
+  ];
+  const matched = patterns.some(pattern => pattern.test(haystack));
+  return matched ? { warning: CHALLENGE_WARNING, code: 'ASSISTANT_BROWSER_CHALLENGE_REQUIRED' } : null;
+}
 
 /** Resolve the image-provided Chromium and egress proxy. Missing either refuses the capability. */
 export function resolveCloudBrowser({ env = {} } = {}) {
@@ -240,7 +258,7 @@ const KEY_ALLOWLIST = Object.freeze({
   Space: { key: ' ', code: 'Space', windowsVirtualKeyCode: 32 },
 });
 
-const PAGE_STATE_EXPRESSION = '({ url: location.href, title: document.title })';
+const PAGE_STATE_EXPRESSION = '(() => ({ url: location.href, title: document.title, text: document.body ? String(document.body.innerText || document.body.textContent || "").slice(0, 8192) : "" }))()';
 const RESOURCE_EXPRESSION = "(() => { try { return performance.getEntriesByType('resource').slice(0, 200).map(entry => entry.name); } catch { return []; } })()";
 
 function snapshotExpression() {
@@ -293,6 +311,8 @@ export function createCloudBrowser({
   kill, launchTimeoutMs = DEVTOOLS_LAUNCH_TIMEOUT_MS, commandTimeoutMs = CDP_COMMAND_TIMEOUT_MS,
   beforeCommand = null, transportFactory = startCdpTransport,
   userDataDir, preserveUserDataDir = false,
+  navigationMinIntervalMs = DEFAULT_NAVIGATION_MIN_INTERVAL_MS,
+  challengeCooldownMs = DEFAULT_CHALLENGE_COOLDOWN_MS,
 } = {}) {
   const root = checkedWorkspace(workspace);
   const resolution = resolveCloudBrowser({ env });
@@ -325,8 +345,12 @@ export function createCloudBrowser({
   const removeFile = typeof removeFileHook === 'function' ? removeFileHook : path => rm(path, { force: true });
   const idleMs = Number.isSafeInteger(idleTimeoutMs) && idleTimeoutMs > 0 ? idleTimeoutMs : IDLE_TIMEOUT_MS;
   const commandMs = Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0 ? commandTimeoutMs : CDP_COMMAND_TIMEOUT_MS;
+  const navigationGapMs = Number.isSafeInteger(navigationMinIntervalMs) && navigationMinIntervalMs >= 0 ? navigationMinIntervalMs : DEFAULT_NAVIGATION_MIN_INTERVAL_MS;
+  const challengePauseMs = Number.isSafeInteger(challengeCooldownMs) && challengeCooldownMs >= 0 ? challengeCooldownMs : DEFAULT_CHALLENGE_COOLDOWN_MS;
 
   let transport = null, targetId = null, pageSession = null, launching = null, disposed = false, disposing, idleTimer = null, lastUrl = null;
+  const lastNavigationByHost = new Map();
+  let challengeState = null;
   let inputGeneration = 0, releasingInput, desktopTargetOpening;
   const closingTargets = new Set();
   const heldMouseButtons = new Map(), heldKeys = new Map();
@@ -383,6 +407,35 @@ export function createCloudBrowser({
   }
 
   const throwIfAborted = signal => { if (signal?.aborted) throw fail('云端浏览器操作已取消', 'ASSISTANT_BROWSER_ABORTED'); };
+  const clockNow = () => {
+    const value = Number(now());
+    return Number.isFinite(value) ? value : Date.now();
+  };
+  const activeChallenge = () => {
+    if (!challengeState) return null;
+    if (clockNow() < challengeState.until) return challengeState;
+    challengeState = null;
+    return null;
+  };
+  const challengeFailure = () => fail(CHALLENGE_WARNING, 'ASSISTANT_BROWSER_CHALLENGE_REQUIRED');
+  const rejectAutomatedChallengeAction = () => { if (activeChallenge()) throw challengeFailure(); };
+  const noteChallenge = (url, state) => {
+    const challenge = detectBrowserChallenge({ url: url.href, title: state?.title, text: state?.text });
+    if (challenge) {
+      challengeState = { host: url.hostname, until: clockNow() + challengePauseMs, warning: challenge.warning };
+      return challenge.warning;
+    }
+    if (challengeState?.host === url.hostname) challengeState = null;
+    return null;
+  };
+  async function paceNavigation(host, signal) {
+    const previous = lastNavigationByHost.get(host);
+    const elapsed = previous === undefined ? navigationGapMs : clockNow() - previous;
+    const waitMs = previous === undefined ? 0 : Math.max(0, navigationGapMs - elapsed);
+    if (waitMs > 0) await delay(waitMs);
+    throwIfAborted(signal);
+    lastNavigationByHost.set(host, clockNow());
+  }
   function ensureUsable() {
     if (disposed) throw fail('云端浏览器已关闭', 'ASSISTANT_BROWSER_DISPOSED');
     if (!resolution.available) throw fail(resolution.reason || '云端浏览器不可用', 'ASSISTANT_BROWSER_UNAVAILABLE');
@@ -633,7 +686,7 @@ export function createCloudBrowser({
     const closingTarget = targetId;
     const generation = inputGeneration;
     const authorize = (method, params = {}) => trusted ? Promise.resolve() : checkCommand(method, params, 'browser', generation);
-    if (!current) { clearIdle(); lastUrl = null; return; }
+    if (!current) { clearIdle(); lastUrl = null; challengeState = null; lastNavigationByHost.clear(); return; }
     if (closingTarget) {
       await authorize('Target.closeTarget', { targetId: closingTarget });
       if (!trusted) checkGeneration(generation);
@@ -648,7 +701,7 @@ export function createCloudBrowser({
     if (!trusted) checkGeneration(generation);
     await current.dispose();
     forgetInput(current);
-    if (transport === current) { clearIdle(); transport = null; targetId = null; pageSession = null; lastUrl = null; }
+    if (transport === current) { clearIdle(); transport = null; targetId = null; pageSession = null; lastUrl = null; challengeState = null; lastNavigationByHost.clear(); }
   }
 
   async function evaluate(expression) {
@@ -691,6 +744,8 @@ export function createCloudBrowser({
     const url = desktopPolicy(String(rawUrl));
     ensureUsable();
     throwIfAborted(signal);
+    if (activeChallenge()?.host === url.hostname) throw challengeFailure();
+    await paceNavigation(url.hostname, signal);
     const result = await pageCommand('Page.navigate', { url: url.href });
     // A download response aborts the navigation; that is not a navigation failure.
     if (result?.errorText && result.errorText !== 'net::ERR_ABORTED') throw fail(`页面导航失败: ${String(result.errorText).slice(0, 120)}`, 'ASSISTANT_BROWSER_NAVIGATION_FAILED');
@@ -701,6 +756,8 @@ export function createCloudBrowser({
     try { finalUrl = desktopPolicy(finalRaw); }
     catch { throw fail('页面跳转到被拒绝的地址', 'ASSISTANT_BROWSER_URL_REFUSED'); }
     const warnings = await waitForResources();
+    const challengeWarning = noteChallenge(finalUrl, state);
+    if (challengeWarning && !warnings.includes(challengeWarning)) warnings.push(challengeWarning);
     lastUrl = finalUrl.href;
     touch();
     return { url: finalUrl.href, title: sliceUtf8(typeof state?.title === 'string' ? state.title : '', MAX_TITLE_BYTES).text, warnings };
@@ -719,13 +776,16 @@ export function createCloudBrowser({
       text: sliceUtf8(typeof link?.text === 'string' ? link.text : '', 256).text,
       href: sliceUtf8(typeof link?.href === 'string' ? link.href : '', 2048).text,
     })) : [];
+    const challengeWarning = noteChallenge(new URL(url), { title: state.title, text: text.text });
     touch();
     return { url, title: sliceUtf8(typeof state.title === 'string' ? state.title : '', MAX_TITLE_BYTES).text,
-      text: text.text, truncated: text.truncated, bytes: text.bytes, links };
+      text: text.text, truncated: text.truncated, bytes: text.bytes, links,
+      warnings: challengeWarning ? [challengeWarning] : [] };
   }
 
   async function click(args) {
     requirePage();
+    rejectAutomatedChallengeAction();
     const generation = inputGeneration;
     const selector = selectorArgument(args?.selector);
     const geometry = await evaluate(clickExpression(selector));
@@ -746,6 +806,7 @@ export function createCloudBrowser({
 
   async function type(args) {
     requirePage();
+    rejectAutomatedChallengeAction();
     const generation = inputGeneration;
     const text = boundedString(args?.text, MAX_TYPE_BYTES, '输入文本');
     if (!text) throw fail('输入文本不能为空', 'ASSISTANT_BROWSER_INVALID_ARGUMENT');
@@ -762,6 +823,7 @@ export function createCloudBrowser({
 
   async function press(args) {
     requirePage();
+    rejectAutomatedChallengeAction();
     const generation = inputGeneration;
     const keyName = boundedString(args?.key, 64, '按键名', { required: true });
     const key = KEY_ALLOWLIST[keyName];
@@ -833,6 +895,7 @@ export function createCloudBrowser({
   }
 
   async function download(args) {
+    rejectAutomatedChallengeAction();
     const timeoutMs = downloadTimeout(args?.timeoutMs);
     const rawUrl = args?.url === undefined ? null : boundedString(args.url, 4096, '下载地址', { required: true });
     const selector = args?.selector === undefined ? null : selectorArgument(args.selector);
@@ -878,10 +941,10 @@ function browserOutput(properties, required, render) {
     },
     {
       name: 'cloud_browser_snapshot',
-      description: 'Read the current page as bounded text (at most 32 KiB), its title, URL and up to 200 links. Prefer this over screenshots when reading content.',
+      description: 'Read the current page as bounded text (at most 32 KiB), its title, URL, up to 200 links and any CAPTCHA/risk warning. Prefer this over screenshots when reading content.',
       parameters: objectSchema(),
-      output: browserOutput({ url: { type: 'string' }, title: { type: 'string' }, text: { type: 'string' }, truncated: { type: 'boolean' }, bytes: { type: 'number' }, links: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, href: { type: 'string' } }, required: ['text', 'href'], additionalProperties: false } } }, ['url', 'title', 'text', 'truncated', 'bytes', 'links'],
-        value => `${value.title || '(无标题)'}\n${value.url}\n${value.truncated ? '(内容已截断)' : ''}\n${value.text}`),
+      output: browserOutput({ url: { type: 'string' }, title: { type: 'string' }, text: { type: 'string' }, truncated: { type: 'boolean' }, bytes: { type: 'number' }, links: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, href: { type: 'string' } }, required: ['text', 'href'], additionalProperties: false } }, warnings: stringList }, ['url', 'title', 'text', 'truncated', 'bytes', 'links', 'warnings'],
+        value => `${value.title || '(无标题)'}\n${value.url}\n${value.warnings?.length ? `提示: ${value.warnings.join(', ')}\n` : ''}${value.truncated ? '(内容已截断)\n' : ''}${value.text}`),
       execute: () => snapshot(),
     },
     {

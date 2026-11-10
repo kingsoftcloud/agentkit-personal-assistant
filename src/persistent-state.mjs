@@ -49,7 +49,9 @@ export class PersonalAssistantStateStore {
   async read(name) {
     try {
       const parsed = JSON.parse(await readFile(this.file(name), 'utf8'));
-      return Array.isArray(parsed) ? parsed : [];
+      // 非数组表示状态损坏；不能当空库返回，否则下一次写会覆盖原历史。
+      if (!Array.isArray(parsed)) throw new TypeError('state collection must be an array');
+      return parsed;
     } catch (error) {
       if (error?.code === 'ENOENT') return [];
       throw Object.assign(new Error(`state file ${name} is invalid`), { code: 'STATE_CORRUPT', cause: error });

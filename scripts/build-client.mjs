@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build, context } from 'esbuild';
@@ -22,6 +22,8 @@ const outDirArg = argv.includes('--out-dir') ? argv[argv.indexOf('--out-dir') + 
 const outDir = outDirArg ? resolve(outDirArg.replace(/^~(?=$|\/)/u, process.env.HOME || '~')) : resolve(root, 'dist');
 
 const stamp = new Date().toISOString();
+const packageManifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
+const clientBuild = `${packageManifest.version || 'unknown'} @ ${stamp}`;
 
 const options = {
   absWorkingDir: root,
@@ -36,7 +38,7 @@ const options = {
   metafile: true,
   logLevel: 'silent',
   // 面板可在页脚渲染构建时间，便于确认 Cmd+R 后拿到的是最新产物。
-  define: { __PA_CLIENT_BUILD__: JSON.stringify(stamp) },
+  define: { __PA_CLIENT_BUILD__: JSON.stringify(clientBuild) },
 };
 
 function verifiedOutput(result) {

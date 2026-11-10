@@ -66,8 +66,11 @@ const results = [
     ['plugin/runtime/check-manifest.mjs', join(root, 'runtime', 'check-manifest.mjs')],
   ]),
   await pack('computer', [
+    ['package.json', join(root, 'package.json')],
+    ['personal-assistant.plugin.json', join(root, 'personal-assistant.plugin.json')],
     ['bin/computer-agentd', join(root, 'scripts', 'computer-agentd-launcher.sh')],
     ['runtime/computer-agentd.mjs', join(root, 'runtime', 'computer-agentd.mjs')],
+    ['runtime/build-info.mjs', join(root, 'runtime', 'build-info.mjs')],
     ['runtime/desktop-permit.mjs', join(root, 'runtime', 'desktop-permit.mjs')],
     ['runtime/cloud-browser.mjs', join(root, 'runtime', 'cloud-browser.mjs')],
     ['runtime/cloud-browser-cdp.mjs', join(root, 'runtime', 'cloud-browser-cdp.mjs')],

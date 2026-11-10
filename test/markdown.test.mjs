@@ -35,6 +35,23 @@ test('块解析：引用、分隔线与未闭合围栏', () => {
   assert.equal(blocks[2].text, '没有收尾');
 });
 
+test('块解析：GFM 表格和列对齐', () => {
+  const blocks = parseMarkdown([
+    '| 项目 | 数量 | 备注 |',
+    '| :--- | ---: | :---: |',
+    '| **模型** | 2 | `稳定` |',
+    '| 浏览器 | 1 | 可用 |',
+  ].join('\n'));
+  assert.deepEqual(blocks, [{
+    type: 'table',
+    headers: ['项目', '数量', '备注'],
+    alignments: ['left', 'right', 'center'],
+    rows: [['**模型**', '2', '`稳定`'], ['浏览器', '1', '可用']],
+  }]);
+  const escaped = parseMarkdown('| 名称 | 说明 |\n| --- | --- |\n| A\\|B | 保留\\*号 |')[0];
+  assert.deepEqual(escaped.rows, [['A|B', '保留\\*号']]);
+});
+
 test('行内解析：粗体、斜体、行内代码与链接', () => {
   assert.deepEqual(parseInline('**粗** *斜* `码` [链接](https://example.com)').map(node => node.type), ['strong', 'text', 'em', 'text', 'code', 'text', 'link']);
   const link = parseInline('[文档](https://example.com/a)').find(node => node.type === 'link');
@@ -53,4 +70,17 @@ test('渲染：把块映射成元素树，链接带安全属性', () => {
   assert.equal(link.props.href, 'https://example.com');
   assert.equal(link.props.rel, 'noreferrer noopener');
   assert.equal(link.props.target, '_blank');
+});
+
+test('渲染：表格使用 thead/tbody，并在单元格中保留行内 Markdown', () => {
+  const h = (tag, props, ...children) => ({ tag, props: props ?? {}, children: children.flat() });
+  const tree = renderMarkdown(h, '| 项目 | 结果 |\n| --- | :---: |\n| **模型** | `通过` |', {});
+  assert.equal(tree[0].tag, 'div');
+  assert.equal(tree[0].children[0].tag, 'table');
+  const table = tree[0].children[0];
+  assert.equal(table.children[0].tag, 'thead');
+  assert.equal(table.children[1].tag, 'tbody');
+  assert.equal(table.children[0].children[0].children[1].props.style.textAlign, 'center');
+  assert.equal(table.children[1].children[0].children[0].children[0].tag, 'strong');
+  assert.equal(table.children[1].children[0].children[1].children[0].tag, 'code');
 });

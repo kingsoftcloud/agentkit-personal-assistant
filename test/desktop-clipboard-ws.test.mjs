@@ -90,7 +90,10 @@ test('可控桌面通过 WS 读写剪贴板，broker 请求带租约且 value �
   client.send({ type: 'clipboard.read', requestId: 'clip-read-1' });
   const read = await client.next(value => value.type === 'clipboard.response' && value.requestId === 'clip-read-1');
   assert.deepEqual(read, { type: 'clipboard.response', requestId: 'clip-read-1', ok: true, value: { text: '云电脑剪贴板' } });
-  assert.deepEqual(clipboardActionCalls(calls)[0].body, { botId: 'writer', taskId: 'task-1', leaseId: 'lease-1', action: 'clipboard.read', args: {} });
+  assert.deepEqual(clipboardActionCalls(calls)[0].body, {
+    botId: 'writer', taskId: 'task-1', leaseId: 'lease-1', sessionId: 'session-1', controlEpoch: 0,
+    action: 'clipboard.read', args: {},
+  });
   client.send({ type: 'clipboard.write', requestId: 'clip-write-1', text: '本地复制 → 云电脑' });
   const write = await client.next(value => value.type === 'clipboard.response' && value.requestId === 'clip-write-1');
   assert.deepEqual(write, { type: 'clipboard.response', requestId: 'clip-write-1', ok: true, value: { written: true } });
@@ -137,7 +140,7 @@ test('handoff 未持有控制权时 clipboard 返回 409，不误用旁观租约
   client.send({ type: 'clipboard.write', requestId: 'handoff-write', text: 'x', controlEpoch: 0 });
   const denied = await client.next(value => value.requestId === 'handoff-write');
   assert.equal(denied.ok, false);
-  assert.equal(denied.error.code, 'DESKTOP_CONTROL_EPOCH_CHANGED');
+  assert.equal(denied.error.code, 'COMPUTER_LEASE_REQUIRED');
   assert.equal(denied.error.status, 409);
   assert.equal(clipboardActionCalls(calls).length, 0);
 });

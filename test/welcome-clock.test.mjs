@@ -80,3 +80,15 @@ test('欢迎页有云助理磁贴：先确认地址就绪，再让 launcher 打�
   // runtime 晚于欢迎页就绪时要轮询重试，不能只弹一次「还在启动」。
   assert.match(html, /setInterval\(refreshDshWeb, 2000\)/u);
 });
+
+test('欢迎页不重复绘制由真实桌面提供的底部 Dock', async () => {
+  const html = await readFile(join(webDir, 'welcome.html'), 'utf8');
+  assert.doesNotMatch(html, /\.dock\s*\{/u);
+  assert.doesNotMatch(html, /class="dock"/u);
+  assert.doesNotMatch(html, /aria-label="快捷入口"/u);
+  // 固定应用仍通过欢迎页磁贴提供入口，不能因移除重复 Dock 丢失功能。
+  for (const action of ['terminal', 'browser', 'files', 'dsh', 'workspace']) {
+    assert.match(html, new RegExp(`data-action="${action}"`, 'u'));
+  }
+  assert.match(html, /grid-template-columns:repeat\(5,84px\)/u);
+});

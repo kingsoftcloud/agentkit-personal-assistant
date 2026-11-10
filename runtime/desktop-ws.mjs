@@ -319,11 +319,16 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
             if (claims?.mode === 'read') throw Object.assign(new Error('只读授权不能读写剪贴板'), { code: 'DESKTOP_READ_ONLY', status: 403 });
             if (!state.sessionId) throw Object.assign(new Error('desktop session is not open'), { code: 'DESKTOP_SESSION_NOT_FOUND', status: 404 });
             if (state.idle) throw Object.assign(new Error('桌面已空闲，请先恢复连接'), { code: 'DESKTOP_SESSION_IDLE', status: 409 });
-            if (state.handoff && (!state.leaseId || body.controlEpoch !== state.controlEpoch)) throw Object.assign(new Error('剪贴板未持有当前控制权'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
+            if (state.handoff && !state.leaseId) throw Object.assign(new Error('当前没有桌面控制租约，请先接管云电脑'), { code: 'COMPUTER_LEASE_REQUIRED', status: 409 });
+            if (state.handoff && body.controlEpoch !== state.controlEpoch) throw Object.assign(new Error('剪贴板控制代次已改变，请重新接管后再试'), { code: 'DESKTOP_CONTROL_EPOCH_CHANGED', status: 409 });
             if (body.type === 'clipboard.write' && typeof body.text !== 'string') throw Object.assign(new Error('剪贴板文本必须是字符串'), { code: 'CLIPBOARD_TEXT_INVALID', status: 400 });
             if (body.type === 'clipboard.write' && Buffer.byteLength(body.text, 'utf8') > DESKTOP_CLIPBOARD_MAX_BYTES) throw Object.assign(new Error('剪贴板文本不能超过 64 KiB'), { code: 'CLIPBOARD_TEXT_TOO_LARGE', status: 413 });
             brokerStarted = true;
-            const value = await brokerDesktopRequest('/broker/action', { botId: state.botId, taskId: state.taskId, leaseId: state.leaseId, action: body.type, args: body.type === 'clipboard.write' ? { text: body.text } : {} });
+            const value = await brokerDesktopRequest('/broker/action', {
+              botId: state.botId, taskId: state.taskId, leaseId: state.leaseId,
+              sessionId: state.sessionId, controlEpoch: state.controlEpoch,
+              action: body.type, args: body.type === 'clipboard.write' ? { text: body.text } : {},
+            });
             if (state.closed) return;
             send({ type: 'clipboard.response', requestId, ok: true, value });
             return;
