@@ -189,9 +189,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const [stageBox, setStageBox] = useState(null);
   const controlRef = useRef(null);
   const clipboardRef = useRef(null), clipboardTimerRef = useRef(null);
-  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null), stageAreaRef = useRef(null);
+  const canvasRef = useRef(null), inputRef = useRef(null), viewRef = useRef(null), cursorRef = useRef(null), stageAreaRef = useRef(null), controlCapsuleRef = useRef(null);
   const fullscreenRef = useRef(nativeFullscreen); fullscreenRef.current = nativeFullscreen;
-  const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false });
+  const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false, controlError: '' });
   state.current.botId = botId;
   const rpc = async (operation, payload = {}) => {
     if (typeof request !== 'function') throw new Error('DSH Host Host 尚未连接');
@@ -220,7 +220,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       if (value.phase === 'observe') { current.pressed.clear(); current.buttons.clear(); }
       if (current.mounted) { setReadOnly(value.readOnly); setControlPhase(value.phase); }
     },
-    failed: message => { if (state.current.mounted) setNotice(message); },
+    failed: message => { state.current.controlError = message || '控制权暂不可用'; if (state.current.mounted) setNotice(message); },
   });
   // 剪贴板请求复用同一条桌面 WS（云端 desktop-ws 的 clipboard.read / clipboard.write），
   // 用 requestId 关联回复；旧版云端不认这两个消息类型，超时后给明确提示而不是转圈。
@@ -287,6 +287,27 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     for (const event of events) sent = input(event) || sent;
     return sent;
   };
+  // 剪贴板读写和桌面输入共用 human 控制租约。旁观状态下先申请接管并等待
+  // 服务端回执，避免写入剪贴板先于 lease 成功而稳定收到 409。
+  const ensureClipboardControl = async () => {
+    const current = state.current;
+    const snapshot = controlRef.current?.snapshot;
+    if (!current.session || current.socket?.readyState !== 1) { clipboardNotify('云电脑尚未连接，请先打开桌面'); return false; }
+    if (snapshot && snapshot.phase === 'controlling' && snapshot.readOnly === false) return true;
+    if (current.suspended || current.resuming) { clipboardNotify('云电脑正在恢复，请稍候再试'); return false; }
+    if (!snapshot?.available) { clipboardNotify('当前为只读旁观，请先打开控制模式'); return false; }
+    current.controlError = '';
+    if (!controlRef.current.acquire()) { clipboardNotify('当前无法接管云电脑，请重试'); return false; }
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const latest = controlRef.current.snapshot;
+      if (latest.phase === 'controlling' && latest.readOnly === false) return true;
+      if (current.controlError) break;
+    }
+    clipboardNotify(current.controlError || '接管云电脑超时，请重试');
+    return false;
+  };
   // ⌘C：先把复制按键交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
   // 云端桌面始终是 Linux，不能把 macOS 的 Meta 映射为 Super_L，否则 Linux 应用不会执行复制。
   const copyCloudClipboardToLocal = async () => {
@@ -327,8 +348,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const pasteLocalClipboardToCloud = () => pasteToCloud({
     readLocal: () => readHostClipboard(),
     writeCloud: text => clipboardRef.current.write(text),
-    readCloud: () => clipboardRef.current.read(),
     sendKeys: sendDesktopKeys,
+    ensureControl: ensureClipboardControl,
     notify: clipboardNotify,
   });
   // paste 事件兜底：macOS 上 Electron 的编辑菜单可能先把 ⌘V 吃掉，但浏览器仍会把
@@ -336,8 +357,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const pasteTextToCloud = text => pasteToCloud({
     readLocal: async () => String(text ?? ''),
     writeCloud: value => clipboardRef.current.write(value),
-    readCloud: () => clipboardRef.current.read(),
     sendKeys: sendDesktopKeys,
+    ensureControl: ensureClipboardControl,
     notify: clipboardNotify,
   });
   const drawLatest = async () => {
@@ -670,14 +691,17 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const emptyTitle = phase === 'unconfigured' ? bindingTitle : phase === 'empty' ? '助理正在准备中' : phase === 'directory-error' ? '暂时无法连接云端助理' : '正在检查助理状态';
   const emptyDetail = phase === 'unconfigured' ? bindingDetail : phase === 'empty' ? '云端初始化完成后，可用助理会显示在这里。' : phase === 'directory-error' ? directoryError : '请稍候';
   const computerVariant = variant === 'computer' || variant === 'native-tab';
-  // 右下角胶囊与"诊断"不再占桌面卡片的高度预算：卡片按量出来的可用区域取 contain 尺寸。
+  // 接管状态紧贴桌面卡片下方；测量时扣掉胶囊本身，避免状态条把画面挤出右栏。
   useLayoutEffect(() => {
     if (!computerVariant) return undefined;
     const node = stageAreaRef.current;
     if (!node) return undefined;
     const measure = () => {
       const rect = node.getBoundingClientRect();
-      const next = fitDesktopBox({ availableWidth: rect.width, availableHeight: rect.height, display: desktopDisplay, maxWidth: 1280 });
+      const measuredCapsuleHeight = controlCapsuleRef.current?.getBoundingClientRect?.().height || 0;
+      const capsuleHeight = active || selectable ? Math.min(128, Math.max(44, measuredCapsuleHeight)) : 0;
+      const availableHeight = Math.max(0, rect.height - (capsuleHeight ? capsuleHeight + 10 : 0));
+      const next = fitDesktopBox({ availableWidth: rect.width, availableHeight, display: desktopDisplay, maxWidth: 1280 });
       setStageBox(previous => {
         if (!(next.width > 0 && next.height > 0)) return previous ?? null;
         return previous && Math.abs(previous.width - next.width) < 0.5 && Math.abs(previous.height - next.height) < 0.5 ? previous : next;
@@ -686,8 +710,9 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     measure();
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
     observer?.observe(node);
+    if (controlCapsuleRef.current) observer?.observe(controlCapsuleRef.current);
     return () => observer?.disconnect();
-  }, [computerVariant, desktopDisplay]);
+  }, [computerVariant, desktopDisplay, active, selectable, controlPhase, notice, clipboardNotice]);
   const guidance = phase === 'unconfigured' ? unconfiguredGuidance(binding) : null;
   const onboardingClick = action => {
     if (action === 'check') void refreshConnection();
@@ -747,15 +772,18 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         null) : null,
       readOnly && active && !controlRef.current.snapshot.available ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '只读旁观：鼠标和键盘不会发送到云电脑') : null,
       h('div', { 'data-personal-assistant-desktop-layout': 'true', style: { flex: 1, minHeight: 0, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '20px 16px 12px', boxSizing: 'border-box' } },
-      h('div', { ref: stageAreaRef, 'data-personal-assistant-desktop-stack': 'true', style: { width: '100%', maxWidth: 1280, minHeight: 0, flex: '1 1 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 } }, onboarding || stage),
-      active || selectable ? h('div', { 'data-personal-assistant-control-capsule': 'true', role: 'status', 'aria-live': 'polite', style: { flex: 'none', display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 6, width: 'fit-content', maxWidth: '100%', boxSizing: 'border-box', padding: '7px 12px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', border: ui.border, boxShadow: '0 1px 4px #10182808', lineHeight: 1.5 } },
+      h('div', { ref: stageAreaRef, 'data-personal-assistant-desktop-stack': 'true', style: { width: '100%', maxWidth: 1280, minHeight: 0, flex: '1 1 auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 10 } },
+      onboarding || stage,
+      active || selectable ? h('div', { ref: controlCapsuleRef, 'data-personal-assistant-control-capsule': 'true', role: 'status', 'aria-live': 'polite', style: { flex: 'none', display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: 6, width: 'fit-content', maxWidth: '100%', boxSizing: 'border-box', padding: '7px 12px', borderRadius: 999, background: 'var(--dsw-alias-bg-layer-1, #fff)', border: ui.border, boxShadow: '0 1px 4px #10182808', lineHeight: 1.5 } },
         !active && selectable ? h('button', { style: pillStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => void open(state.current.handoffSupported ? 'observe' : 'read') }, phase === 'connecting' ? '正在启动…' : '重新连接') : null,
         active && readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, controlPhase === 'acquiring' ? '正在接管…' : controlPhase === 'releasing' ? '正在交还…' : '助理正在使用 · 点画面即可接管') : null,
         active && readOnly && controlRef.current.snapshot.available ? h('button', { style: { ...pillStyle, padding: '3px 9px', fontSize: 11 }, onClick: () => controlRef.current.acquire() }, '接管') : null,
         active && !readOnly ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, '您拥有控制权 · 点画面外释放') : null,
+        active && !readOnly ? h('button', { style: { ...ghostStyle, padding: '3px 9px', fontSize: 11 }, onClick: releaseControl }, '交还') : null,
         active && notice ? h('span', { style: { color: secondaryInk, fontSize: 12 } }, notice) : null,
         // 剪贴板不再放按钮：面板里只保留 ⌘V 粘贴 / ⌘C 复制与一行状态文字。
         active && clipboardNotice ? h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, clipboardNotice) : null) : null),
+      ),
       h('details', { style: { flex: 'none', alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } }, h('summary', { style: { cursor: 'pointer' } }, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
   }
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },

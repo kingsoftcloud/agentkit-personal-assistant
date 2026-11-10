@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createDesktopLauncherServer } from './desktop-launcher.mjs';
 import { createWelcomeServer } from './welcome-server.mjs';
+import { createBuildInfo, DESKTOP_DOCK_LAYOUT } from './build-info.mjs';
 
 const execFile = promisify(execFileCallback);
 export const DESKTOP_WIDTH = 1280;
@@ -167,6 +168,7 @@ export function createDesktopController({
   dshWebUrl = null,
   onLaunchDshWeb = null,
   onLaunchError = () => {},
+  buildInfo = createBuildInfo(),
 } = {}) {
   const sessions = new Map();
   let xvfb;
@@ -223,13 +225,17 @@ export function createDesktopController({
   // 清掉继承来的 LC_ALL/LC_CTYPE；它们会覆盖 LANG，导致中文桌面和剪贴板的字符集随宿主漂移。
   // LANG 不能写死：镜像没有生成 zh_CN.UTF-8 时 glibc 会静默退回 C/ASCII，中文应用改发
   // GBK/latin1 字节，粘贴就出现「ä¸æ–‡」。启动时探测 locale，缺失则退回 C.UTF-8。
-  const environmentFor = locale => Object.freeze({ ...process.env, DISPLAY: display, LANG: locale, LANGUAGE: 'zh_CN:zh', LC_ALL: undefined, LC_CTYPE: locale, TZ: timeZone });
+  const environmentFor = (locale, source = 'assumed') => Object.freeze({ ...process.env, DISPLAY: display, LANG: locale, LANGUAGE: 'zh_CN:zh', LC_ALL: undefined, LC_CTYPE: ['assumed', 'missing'].includes(source) ? DESKTOP_CLIPBOARD_FALLBACK_LOCALE : locale, TZ: timeZone });
   let localeState = Object.freeze({ locale: DESKTOP_CLIPBOARD_LOCALE, source: 'assumed' });
-  let environment = environmentFor(localeState.locale);
+  let environment = environmentFor(localeState.locale, localeState.source);
   const resolveDesktopLocale = async () => {
     try {
       const result = await exec('locale', ['-a'], { env: { ...process.env, LC_ALL: undefined, LC_CTYPE: undefined }, timeout: 2000, maxBuffer: 128 * 1024 });
-      return pickDesktopLocale(String(result?.stdout ?? '').split(/\r?\n/u));
+      const output = String(result?.stdout ?? '');
+      // 命令成功但没有可解析的 locale 列表时，保留原有的中文 LANG 假设；
+      // environmentFor 会把 LC_CTYPE 锁到内建的 C.UTF-8。
+      if (!output.trim()) return pickDesktopLocale([]);
+      return pickDesktopLocale(output.split(/\r?\n/u));
     } catch {
       // 探测失败只说明"不确定"，不能因此换掉用户环境：保持原假设，行为与改动前一致。
       return Object.freeze({ locale: DESKTOP_CLIPBOARD_LOCALE, source: 'assumed' });
@@ -344,8 +350,8 @@ export function createDesktopController({
           'rounded = 0', 'border_width = 1', 'background_color = #f8fbff 100', 'border_color = #c5d2e3 100',
           // 面板只放三个启动图标：不显示时钟（欢迎页已有大时钟），也不显示任务栏按钮。
           // 宽度随内容收缩：3 个图标之外不留空白条。
-          'panel_items = L', 'panel_size = 0 56', 'panel_shrink = 1', 'panel_margin = 0 12', 'panel_padding = 12 7 12',
-          'panel_background_id = 1', 'panel_position = bottom center horizontal', 'panel_layer = top',
+          'panel_items = L', `panel_size = 0 ${DESKTOP_DOCK_LAYOUT.height}`, `panel_shrink = ${DESKTOP_DOCK_LAYOUT.shrink ? 1 : 0}`, 'panel_margin = 0 12', 'panel_padding = 12 7 12',
+          'panel_background_id = 1', `panel_position = ${DESKTOP_DOCK_LAYOUT.panelPosition}`, 'panel_layer = top',
           'panel_monitor = primary', 'panel_dock = 0', 'panel_window_name = AgentKit Dock',
           'disable_transparency = 1', 'mouse_effects = 1', 'wm_menu = 0',
           'launcher_padding = 4 0 14', 'launcher_icon_size = 36', 'launcher_background_id = 0',
@@ -469,7 +475,7 @@ export function createDesktopController({
       // 先确认镜像里真有中文 UTF-8 locale，再拉起所有桌面子进程：LANG 一旦是未生成的
       // locale，GTK/Qt/Java/xterm 会退回 ASCII 字符集，复制出来就是 GBK/latin1 字节。
       localeState = await resolveDesktopLocale();
-      environment = environmentFor(localeState.locale);
+      environment = environmentFor(localeState.locale, localeState.source);
       spawnDisplay();
       const deadline = now() + 5000;
       let lastError;
@@ -773,7 +779,12 @@ export function createDesktopController({
   };
   const touchActivity = () => { lastActivityAt = now(); for (const session of sessions.values()) session.lastInputAt = now(); };
   const encodeFrame = (bytes, session, frameSequence) => ({ sessionId: session.sessionId, seq: frameSequence ?? ++sequence, format: 'jpeg', width, height, bytes: bytes.length, data: bytes });
-  const describe = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controllable: session.controllable, controlEpoch: session.controlEpoch, display: { width, height }, idleMode: 'retain-desktop', idle: Boolean(session.idle), idleTimeoutMs, idleRetentionMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS, locale: localeState.locale });
+  const diagnostics = Object.freeze({
+    ...createBuildInfo(),
+    ...buildInfo,
+    dock: DESKTOP_DOCK_LAYOUT,
+  });
+  const describe = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controllable: session.controllable, controlEpoch: session.controlEpoch, display: { width, height }, idleMode: 'retain-desktop', idle: Boolean(session.idle), idleTimeoutMs, idleRetentionMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS, locale: localeState.locale, diagnostics });
   const openSession = async ({ identity, botId = null, controllable = false, leaseId = null, taskId = null, releaseLeaseOnIdle = false } = {}) => {
     await ensureDisplay();
     lastActivityAt = now();
@@ -924,7 +935,7 @@ export function createDesktopController({
     return stopping;
   };
   const dispose = () => { disposed = true; sessions.clear(); flushPendingText(); clearInterval(reaper); return inputQueue.then(stopDisplay); };
-  const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), dockRunning: Boolean(dockProcess && dockProcess.exitCode === null), fileManagerRunning: Boolean(fileManagerProcess && fileManagerProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt, locale: localeState.locale, localeSource: localeState.source, clipboardTarget: DESKTOP_CLIPBOARD_TARGET, clipboard: lastClipboard });
+  const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), dockRunning: Boolean(dockProcess && dockProcess.exitCode === null), fileManagerRunning: Boolean(fileManagerProcess && fileManagerProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt, locale: localeState.locale, localeSource: localeState.source, clipboardTarget: DESKTOP_CLIPBOARD_TARGET, clipboard: lastClipboard, diagnostics });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
   const windows = async () => {

@@ -328,7 +328,7 @@ export function isCopyShortcut(event) {
  * 字节硬按 UTF-8 解码（GBK/latin1 都解坏），写进去的中文读回来已经不是原文。这时继续按
  * Ctrl+V 只会把乱码贴进应用，所以宁可停在提示上，也不要让用户以为粘贴成功。
  */
-export async function pasteToCloud({ readLocal, writeCloud, readCloud, sendKeys, notify = () => {}, echoGuard = defaultEchoGuard, verifyDelayMs = 80, sleep = defaultSleep } = {}) {
+export async function pasteToCloud({ readLocal, writeCloud, readCloud, sendKeys, ensureControl, notify = () => {}, echoGuard = defaultEchoGuard, verifyDelayMs = 80, sleep = defaultSleep } = {}) {
   const read = readLocal || (() => readLocalClipboard());
   let text = '';
   try { text = await read(); }
@@ -337,6 +337,14 @@ export async function pasteToCloud({ readLocal, writeCloud, readCloud, sendKeys,
   text = repairClipboardText(text);
   if (!text) { notify('本地剪贴板是空的，没有可粘贴的内容'); return { ok: false, code: 'CLIPBOARD_EMPTY' }; }
   if (byteLength(text) > MAX_CLIPBOARD_BYTES) { notify('剪贴板内容超过 64 KiB，云电脑剪贴板放不下'); return { ok: false, code: 'CLIPBOARD_TOO_LARGE' }; }
+  if (typeof ensureControl === 'function') {
+    try {
+      if (!await ensureControl()) { notify('需要先接管云电脑，才能粘贴到云电脑'); return { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' }; }
+    } catch (error) {
+      notify(clipboardFriendlyError(error) || '接管云电脑失败，请重试');
+      return { ok: false, code: error?.code || 'CLIPBOARD_CONTROL_REQUIRED' };
+    }
+  }
   try { await writeCloud(text); }
   catch (error) { notify(clipboardFriendlyError(error) || '写入云电脑剪贴板失败，请重试'); return { ok: false, code: 'CLIPBOARD_WRITE_FAILED' }; }
   echoGuard.remember(text);
