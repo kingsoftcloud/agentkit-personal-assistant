@@ -5,7 +5,7 @@
  * its own credentials only in development hosts. Inside a DSH Host the plugin asks
  * this service for the account's bound cloud instance and for one-shot desktop
  * tickets, so the gateway API key never enters the plugin, the page, a URL or
- * the logs. See the PA repository's `Host-Host桌面代理契约-v1.md`.
+ * the logs. See `docs/host-cloud-capability-v1.md` for the generic Host contract.
  *
  * Ownership: Host-only module. It never exposes the credential through RPC,
  * HTTP or plugin return values, and every failure carries `status` (or

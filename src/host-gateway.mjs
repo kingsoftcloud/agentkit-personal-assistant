@@ -9,6 +9,7 @@ import { createCloudSessionTransport } from './cloud-session-transport.mjs';
 import { BotRegistry, loadBotRegistry, publicMemoryItems } from './bot-registry.mjs';
 import { createPersonalAssistantStateStore } from './persistent-state.mjs';
 import { createLocalAccess, isLocalControlOperation } from './local-access.mjs';
+import { assistantDesktopService, createAssistantDesktop } from './assistant-desktop.mjs';
 /**
  * 云网关会拒掉 Node 内置（undici）WebSocket：握手成功后立即 1006 断开且不带关闭帧，
  * 面板只能看到「连接暂时不可用」。实测同一张 ticket 下浏览器、Python websockets 与 `ws`
@@ -288,6 +289,12 @@ function requireBotId(value) {
 // Generic host adapter name. The plugin may run in Host or another DSH
 // host; no host product name is part of this runtime contract.
 export const PERSONAL_ASSISTANT_DESKTOP_SERVICE = 'agentkitPersonalAssistantDesktop';
+/** Generic DSH Host capability used to construct the PA adapter without a
+ * Studio product dependency. The provider owns cloud clients/configuration;
+ * this plugin only consumes the narrow shape below. */
+export const PERSONAL_ASSISTANT_HOST_CLOUD_SERVICE = 'agentkitHostCloud';
+/** Migration-only name from pre-decoupling Studio builds. */
+export const LEGACY_STUDIO_PERSONAL_ASSISTANT_DESKTOP_SERVICE = 'studioPersonalAssistantDesktop';
 
 // 默认走系统信任链：内网/预发网关的证书不在 Node 内置 CA 里，直接 fetch 会 "fetch failed"。
 const defaultFetchImpl = createSystemFetch();
@@ -921,9 +928,34 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
 
 export function registerPersonalAssistantHostGateway(ctx, config = {}, { sessionChannel, channelOptions, getDesktop } = {}) {
   if (!ctx?.connection?.fetch?.register) return undefined;
+  let ownedDesktop;
+  const resolveDesktop = () => {
+    if (typeof getDesktop === 'function') {
+      const value = getDesktop();
+      if (value) return value;
+    }
+    const provided = ctx.get?.(PERSONAL_ASSISTANT_DESKTOP_SERVICE)
+      || ctx.get?.(LEGACY_STUDIO_PERSONAL_ASSISTANT_DESKTOP_SERVICE);
+    if (provided) return provided;
+    if (ownedDesktop) return ownedDesktop;
+    const cloud = ctx.get?.(PERSONAL_ASSISTANT_HOST_CLOUD_SERVICE);
+    if (!plain(cloud) || !cloud.storeDir || typeof cloud.getClient !== 'function') return undefined;
+    const configuration = typeof cloud.configuration === 'function'
+      ? Promise.resolve().then(() => cloud.configuration())
+      : cloud.configuration ?? cloud.configurationPromise;
+    ownedDesktop = assistantDesktopService(createAssistantDesktop({
+      storeDir: cloud.storeDir,
+      env: cloud.env || process.env,
+      fetchImpl: cloud.fetchImpl || cloud.runtimeFetch || fetch,
+      configuration,
+      getClient: cloud.getClient,
+      getDeploymentClient: cloud.getDeploymentClient,
+    }));
+    return ownedDesktop;
+  };
   // 生产注册路径开启短 TTL 绑定缓存：一次面板打开会以 5 次串行 configuration 起手，
   // 2s 缓存把它们收敛成 1 次。直接构造 gateway（含单测）默认不缓存，保持逐次确认语义。
-  const gateway = createPersonalAssistantHostGateway(config, { getHostDesktop: getDesktop || (() => ctx.get?.(PERSONAL_ASSISTANT_DESKTOP_SERVICE)), bindingCacheMs: 2000 });
+  const gateway = createPersonalAssistantHostGateway(config, { getHostDesktop: resolveDesktop, bindingCacheMs: 2000 });
   // Connection 的 /api 物理载体先执行 Host/Origin、浏览器鉴权及 owner Peer 校验。
   // 使用公开 exact Fetch 注册表，避免自建服务、抢占 Gateway interceptor 或修改 remotes。
   const unregister = ctx.connection.fetch.register({ path: ENDPOINT, methods: ['POST'], requestBody: 'buffered', async fetch(request) {

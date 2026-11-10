@@ -79,6 +79,9 @@
   "devDependencies": {
     "esbuild": "0.27.7"
   },
+  "dependencies": {
+    "yaml": "2.8.1"
+  },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
