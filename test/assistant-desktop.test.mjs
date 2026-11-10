@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantDesktop } from '../src/assistant-desktop.mjs';
@@ -52,4 +52,24 @@ test('显式运行时版本仍优先于 catalog 自动选择', async () => {
   const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
   assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
   assert.equal(harnessValue.request.ManagedRuntimeConfig.RuntimeVersion, '0.1.42');
+});
+
+test('旧 Studio 绑定格式按可迁移的旧记录处理，不再误报绑定损坏', async () => {
+  const storeDir = await mkdtemp(join(tmpdir(), 'pa-legacy-binding-'));
+  const agentId = 'ar-20261030133714-7396d2ae';
+  await writeFile(join(storeDir, 'assistant-binding.json'), JSON.stringify({
+    format: 'agentkit.studio-assistant-binding/v1',
+    gatewayUrl: 'https://gateway.example', agentId, apiKey: KEY, label: '旧个人助理',
+  }));
+  const fetchImpl = async () => Response.json({ Code: 404, Message: '请求的资源不存在或已被删除' });
+  const client = { action: async name => {
+    if (name === 'ListAgents') return { data: { Agents: [] } };
+    throw new Error(`unexpected action ${name}`);
+  } };
+  const service = createAssistantDesktop({ storeDir, fetchImpl,
+    configuration: { resolve: async () => ({ values: { cloudRegion: 'pre-online' } }) },
+    getClient: async () => client,
+  });
+  assert.deepEqual(await service.configuration({}), { configured: false });
+  await assert.rejects(readFile(join(storeDir, 'assistant-binding.json'), 'utf8'), { code: 'ENOENT' });
 });

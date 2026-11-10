@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 const FORMAT = 'agentkit.personal-assistant-binding/v1';
+const LEGACY_FORMAT = 'agentkit.studio-assistant-binding/v1';
 const SERVICE = 'agentkitPersonalAssistantDesktop';
 const PROTOCOL = 'agentkit.personal-assistant.desktop.v1';
 const WS_PATH = 'personal-assistant/desktop/ws';
@@ -223,7 +224,7 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
       }
       cached = null; cacheAt = Date.now(); return null;
     }
-    if (!record(raw) || raw.format !== FORMAT || !text(raw.gatewayUrl) || !AGENT_ID.test(text(raw.agentId)) || !text(raw.apiKey))
+    if (!record(raw) || ![FORMAT, LEGACY_FORMAT].includes(raw.format) || !text(raw.gatewayUrl) || !AGENT_ID.test(text(raw.agentId)) || !text(raw.apiKey))
       throw fail('ASSISTANT_BINDING_CORRUPT', '个人助理绑定无法读取，请重新连接', 500);
     cached = { gatewayUrl: gatewayOrigin(raw.gatewayUrl), agentId: text(raw.agentId), apiKey: text(raw.apiKey), label: text(raw.label),
       manifest: typeof raw.manifest === 'string' ? raw.manifest : '', updatedAt: text(raw.updatedAt) };
