@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createPersonalAssistantHostGateway, registerPersonalAssistantHostGateway } from '../src/host-gateway.mjs';
 
 const ticket = 'p'.repeat(43);
@@ -130,6 +133,55 @@ test('没有 DSH Host 服务时绑定操作明确报错，不会静默退回本�
   const gateway = createPersonalAssistantHostGateway({ gatewayUrl: 'https://legacy.example', agentId: 'ar-legacy', apiKey: 'legacy-secret' }, { env: {}, fetchImpl: offline });
   await assert.rejects(gateway.request('personal-assistant.desktop.status'), { code: 'PERSONAL_ASSISTANT_STANDALONE', status: 409 });
   await assert.rejects(gateway.request('personal-assistant.desktop.connect', { agentId: '../bad' }), { code: 'PERSONAL_ASSISTANT_AGENT_INVALID' });
+});
+
+test('独立插件可从通用 DSH Host 云服务建立自己的个人助理适配器', async () => {
+  const storeDir = await mkdtemp(join(tmpdir(), 'pa-host-cloud-'));
+  let route;
+  const ctx = {
+    get(name) {
+      if (name !== 'agentkitHostCloud') return undefined;
+      return {
+        storeDir,
+        configuration: { resolve: async () => ({ values: { cloudRegion: 'pre-online' } }) },
+        getClient: async () => ({ action: async () => ({ Agents: [] }) }),
+        getDeploymentClient: async () => ({}),
+      };
+    },
+    connection: { fetch: { register(value) { route = value; return () => {}; } } },
+  };
+  try {
+    registerPersonalAssistantHostGateway(ctx, {});
+    const response = await route.fetch(new Request('https://dsh.example/api/personal-assistant', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'generic-host', method: 'personal-assistant', payload: { operation: 'personal-assistant.desktop.create', payload: {} } }),
+    }));
+    const result = (await response.json()).result;
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, 'ASSISTANT_CREATE_UNAVAILABLE');
+    assert.equal(result.error.details.status, 503);
+  } finally { await rm(storeDir, { recursive: true, force: true }); }
+});
+
+test('迁移期兼容旧 Studio Host 服务名，但不把它作为新契约', async () => {
+  let route;
+  const legacy = {
+    async configuration() { return { configured: true, agentId: 'ar-legacy' }; },
+    async issueTicket() { throw Object.assign(new Error('unused'), { code: 'UNUSED', status: 503 }); },
+    async create() { throw Object.assign(new Error('legacy create reached'), { code: 'LEGACY_CREATE_REACHED', status: 503 }); },
+  };
+  const ctx = {
+    get(name) { return name === 'studioPersonalAssistantDesktop' ? legacy : undefined; },
+    connection: { fetch: { register(value) { route = value; return () => {}; } } },
+  };
+  registerPersonalAssistantHostGateway(ctx, {});
+  const response = await route.fetch(new Request('https://dsh.example/api/personal-assistant', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: 'legacy-host', method: 'personal-assistant', payload: { operation: 'personal-assistant.desktop.create', payload: {} } }),
+  }));
+  const result = (await response.json()).result;
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'LEGACY_CREATE_REACHED');
 });
 
 test('DSH Host 绑定错误保留可读原因且不泄漏凭据', async () => {
