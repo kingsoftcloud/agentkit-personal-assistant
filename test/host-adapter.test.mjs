@@ -163,6 +163,34 @@ test('独立插件可从通用 DSH Host 云服务建立自己的个人助理适�
   } finally { await rm(storeDir, { recursive: true, force: true }); }
 });
 
+test('首次创建不应被失效旧绑定的 Host 配置探测阻断', async () => {
+  let route;
+  let calls = 0;
+  const ctx = {
+    get(name) {
+      if (name !== 'agentkitPersonalAssistantDesktop') return undefined;
+      return {
+        async create(input, signal) {
+          calls += 1;
+          assert.deepEqual(input, {});
+          assert.equal(signal instanceof AbortSignal, true);
+          return { configured: true, agentId: 'ar-created' };
+        },
+      };
+    },
+    connection: { fetch: { register(value) { route = value; return () => {}; } } },
+  };
+  registerPersonalAssistantHostGateway(ctx, {});
+  const response = await route.fetch(new Request('https://dsh.example/api/personal-assistant', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId: 'create-with-stale-binding', method: 'personal-assistant',
+      payload: { operation: 'personal-assistant.desktop.create', payload: {} } }),
+  }));
+  const result = (await response.json()).result;
+  assert.deepEqual(result, { ok: true, value: { configured: true, agentId: 'ar-created', mode: 'host' } });
+  assert.equal(calls, 1);
+});
+
 test('迁移期兼容旧 Studio Host 服务名，但不把它作为新契约', async () => {
   let route;
   const legacy = {

@@ -336,7 +336,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       throw fail(status >= 500 ? 'PERSONAL_ASSISTANT_HOST_UNAVAILABLE' : 'PERSONAL_ASSISTANT_TICKET_REFUSED', 'Host 暂时无法授权云电脑连接，请检查实例状态与云端登录', status);
     }
   }
-  async function binding(signal, fresh = false) {
+  async function binding(signal, fresh = false, { skipConfiguration = false } = {}) {
     let hostService;
     try { hostService = getHostDesktop(); }
     catch { clearBindingCache(); throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 云连接服务暂时不可用', 503); }
@@ -353,6 +353,11 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (!fresh && cachedBinding && Date.now() - cachedBinding.at < bindingCacheTtlMs) return cachedBinding.value;
     // 并发合并：同一时刻只向 Host 打一次 configuration，其余请求共享同一个 promise。
     if (!fresh && pendingBinding) return pendingBinding;
+    // First creation must not be blocked by an old binding whose gateway
+    // probe fails. Creation replaces that binding, and only needs the Host's
+    // create capability; configuration/issueTicket are still required for
+    // every operation that reads or uses the existing instance.
+    if (skipConfiguration) return { configured, agentId, host: hostService };
     if (typeof hostService.configuration !== 'function' || typeof hostService.issueTicket !== 'function') {
       clearBindingCache();
       throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', '请更新 Host 云连接服务', 503);
@@ -826,8 +831,9 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (LOCAL_OPERATIONS.has(operation)) return handleLocalOperation(operation, payload, signal);
     // 写操作强制向 Host 重新确认绑定；随后立刻清空缓存，让紧接着的读也读到新实例。
     const refreshBinding = BINDING_REFRESH_OPERATIONS.has(operation);
+    const created = operation === 'personal-assistant.desktop.create';
     const bindingStartedAt = Date.now();
-    const current = await binding(signal, refreshBinding);
+    const current = await binding(signal, refreshBinding, { skipConfiguration: created });
     onBindingMs(Date.now() - bindingStartedAt);
     if (refreshBinding) clearBindingCache();
     const bindingMethod = BINDING_METHODS[operation];
@@ -838,7 +844,6 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       const host = current.host;
       if (!host) throw fail('PERSONAL_ASSISTANT_STANDALONE', '独立安装不支持自动发现；请在 Host 配置中连接云端实例', 409);
       if (typeof host[bindingMethod] !== 'function') throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', '请更新 Host 云连接服务', 503);
-      const created = operation === 'personal-assistant.desktop.create';
       const closing = operation === 'personal-assistant.desktop.destroy';
       if (created) beginCreateProgress();
       if (closing) {
@@ -946,7 +951,10 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}, { session
     ownedDesktop = assistantDesktopService(createAssistantDesktop({
       storeDir: cloud.storeDir,
       env: cloud.env || process.env,
-      fetchImpl: cloud.fetchImpl || cloud.runtimeFetch || fetch,
+      // The PA gateway may use the Host's preprod certificate chain. Keep
+      // this transport inside the standalone PA plugin so Studio remains a
+      // generic DSH provider and does not grow PA-specific host allowlists.
+      fetchImpl: defaultFetchImpl,
       configuration,
       getClient: cloud.getClient,
       getDeploymentClient: cloud.getDeploymentClient,
