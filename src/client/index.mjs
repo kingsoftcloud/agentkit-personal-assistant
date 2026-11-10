@@ -120,30 +120,28 @@ export function unconfiguredGuidance(binding) {
   const check = { id: 'check', label: '检查开通状态' };
   if (candidates.length > 0) return {
     tone: 'reuse', title: '发现已开通的个人助理',
-    detail: `账号下已有 ${candidates.length} 个个人助理。一个子账号只需要一个，直接连接即可复用，不会重复创建。`,
+    detail: '你的个人助理已经存在，直接连接即可继续使用。',
     actions: [{ id: 'connect', label: '连接已发现的个人助理', primary: true }, check],
   };
   if (reason === 'needs-create') return {
     tone: 'create', title: '开通个人助理',
-    detail: '一个子账号可开通一个个人助理。开通后会得到一位云端持续运行的助理和一台专属云电脑，关掉 DSH Host 也会继续工作。',
+    detail: '开通后直接聊天；需要看画面或操作文件时，再打开云电脑。',
     actions: [{ id: 'create', label: '开通个人助理', primary: true }, check],
   };
   if (reason === 'credential-unavailable') return {
     tone: 'reuse', title: '正在恢复连接凭证',
-    detail: '个人助理实例已经在账号下，但云端暂时没有返回连接凭证。重新获取即可复用现有实例，不需要重新开通。',
+    detail: '你的个人助理已经存在，正在恢复连接凭证。',
     actions: [{ id: 'connect', label: '重新获取连接凭证', primary: true }, check],
   };
   const detail = typeof binding?.detail === 'string' && binding.detail ? binding.detail : '';
   return {
     tone: 'retry', title: '暂时读不到开通状态',
-    detail: `${detail}请先确认 DSH Host 已登录云端账号，再重新检查一次；确认账号下确实没有个人助理后再开通，避免重复创建。`,
+    detail: `${detail}请先登录 DSH Host 云端账号，再刷新状态。`,
     actions: [check, { id: 'create', label: '确认未开通后开通', primary: false }],
   };
 }
 
-const onboardingSteps = tone => tone === 'reuse'
-  ? ['确认账号下的个人助理实例', '直接连接即可复用，不会重复创建', '需要看画面或动手时，打开「云电脑」接管']
-  : ['登录 DSH Host 云端账号，开通个人助理（约 1–2 分钟）', '连接后即可在「个人助理」页对话，云端 7×24 运行', '需要看画面或动手时，打开「云电脑」接管'];
+const onboardingSteps = () => [];
 
 const onboardingStyle = {
   page: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: '32px 20px', textAlign: 'center', boxSizing: 'border-box' },
@@ -723,9 +721,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
       h('h2', { style: onboardingStyle.title }, guidance.title)),
     h('p', { style: onboardingStyle.detail }, guidance.detail),
-    h('ol', { style: onboardingStyle.steps },
-      onboardingSteps(guidance.tone).map((text, index) => h('li', { key: text, style: onboardingStyle.step },
-        h('span', { style: onboardingStyle.stepIndex }, String(index + 1)), h('span', null, text)))),
     h('div', { style: onboardingStyle.actions },
       guidance.actions.map(action => h('button', {
         key: action.id, disabled: Boolean(busy), style: action.primary ? onboardingStyle.primary : onboardingStyle.ghost,
@@ -1719,9 +1714,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
         h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
         h('h1', { style: onboardingStyle.title }, guidance.title),
         h('p', { style: onboardingStyle.detail }, guidance.detail),
-        h('ol', { style: onboardingStyle.steps },
-          onboardingSteps(guidance.tone).map((text, index) => h('li', { key: text, style: onboardingStyle.step },
-            h('span', { style: onboardingStyle.stepIndex }, String(index + 1)), h('span', null, text)))),
         h('div', { style: onboardingStyle.actions },
           guidance.actions.map(action => h('button', {
             key: action.id, disabled: Boolean(bindingBusy),
