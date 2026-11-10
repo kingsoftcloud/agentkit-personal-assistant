@@ -1055,6 +1055,14 @@ function normalizeCreateStatus(raw) {
   };
 }
 
+/** Host create.status 的默认快照也是 instance/pending；只有 active 阶段或剩余时间才代表正在创建。 */
+function isCreateProgressActive(status) {
+  if (!status || !status.stage || status.stage === 'done' || status.stage === 'failed') return false;
+  if (status.stages.some(stage => stage.status === 'active')) return true;
+  if (status.estimatedRemainingMs > 0) return true;
+  return status.stage === 'instance' && status.elapsedMs > 0;
+}
+
 function settingsDraftFrom(inspect) {
   return {
     model: String(inspect?.model ?? ''),
@@ -1290,6 +1298,32 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     } finally { setHistoryLoading(false); }
   };
 
+  /** Re-open an in-flight Host creation after the panel was unmounted and mounted again. */
+  const recoverCreateProgress = async () => {
+    let status;
+    try {
+      const raw = await rpc('personal-assistant.create.status');
+      status = normalizeCreateStatus(raw);
+    } catch (failure) {
+      // Older Hosts do not expose create.status; the normal binding snapshot below remains the fallback.
+      if (!isUnavailableFailure(failure) && Number(failure?.status) !== 404) setCreateError(failure?.message || '读取创建进度失败');
+      return false;
+    }
+    if (!status || (!isCreateProgressActive(status) && status.stage !== 'failed')) return false;
+    setCreateStatus(status);
+    setCreateError(status.error || '');
+    setCreateNotice('');
+    setCreateCollapsed(false);
+    setCreateDiagnostics(false);
+    createStartedAtRef.current = Date.now() - Math.max(0, status.elapsedMs);
+    setPanelView('create');
+    if (isCreateProgressActive(status)) {
+      clearCreateTimer();
+      createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 0);
+    }
+    return true;
+  };
+
   /** 首次装载：先回显缓存，再解析 scope 与概览；任何一步失败都落回可操作的界面。 */
   const boot = async () => {
     // 1) 首帧已由 state 初值回显缓存；这里兜底「本次渲染之后才写入」的概览缓存（stale-while-revalidate）。
@@ -1312,6 +1346,14 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     }
     setConfig(configValue || null);
     if (!configValue?.configured) {
+      // 创建请求可能仍在 Host 内进行：重新挂载页面时先恢复进度，不能把进行中的实例误判成「尚未开通」。
+      const resumedCreate = await recoverCreateProgress();
+      if (resumedCreate) {
+        removePanelCache('shell');
+        setBinding(null);
+        setOverview(null); setOverviewLoading(false);
+        return;
+      }
       // 未开通不是错误：交给开通报板（01）。desktop.status 不抛错，用它区分「没有实例」与「读不到」。
       removePanelCache('shell');
       const snapshot = await rpc('personal-assistant.desktop.status').catch(() => null);
@@ -1594,17 +1636,19 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     setCreateError(''); setCreateNotice('');
     setPanelView('create');
     createStartedAtRef.current = Date.now();
+    // desktop.create 可能持续数分钟；进度轮询必须与创建 RPC 并行启动，不能等 RPC 返回后才开始计时。
+    clearCreateTimer();
+    void pollCreateStatus();
     try {
       await rpc('personal-assistant.desktop.create');
     } catch (failure) {
+      clearCreateTimer();
       setCreateError(failure?.message || '开通请求没有被云端接受');
       setCreateStatus({ stage: 'failed', stages: [], elapsedMs: 0, estimatedRemainingMs: 0, error: failure?.message || '开通请求没有被云端接受' });
       setBindingBusy('');
       return;
     }
     setBindingBusy('');
-    clearCreateTimer();
-    createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 1000);
   };
 
   const toggleCreateCollapsed = () => {
