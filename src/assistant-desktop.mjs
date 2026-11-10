@@ -33,6 +33,10 @@ const MAX_ENV_VARIABLES = 64;
 const MAX_MANIFEST_BYTES = 16 * 1024;
 const DEFAULT_MODEL = 'deepseek-v4.1-flash-1017';
 const DEFAULT_PROMPT = '请用中文完成用户任务。只使用提供的云电脑工具，不得假装已经执行。';
+// Keep a safe fallback for hosts whose platform predates the runtime catalog.
+// Normal creation resolves the newest published catalog entry below, so this
+// value only applies when the catalog cannot be read at all.
+const DEFAULT_RUNTIME_VERSION = '0.1.58';
 // The platform publishes each environment's managed-runtime catalog in its
 // client bootstrap config. The Host reads the same document the server resolves
 // from, so the version picker can never invent an undeployable version.
@@ -156,6 +160,32 @@ const compareVersions = (left, right) => {
 
 /** Accept both `{Data:{...}}` and `{data:{...}}` action envelopes. */
 const actionData = value => record(value?.data) ? value.data : record(value?.Data) ? value.Data : value;
+
+async function resolveCreateRuntimeVersion({ env, configurationSource, getDeploymentClient, signal }) {
+  const configured = text(env.AGENTKIT_PERSONAL_ASSISTANT_RUNTIME_VERSION);
+  if (configured) return configured;
+  if (typeof getDeploymentClient === 'function') {
+    try {
+      const client = await getDeploymentClient();
+      if (typeof client?.getBootstrapConfig === 'function') {
+        const source = typeof configurationSource === 'function' ? configurationSource() : configurationSource;
+        const { values } = await (await source)?.resolve() || {};
+        const region = text(values?.cloudRegion) === 'pre-online' ? 'cn-beijing-6' : (text(values?.cloudRegion) || 'cn-beijing-6');
+        const result = await client.getBootstrapConfig({ region, runtime: 'personal-assistant' }, { signal });
+        const data = actionData(result) || {};
+        const configs = record(data.Configs) ? data.Configs : {};
+        const personalAssistant = record(configs[RUNTIME_CATALOG_KEY]) ? configs[RUNTIME_CATALOG_KEY]['personal-assistant'] : null;
+        const catalogVersions = record(personalAssistant?.versions) ? personalAssistant.versions : {};
+        const versions = Object.keys(catalogVersions).filter(version => RUNTIME_VERSION.test(version)).sort(compareVersions);
+        if (versions.length) return versions.at(-1);
+      }
+    } catch {
+      // A missing/legacy catalog is handled by the pinned fallback below. The
+      // subsequent CreateAgentProduct call still reports the platform reason.
+    }
+  }
+  return DEFAULT_RUNTIME_VERSION;
+}
 
 /** Mask a GetAgent environment row for the page: values of sensitive keys never
  * leave the Host, only the fact that the key is set. */
@@ -415,7 +445,9 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
   async function create(payload = {}, signal) {
     if (typeof getClient !== 'function' && typeof getDeploymentClient !== 'function')
       throw fail('ASSISTANT_CREATE_UNAVAILABLE', '当前 Host 版本不支持创建个人助理', 503);
-    const version = text(env.AGENTKIT_PERSONAL_ASSISTANT_RUNTIME_VERSION) || '0.1.42'; // 与平台 catalog 默认版本保持一致（预发保留 0.1.39-0.1.42）
+    // The catalog is the source of truth. A stale hardcoded version makes a
+    // valid Host look unauthorized as soon as old catalog entries are pruned.
+    const version = await resolveCreateRuntimeVersion({ env, configurationSource, getDeploymentClient, signal });
     const model = text(env.AGENTKIT_PERSONAL_ASSISTANT_MODEL) || DEFAULT_MODEL;
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
     const name = `personal-assistant-${stamp}-${randomUUID().slice(0, 10)}`;
