@@ -10,7 +10,6 @@ import { fileURLToPath } from 'node:url';
 import { installLocal } from '../scripts/install-local.mjs';
 
 const PA = '@kingsoftcloud/agentkit-personal-assistant', SIDEBAR = '@deepseek-ai/dsh-client-ui-sidebar-right';
-const STUDIO = '@kingsoftcloud/agentkit-studio';
 const hash = value => createHash('sha256').update(value).digest('hex');
 function archive(files) {
   const chunks = [];
@@ -31,13 +30,13 @@ function paxRecord(key, value) {
   while (size !== Buffer.byteLength(body) + String(size).length + 1) size = Buffer.byteLength(body) + String(size).length + 1;
   return `${size} ${body}`;
 }
-async function fixture(t, { links = false, failDump = false, studio = false, studioRegistered = false } = {}) {
+async function fixture(t, { links = false, failDump = false, host = false, hostRegistered = false } = {}) {
   const root = await fs.mkdtemp(join(tmpdir(), 'pa-install-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const profile = join(root, 'home/profiles/probe'), delivery = join(root, 'delivery');
   await fs.mkdir(join(profile, 'node_modules'), { recursive: true }); await fs.mkdir(delivery);
-  const names = [PA, SIDEBAR, ...(studio ? [STUDIO] : [])];
-  const bundles = ['@deepseek-ai/dsh-base', ...(studioRegistered ? [STUDIO] : [])];
+  const names = [PA, SIDEBAR, ];
+  const bundles = ['@deepseek-ai/dsh-base', ];
   const oldPackage = JSON.stringify({ name: 'test-profile', dependencies: { retained: '1.0.0', ...Object.fromEntries(names.map(name => [name, 'old-' + name.split('/')[1]])) },
     dsh: { profile: { bundles } } }, null, 2) + '\n';
   const config = '- insert:\n  - name: ' + PA + '\n    config:\n      apiKey: KEEP_SECRET_EXACTLY\n';
@@ -74,65 +73,6 @@ console.log('composed\\n2 lines');`);
   return { root, profile, delivery, manifest, release, oldPackage, config, names, bundles, dshNode: process.execPath, dshBin: verifier };
 }
 
-test('可选 Studio 第三包默认检查不写，安装只替换 dependency 并保留既有注册', async t => {
-  const f = await fixture(t, { links: true, studio: true, studioRegistered: true });
-  const before = await fs.readdir(f.profile);
-  const plan = await installLocal(f);
-  assert.equal(plan.dryRun, true); assert.equal(plan.packages.length, 3);
-  assert.deepEqual(await fs.readdir(f.profile), before);
-  assert.equal(await fs.readFile(join(f.profile, 'package.json'), 'utf8'), f.oldPackage);
-  const result = await installLocal({ ...f, apply: true });
-  assert.equal(result.dumpConfigExit, 0);
-  const p = JSON.parse(await fs.readFile(join(f.profile, 'package.json')));
-  assert.deepEqual(p.dsh.profile.bundles, [...f.bundles, PA]);
-  assert.equal(p.dsh.profile.bundles.filter(name => name === STUDIO).length, 1);
-  for (const item of f.release.packages) {
-    assert.equal(hash(await fs.readFile(join(f.profile, p.dependencies[item.pkgName].slice(5)))), item.sha256);
-    const [scope, leaf] = item.pkgName.split('/');
-    assert.equal(await fs.readFile(join(f.root, 'external', scope, leaf, 'sentinel'), 'utf8'), 'ORIGINAL');
-    assert.equal((await fs.lstat(join(f.profile, 'node_modules', scope))).isSymbolicLink(), false);
-    assert.equal(await fs.readFile(join(f.profile, 'node_modules', scope, 'other/sentinel'), 'utf8'), 'OTHER');
-  }
-  assert.equal(await fs.readFile(join(f.profile, 'cordis.patch.yml'), 'utf8'), f.config);
-  await installLocal({ ...f, apply: true });
-  assert.equal(JSON.parse(await fs.readFile(join(f.profile, 'package.json'))).dsh.profile.bundles.filter(name => name === STUDIO).length, 1);
-});
-
-test('可选 Studio 包不为尚未注册的 profile 新增 Studio bundle', async t => {
-  const f = await fixture(t, { studio: true });
-  await installLocal({ ...f, apply: true });
-  const p = JSON.parse(await fs.readFile(join(f.profile, 'package.json')));
-  assert.equal(p.dsh.profile.bundles.includes(STUDIO), false);
-  assert.equal(typeof p.dependencies[STUDIO], 'string');
-});
-
-for (const links of [false, true]) test(`第三包已替换后 dump 失败，三包与${links ? '外部命名空间链接' : '真实命名空间'}完整回滚`, async t => {
-  const f = await fixture(t, { studio: true, studioRegistered: true, links, failDump: true });
-  // 验证器先检查全部三个新包及离线依赖，再注入失败。
-  await assert.rejects(installLocal({ ...f, apply: true }), error => {
-    assert.equal(error.installResult.rolledBack, true); assert.match(error.message, /42/); return true;
-  });
-  assert.equal(await fs.readFile(join(f.profile, 'package.json'), 'utf8'), f.oldPackage);
-  assert.equal(await fs.readFile(join(f.profile, 'cordis.patch.yml'), 'utf8'), f.config);
-  assert.equal((await fs.stat(join(f.profile, 'cordis.patch.yml'))).mode & 0o777, 0o640);
-  for (const name of f.names) {
-    const [scope, leaf] = name.split('/');
-    assert.equal((await fs.lstat(join(f.profile, 'node_modules', scope))).isSymbolicLink(), links);
-    assert.equal(await fs.readFile(join(f.profile, 'node_modules', name, 'sentinel'), 'utf8'), 'ORIGINAL');
-    if (links) assert.equal(await fs.readFile(join(f.root, 'external', scope, leaf, 'sentinel'), 'utf8'), 'ORIGINAL');
-  }
-  for (const name of ['.pa-artifacts', '.pa-install.lock', 'cordis.yml']) await assert.rejects(fs.lstat(join(f.profile, name)), { code: 'ENOENT' });
-});
-
-test('第三包只允许 Studio，拒绝重复包或任意包名且不写入', async t => {
-  const f = await fixture(t, { studio: true }); const before = await fs.readdir(f.profile);
-  for (const pkgName of [PA, '@untrusted/other']) {
-    f.release.packages[2].pkgName = pkgName; await fs.writeFile(f.manifest, JSON.stringify(f.release));
-    await assert.rejects(installLocal({ ...f, apply: true }), /包集合不正确/);
-    assert.deepEqual(await fs.readdir(f.profile), before);
-  }
-});
-
 test('组合安装默认只检查，不写 profile、缓存或配置', async t => {
   const f = await fixture(t, { links: true }); const before = await fs.readdir(f.profile);
   const result = await installLocal(f);
@@ -144,7 +84,7 @@ test('组合安装默认只检查，不写 profile、缓存或配置', async t =
 
 test('双命名空间拆链只替换本 profile，离线缓存与配置保留，重复安装幂等', async t => {
   const f = await fixture(t, { links: true }); const result = await installLocal({ ...f, apply: true });
-  assert.equal(result.dumpConfigExit, 0); assert.equal(result.studioRestarted, false);
+  assert.equal(result.dumpConfigExit, 0); assert.equal(result.hostRestarted, false);
   for (const name of [PA, SIDEBAR]) {
     const [scope, leaf] = name.split('/');
     assert.equal((await fs.lstat(join(f.profile, 'node_modules', scope))).isSymbolicLink(), false);

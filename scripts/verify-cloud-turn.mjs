@@ -3,7 +3,7 @@ const secrets=[process.env.AGENTKIT_RUNTIME_TOKEN,process.env.AGENTKIT_MODEL_API
 const print=v=>{let s=JSON.stringify(v);for(const secret of secrets)s=s.split(secret).join('[REDACTED]');console.log(s);};
 const base='http://127.0.0.1:8080';
 const request=async(path,body)=>{const r=await fetch(base+path,{method:body?'POST':'GET',headers:{authorization:`Bearer ${process.env.AGENTKIT_RUNTIME_TOKEN}`,'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const data=await r.json();if(!r.ok){print({event:'request-failed',status:r.status,data});throw Error(`HTTP ${r.status}`);}return{status:r.status,data};};
-const session=await request('/v1/sessions',{botId:'default',title:'Studio关闭后的云端真实回合验收'});print({event:'session-created',...session});
+const session=await request('/v1/sessions',{botId:'default',title:'DSH Host关闭后的云端真实回合验收'});print({event:'session-created',...session});
 const sessionId=session.data.sessionId;
 const receipt=await request(`/v1/sessions/${sessionId}/turns`,{botId:'default',input:'请只回复 PA_CLOUD_20261025_OK，不要调用任何工具。'});print({event:'turn-accepted',...receipt});
 for(let i=0;i<120;i++){

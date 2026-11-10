@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
-/** 只读取平台挂载的原始声明；不从 Studio 或本地 profile 获取云端提示词。 */
+/** 只读取平台挂载的原始声明；不从 DSH Host 或本地 profile 获取云端提示词。 */
 export function loadPersonalAssistantManifest(env, { parseDocument } = {}) {
   const fail = code => { throw Object.assign(new Error(code), { code }); };
   if (env.AGENTENGINE_MANIFEST_PROTOCOL !== 'runtime-manifest/v1' || env.AGENTENGINE_MANAGED_RUNTIME_NAME !== 'personal-assistant'

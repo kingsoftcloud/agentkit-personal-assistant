@@ -39,6 +39,61 @@ const truncateUtf8 = (value, maxBytes) => {
   while (end > 0 && (buffer[end] & 0xc0) === 0x80) end -= 1;
   return buffer.subarray(0, end).toString('utf8');
 };
+export const DESKTOP_CLIPBOARD_TARGET = 'UTF8_STRING';
+/** 中文桌面首选 locale；镜像没生成时退回 glibc/musl 必定内建的 UTF-8 locale。 */
+export const DESKTOP_CLIPBOARD_LOCALE = 'zh_CN.UTF-8';
+export const DESKTOP_CLIPBOARD_FALLBACK_LOCALE = 'C.UTF-8';
+const clipboardBuffer = value => (Buffer.isBuffer(value) ? value : Buffer.from(typeof value === 'string' ? value : String(value ?? ''), 'utf8'));
+export const utf8Bytes = value => Buffer.from(String(value ?? ''), 'utf8');
+/**
+ * X11 selection 里的原始字节 → 文本。顺序：UTF-8 → GB18030 → latin1。
+ *
+ * 云端应用（尤其 Java AWT、老 GTK/Qt）只提供 STRING target 时，xclip 会回退到
+ * STRING 并原样吐出应用写入的字节：中文应用常写 GBK/GB18030，西欧应用写 latin1。
+ * 这里绝不能用 `Buffer.toString('utf8')` 直接硬解——非法字节会被替换成 U+FFFD，
+ * 中文就变成「����」，而且原字节再也找不回来。逐级回退能还原原文，最差也保留
+ * 可逆的 latin1 映射，不会再产生替换字符。
+ */
+export function decodeClipboardBuffer(value) {
+  const buffer = clipboardBuffer(value);
+  if (!buffer.length) return Object.freeze({ text: '', encoding: 'utf8' });
+  // ignoreBOM:true 与 Buffer.toString('utf8') 保持一致：合法 BOM 属于正文，不能被吞掉。
+  for (const [encoding, label] of [['utf-8', 'utf8'], ['gb18030', 'gb18030']]) {
+    try { return Object.freeze({ text: new TextDecoder(encoding, { fatal: true, ignoreBOM: true }).decode(buffer), encoding: label }); }
+    catch { /* 该编码无法完整解释这份字节，继续回退 */ }
+  }
+  return Object.freeze({ text: buffer.toString('latin1'), encoding: 'latin1' });
+}
+/**
+ * 从 `locale -a` 的输出挑选 UTF-8 locale。
+ *
+ * 镜像里 LANG 指向一个未生成的 locale 时，glibc 会静默退回 C/POSIX（ASCII），
+ * GTK/Qt/Java/xterm 于是按单字节字符集处理中文：复制出来是 GBK/latin1 字节，
+ * 粘进去显示成「ä¸æ–‡」。优先 zh_CN.UTF-8；缺失时用必定存在的 C.UTF-8（只影响
+ * 文案语言，LANGUAGE 仍保留中文翻译）；连 UTF-8 locale 都没有才保持原假设并标记
+ * source:'missing' 供排障。探测失败（无 locale 命令）同样不改变既有行为。
+ */
+export function pickDesktopLocale(values = []) {
+  const locales = (Array.isArray(values) ? values : []).map(value => String(value ?? '').trim()).filter(Boolean);
+  if (!locales.length) return Object.freeze({ locale: DESKTOP_CLIPBOARD_LOCALE, source: 'assumed' });
+  const utf8Name = value => /[._-]utf-?8$/iu.test(value);
+  if (locales.some(value => /^zh_CN[._-]utf-?8$/iu.test(value))) return Object.freeze({ locale: DESKTOP_CLIPBOARD_LOCALE, source: 'zh_CN' });
+  // glibc 会把 locale 名里的 codeset 归一化：zh_CN.utf8 也能用 zh_CN.UTF-8 命中。
+  if (locales.some(value => /^c[._-]utf-?8$/iu.test(value))) return Object.freeze({ locale: DESKTOP_CLIPBOARD_FALLBACK_LOCALE, source: 'C.UTF-8' });
+  const other = locales.find(value => utf8Name(value) && !/^(posix|c)$/iu.test(value));
+  if (other) return Object.freeze({ locale: other, source: 'utf8-fallback' });
+  return Object.freeze({ locale: DESKTOP_CLIPBOARD_LOCALE, source: 'missing' });
+}
+/**
+ * 持有 selection 的 xclip 参数：只提供 UTF8_STRING 一个 target。
+ *
+ * 不要改成 `-target UTF8_STRING,STRING`：xclip 的 -target 是**单个** X atom 名，
+ * XInternAtom(..., False) 会把整串当成一个不存在的 atom 创建出来，TARGETS 里只剩
+ * 这个名字，任何应用都不会请求它——所有粘贴都会静默失效（而自身的回读校验仍然通过）。
+ * 镜像里的 xclip 0.13 也没有 `-alt-text`，无法同时提供 STRING；STRING 是 latin1，
+ * 本来就装不下中文，所以中文只能走 UTF8_STRING。只读/写入时都锁定这个 target。
+ */
+export const clipboardOwnerArgs = display => ['-quiet', '-selection', 'clipboard', '-display', String(display), '-loops', '0', '-target', DESKTOP_CLIPBOARD_TARGET];
 
 // 仅在系统默认文件缺失时使用；正常镜像逐字复制 /etc/X11/fluxbox/keys。
 // 正文点击由 ClickFocus/clickRaises 处理并转交应用，不用 OnWindow Mouse1 抢走应用单击。
@@ -125,6 +180,8 @@ export function createDesktopController({
   const processGroups = new Set();
   // X11 剪贴板由 owner 进程持有；只保留最新一份写入，避免旧 selection 被读到。
   const clipboardOwners = new Set();
+  // 剪贴板最近一次读写的事实（字节数/编码/选择 target），排障时用 stats().clipboard 取值。
+  let lastClipboard = Object.freeze({ read: null, write: null });
   let collector;
   let collectorStarting;
   let collectorStopping;
@@ -165,8 +222,25 @@ export function createDesktopController({
     ? process.env.TZ
     : String(process.env.AGENTKIT_DESKTOP_TIME_ZONE || 'Asia/Shanghai');
   // 桌面面向中文用户：终端、文件管理器、窗口管理器都用简体中文（LC_ALL 会盖过 LANG）。
-  // 清掉继承来的 LC_ALL；它会覆盖 LANG，导致中文桌面和 xclip 的字符集行为随宿主漂移。
-  const environment = Object.freeze({ ...process.env, DISPLAY: display, LANG: 'zh_CN.UTF-8', LANGUAGE: 'zh_CN:zh', LC_ALL: undefined, LC_CTYPE: 'C.UTF-8', TZ: timeZone });
+  // 清掉继承来的 LC_ALL/LC_CTYPE；它们会覆盖 LANG，导致中文桌面和剪贴板的字符集随宿主漂移。
+  // LANG 不能写死：镜像没有生成 zh_CN.UTF-8 时 glibc 会静默退回 C/ASCII，中文应用改发
+  // GBK/latin1 字节，粘贴就出现「ä¸æ–‡」。启动时探测 locale，缺失则退回 C.UTF-8。
+  const environmentFor = (locale, source = 'assumed') => Object.freeze({ ...process.env, DISPLAY: display, LANG: locale, LANGUAGE: 'zh_CN:zh', LC_ALL: undefined, LC_CTYPE: ['assumed', 'missing'].includes(source) ? DESKTOP_CLIPBOARD_FALLBACK_LOCALE : locale, TZ: timeZone });
+  let localeState = Object.freeze({ locale: DESKTOP_CLIPBOARD_LOCALE, source: 'assumed' });
+  let environment = environmentFor(localeState.locale, localeState.source);
+  const resolveDesktopLocale = async () => {
+    try {
+      const result = await exec('locale', ['-a'], { env: { ...process.env, LC_ALL: undefined, LC_CTYPE: undefined }, timeout: 2000, maxBuffer: 128 * 1024 });
+      const output = String(result?.stdout ?? '');
+      // 命令成功但没有可解析的 locale 列表时，保留原有的中文 LANG 假设；
+      // environmentFor 会把 LC_CTYPE 锁到内建的 C.UTF-8。
+      if (!output.trim()) return pickDesktopLocale([]);
+      return pickDesktopLocale(output.split(/\r?\n/u));
+    } catch {
+      // 探测失败只说明"不确定"，不能因此换掉用户环境：保持原假设，行为与改动前一致。
+      return Object.freeze({ locale: DESKTOP_CLIPBOARD_LOCALE, source: 'assumed' });
+    }
+  };
   const trackStartupProcess = (name, child) => {
     const diagnostic = { stderr: '', exitCode: null, signal: null };
     processDiagnostics.set(name, diagnostic);
@@ -398,6 +472,10 @@ export function createDesktopController({
     displayReady = (async () => {
       // 启动本身计入活动，避免首个清理周期把尚未就绪的桌面当成长期空闲。
       lastActivityAt = now();
+      // 先确认镜像里真有中文 UTF-8 locale，再拉起所有桌面子进程：LANG 一旦是未生成的
+      // locale，GTK/Qt/Java/xterm 会退回 ASCII 字符集，复制出来就是 GBK/latin1 字节。
+      localeState = await resolveDesktopLocale();
+      environment = environmentFor(localeState.locale, localeState.source);
       spawnDisplay();
       const deadline = now() + 5000;
       let lastError;
@@ -571,7 +649,8 @@ export function createDesktopController({
     await ensureDisplay();
     // 新写入就是新的 selection；旧的 owner 必须先退出，不能留下两份文本。
     await releaseClipboardOwners();
-    const child = spawn('xclip', ['-quiet', '-selection', 'clipboard', '-display', display, '-loops', '0', '-target', 'UTF8_STRING'], { env: environment, stdio: ['pipe', 'ignore', 'pipe'] });
+    const expected = utf8Bytes(text);
+    const child = spawn('xclip', clipboardOwnerArgs(display), { env: environment, stdio: ['pipe', 'ignore', 'pipe'] });
     const owner = { child, stderr: '', closed: new Promise(resolve => child.once('close', resolve)) };
     let spawnFailure;
     child.on('error', error => { spawnFailure = error; });
@@ -584,24 +663,49 @@ export function createDesktopController({
       while (Date.now() < deadline) {
         if (spawnFailure || child.exitCode !== null) throw spawnFailure || new Error(owner.stderr || 'clipboard owner exited');
         try {
-          const selected = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', 'UTF8_STRING'], { env: environment, encoding: 'utf8', timeout: 500, maxBuffer: DESKTOP_CLIPBOARD_MAX_BYTES });
-          if (selected.stdout === text) { ready = true; break; }
+          const selected = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', DESKTOP_CLIPBOARD_TARGET], { env: environment, encoding: 'buffer', timeout: 500, maxBuffer: DESKTOP_CLIPBOARD_MAX_BYTES });
+          // 回读直接比字节：任何一环把 UTF-8 拆坏或替换成 U+FFFD，字符串比较仍可能相等，
+          // 字节比较不会。ASCII/中文/emoji/四字节字符都在这里被锁死。
+          if (clipboardBuffer(selected?.stdout).equals(expected)) { ready = true; break; }
         } catch { /* the owner may still be establishing the selection */ }
         await new Promise(resolve => setTimeout(resolve, 10));
       }
       if (!ready) throw new Error('clipboard selection did not become ready');
       clipboardOwners.add(owner);
+      lastClipboard = Object.freeze({ ...lastClipboard, write: Object.freeze({ bytes: expected.length, target: DESKTOP_CLIPBOARD_TARGET }) });
       return owner;
     } catch (error) {
       await stopClipboardOwner(owner);
       throw error;
     }
   };
+  /** 读出当前 selection 声明的 target 列表（xclip 0.13 会把 XA_ATOM 逐个打成名字）。 */
+  const clipboardTargets = async () => {
+    try {
+      const result = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', 'TARGETS'], { env: environment, encoding: 'utf8', timeout: 500, maxBuffer: 96 * 1024 });
+      return String(result?.stdout ?? '').split(/\r?\n/u).map(value => value.trim()).filter(Boolean);
+    } catch { return []; }
+  };
   const readClipboard = async () => {
     await ensureDisplay();
     try {
-      const result = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', 'UTF8_STRING'], { env: environment, encoding: 'utf8', timeout: 2000, maxBuffer: 256 * 1024 });
-      return truncateUtf8(result?.stdout, DESKTOP_CLIPBOARD_MAX_BYTES);
+      const result = await exec('xclip', ['-selection', 'clipboard', '-out', '-display', display, '-target', DESKTOP_CLIPBOARD_TARGET], { env: environment, encoding: 'buffer', timeout: 2000, maxBuffer: 256 * 1024 });
+      const bytes = clipboardBuffer(result?.stdout);
+      // xclip 0.13 在 UTF8_STRING 不可用时会自动回退请求 STRING，把应用写入的原始字节
+      // 原样吐出来（中文应用常是 GBK）。这里必须按字节回退解码；硬解 UTF-8 会把
+      // 「中文」变成「����」且不可逆，是本机看到乱码的直接原因之一。
+      const decoded = decodeClipboardBuffer(bytes);
+      const text = truncateUtf8(decoded.text, DESKTOP_CLIPBOARD_MAX_BYTES);
+      if (decoded.encoding === 'utf8') {
+        lastClipboard = Object.freeze({ ...lastClipboard, read: Object.freeze({ bytes: bytes.length, encoding: 'utf8', target: DESKTOP_CLIPBOARD_TARGET }) });
+      } else {
+        // 记下来源 selection 真正提供的 target：只有 STRING 说明是应用/镜像的老字符集问题，
+        // 有 UTF8_STRING 却给出非法字节则是应用写坏了。两者都不该再由本机静默吞掉。
+        const targets = await clipboardTargets();
+        const target = targets.includes(DESKTOP_CLIPBOARD_TARGET) ? 'invalid-utf8' : (targets.includes('STRING') ? 'STRING' : 'unknown');
+        lastClipboard = Object.freeze({ ...lastClipboard, read: Object.freeze({ bytes: bytes.length, encoding: decoded.encoding, target, targets }) });
+      }
+      return text;
     } catch {
       // 没有 owner、selection 为空或 X 尚不可用都等价于“没有可读文本”，
       // 读剪贴板不能因为空 selection 打断宿主同步。
@@ -621,9 +725,7 @@ export function createDesktopController({
       owner = await ownClipboard(text);
       const requestsSeen = () => Math.max(0, ...Array.from(owner.stderr.matchAll(/Waiting for selection request number (\d+)/gu), match => Number(match[1])));
       const beforePaste = requestsSeen();
-      // Build the shortcut from its two key names so the desktop input path
-      // cannot be rewritten into an opaque placeholder by secret scanners.
-      await pressKey(['Control_L', 'v'].join('+'));
+      await pressKey('ctrl+shift+v');
       // The key event is queued by X11 before the target asks for selection
       // data. xclip reports that request in quiet mode; keep it alive until
       // this transfer completes, with a bounded fallback for slow clients.
@@ -682,7 +784,7 @@ export function createDesktopController({
     ...buildInfo,
     dock: DESKTOP_DOCK_LAYOUT,
   });
-  const describe = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controllable: session.controllable, controlEpoch: session.controlEpoch, display: { width, height }, idleMode: 'retain-desktop', idle: Boolean(session.idle), idleTimeoutMs, idleRetentionMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS, diagnostics });
+  const describe = session => ({ sessionId: session.sessionId, readOnly: !session.controllable, controllable: session.controllable, controlEpoch: session.controlEpoch, display: { width, height }, idleMode: 'retain-desktop', idle: Boolean(session.idle), idleTimeoutMs, idleRetentionMs, frameMaxBytes: DESKTOP_MAX_FRAME_BYTES, captureFps: DESKTOP_CAPTURE_FPS, locale: localeState.locale, diagnostics });
   const openSession = async ({ identity, botId = null, controllable = false, leaseId = null, taskId = null, releaseLeaseOnIdle = false } = {}) => {
     await ensureDisplay();
     lastActivityAt = now();
@@ -833,7 +935,7 @@ export function createDesktopController({
     return stopping;
   };
   const dispose = () => { disposed = true; sessions.clear(); flushPendingText(); clearInterval(reaper); return inputQueue.then(stopDisplay); };
-  const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), dockRunning: Boolean(dockProcess && dockProcess.exitCode === null), fileManagerRunning: Boolean(fileManagerProcess && fileManagerProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt, diagnostics });
+  const stats = () => ({ display, width, height, sessions: sessions.size, idleSessions: [...sessions.values()].filter(value => value.idle).length, xserverRunning: Boolean(xvfb && xvfb.exitCode === null), windowManagerRunning: Boolean(wm && wm.exitCode === null), terminalRunning: Boolean(terminalProcess && terminalProcess.exitCode === null), dockRunning: Boolean(dockProcess && dockProcess.exitCode === null), fileManagerRunning: Boolean(fileManagerProcess && fileManagerProcess.exitCode === null), collectorRunning: Boolean(collector && collector.exitCode === null), collectorPid: collector?.pid, captureFps: DESKTOP_CAPTURE_FPS, capturedFrames, droppedFrames, lastActivityAt, locale: localeState.locale, localeSource: localeState.source, clipboardTarget: DESKTOP_CLIPBOARD_TARGET, clipboard: lastClipboard, diagnostics });
   const reaper = setInterval(reap, 1000);
   reaper.unref?.();
   const windows = async () => {

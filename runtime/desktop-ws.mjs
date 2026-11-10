@@ -1,4 +1,4 @@
-/** Minimal authenticated WebSocket bridge for the Studio desktop view. */
+/** Minimal authenticated WebSocket bridge for the DSH Host desktop view. */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { verifyDesktopPermit, desktopUnauthorized as unauthorized } from './desktop-permit.mjs';
 // 云端桌面的剪贴板上限与 computer 容器保持一致；这里不导入 desktop-session.mjs，
@@ -49,7 +49,9 @@ const equalToken = (left, right) => {
 function parseFrames(state, chunk, onFrame) {
   state.buffer = Buffer.concat([state.buffer, chunk]);
   while (state.buffer.length >= 2) {
-    const first = state.buffer[0]; const second = state.buffer[1]; const masked = Boolean(second & 0x80); let length = second & 0x7f; let offset = 2;
+    const first = state.buffer[0]; const second = state.buffer[1];
+    const fin = Boolean(first & 0x80); const opcode = first & 0x0f;
+    const masked = Boolean(second & 0x80); let length = second & 0x7f; let offset = 2;
     if (length === 126) { if (state.buffer.length < 4) return; length = state.buffer.readUInt16BE(2); offset = 4; }
     else if (length === 127) { if (state.buffer.length < 10) return; const value = state.buffer.readBigUInt64BE(2); if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('frame too large'); length = Number(value); offset = 10; }
     if (!masked || length > 1024 * 1024) throw new Error('invalid client frame');
@@ -57,7 +59,24 @@ function parseFrames(state, chunk, onFrame) {
     const key = state.buffer.subarray(offset, offset + 4); offset += 4;
     const payload = Buffer.from(state.buffer.subarray(offset, offset + length)); state.buffer = state.buffer.subarray(offset + length);
     for (let i = 0; i < payload.length; i += 1) payload[i] ^= key[i % 4];
-    onFrame(first & 0x0f, payload);
+    // 控制帧（close/ping/pong）不能分片，且可以夹在分片中间，必须立刻交上去。
+    if (opcode >= 8) { onFrame(opcode, payload); continue; }
+    if (opcode === 0) {
+      // 续帧：RFC 6455 允许客户端把一条文本消息拆成多帧。没有这一步，前半段会被
+      // 当成完整 JSON 解析（INVALID_JSON），或者多字节中文正好卡在分片边界上被撕成
+      // 两半——都要等 FIN 收齐再交给上层，字节顺序原样拼回去。
+      if (!state.fragment) throw new Error('unexpected continuation frame');
+      state.fragment.push(payload); state.fragmentBytes += payload.length;
+      if (state.fragmentBytes > 1024 * 1024) throw new Error('frame too large');
+      if (!fin) continue;
+      const message = Buffer.concat(state.fragment); const messageOpcode = state.fragmentOpcode;
+      state.fragment = undefined; state.fragmentOpcode = undefined; state.fragmentBytes = 0;
+      onFrame(messageOpcode, message);
+      continue;
+    }
+    if (state.fragment) throw new Error('interleaved data frame');
+    if (!fin) { state.fragment = [payload]; state.fragmentOpcode = opcode; state.fragmentBytes = payload.length; continue; }
+    onFrame(opcode, payload);
   }
 }
 
@@ -86,7 +105,7 @@ export function attachDesktopWebSocket({ server, runtimeToken, assistantId, brok
     if (!key) { socket.destroy(); return; }
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept(key)}\r\nSec-WebSocket-Protocol: ${protocol}\r\n\r\n`);
     if (head?.length) socket.unshift(head);
-    const state = { buffer: Buffer.alloc(0), sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, paused: false, idle: false, idleTimer: null, idleTransition: null, suspendSupported: false, epoch: 0, lastInputAt: Date.now(), lastFrameSeq: -1, timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve(), pendingMessages: 0 };
+    const state = { buffer: Buffer.alloc(0), fragment: undefined, fragmentOpcode: undefined, fragmentBytes: 0, sessionId: null, botId: null, taskId: null, leaseId: null, autoLease: false, closed: false, paused: false, idle: false, idleTimer: null, idleTransition: null, suspendSupported: false, epoch: 0, lastInputAt: Date.now(), lastFrameSeq: -1, timer: null, renewTimer: null, frameBusy: false, pending: Promise.resolve(), pendingMessages: 0 };
     const writer = createDesktopSocketWriter(socket);
     let sessionWriter;
     const send = value => { if (!state.closed) (value.type === 'session.response' ? sessionWriter || writer : writer).write(jsonFrame(value)); };

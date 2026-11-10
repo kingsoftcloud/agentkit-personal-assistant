@@ -1,6 +1,6 @@
 # AgentKit 个人助理
 
-`@kingsoftcloud/agentkit-personal-assistant` 是面向 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）的个人助理插件：在 Studio 右侧提供助理对话面板，并把对话绑定到一台用户专属的云电脑上——助理可以打开浏览器、终端、文件管理器，替用户操作桌面并实时回传画面。
+`@kingsoftcloud/agentkit-personal-assistant` 是面向 [DeepSeek Harness](https://github.com/deepseek-ai)（DSH）的个人助理插件：在 DSH Host 中提供助理对话面板，并把对话绑定到一台用户专属的云电脑上——助理可以打开浏览器、终端、文件管理器，替用户操作桌面并实时回传画面。
 
 ## 能力
 

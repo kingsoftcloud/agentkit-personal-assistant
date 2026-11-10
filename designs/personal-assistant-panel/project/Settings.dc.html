@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>设置</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif;font-size:13px;color:#17202c;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+ul,ol{margin:0;padding:0;list-style:none}
+summary{cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:'▸';display:inline-block;width:12px;color:#76808e}
+details[open] summary::before{content:'▾'}
+a{color:#2f6bff;text-decoration:none}
+a:hover{color:#1f54cc}
+</style>
+</helmet>
+<div style="width:720px;height:920px;box-sizing:border-box;display:flex;flex-direction:column;background:#ffffff;border:1px solid #d8dee8;overflow:hidden">
+
+  <header style="flex:none;height:52px;display:flex;align-items:center;gap:8px;padding:0 12px 0 8px;border-bottom:1px solid #d8dee8">
+    <button type="button" aria-label="返回" style="flex:none;width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:#536174;cursor:pointer">
+      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M9.8 3.4 5.2 8l4.6 4.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <span style="flex:1;min-width:0;font-size:14px;font-weight:600;letter-spacing:-0.01em">设置</span>
+    <span style="flex:none;display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#536174;white-space:nowrap">
+      <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#067647"></span>
+      本机已授权
+    </span>
+    <button type="button" style="flex:none;height:32px;padding:0 12px;border:0;border-radius:8px;background:#17202c;color:#ffffff;font-size:12px;font-weight:500;cursor:pointer">保存</button>
+  </header>
+
+  <main style="flex:1;min-height:0;display:flex;flex-direction:column;gap:10px;padding:16px;overflow:hidden">
+
+    <section style="flex:none;border:1px solid #d8dee8;border-radius:12px;padding:12px 14px;display:flex;align-items:center;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:13px;font-weight:600">个人助理</span>
+          <span style="border-radius:999px;padding:1px 8px;font-size:11px;line-height:1.7;background:color-mix(in srgb,#067647 12%,transparent);color:#067647">已开通</span>
+        </div>
+        <div style="font-size:11px;color:#76808e;line-height:1.8;margin-top:2px">实例 ar-8f31c2 · 云端版本 0.1.11 · 运行中</div>
+      </div>
+      <button type="button" style="flex:none;height:30px;padding:0 10px;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;font-size:12px;cursor:pointer">诊断</button>
+    </section>
+
+    <section style="flex:none;border:1px solid #d8dee8;border-radius:12px;padding:12px 14px;display:flex;align-items:flex-start;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:12px;font-weight:600">控制本机</span>
+          <span style="border-radius:999px;padding:1px 8px;font-size:11px;line-height:1.7;background:color-mix(in srgb,#067647 12%,transparent);color:#067647">已授权</span>
+        </div>
+        <div style="font-size:11px;color:#76808e;line-height:1.8;margin-top:2px">助理可在本机发起新会话、操作本地窗口与文件；高风险操作前会先问你。</div>
+      </div>
+      <button type="button" style="flex:none;height:30px;padding:0 10px;border:1px solid color-mix(in srgb,#b42318 28%,transparent);border-radius:8px;background:#ffffff;color:#b42318;font-size:12px;cursor:pointer">取消授权</button>
+    </section>
+
+    <section style="flex:none;display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+        <span style="font-size:12px;font-weight:600;color:#536174">模型</span>
+        <span style="font-size:11px;color:#76808e">影响新消息，正在运行的任务不受影响</span>
+      </div>
+      <button type="button" style="display:flex;align-items:center;gap:10px;width:100%;height:44px;padding:0 12px;border:1px solid #d8dee8;border-radius:10px;background:#ffffff;cursor:pointer;text-align:left">
+        <span style="flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">deepseek-v4.1-flash-1017</span>
+        <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" style="flex:none;color:#76808e"><path d="M2.6 4.4 6 7.8l3.4-3.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </section>
+
+    <section style="flex:none;display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+        <span style="font-size:12px;font-weight:600;color:#536174">提示词</span>
+        <span style="font-size:11px;color:#76808e;font-variant-numeric:tabular-nums">48 / 8000</span>
+      </div>
+      <div style="border:1px solid #d8dee8;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.8;color:#33415a">
+        你是我常驻云端的个人助理。回答先给结论，再给细节；涉及不可撤销的操作前必须问我。
+      </div>
+    </section>
+
+    <section style="flex:none;display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px">
+        <span style="font-size:12px;font-weight:600;color:#536174">环境变量</span>
+        <button type="button" style="border:0;background:transparent;padding:2px 4px;font-size:12px;color:#536174;cursor:pointer">添加</button>
+      </div>
+      <ul style="border:1px solid #d8dee8;border-radius:10px;overflow:hidden">
+        <li style="display:flex;align-items:center;gap:10px;padding:9px 12px">
+          <span style="flex:none;width:104px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#536174">GREETING</span>
+          <span style="flex:1;min-width:0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">早上好，X</span>
+          <button type="button" aria-label="删除" style="flex:none;border:0;background:transparent;padding:2px;font-size:11px;color:#76808e;cursor:pointer">删除</button>
+        </li>
+        <li style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-top:1px solid #eef1f6">
+          <span style="flex:none;width:104px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#536174">MCP_TOKEN</span>
+          <span style="flex:1;min-width:0;display:flex;align-items:center;gap:6px;font-size:12px"><span style="letter-spacing:0.12em">••••••••</span>
+            <span style="border-radius:999px;padding:0 6px;font-size:10px;line-height:1.7;background:#f1f3f6;color:#536174">敏感</span>
+          </span>
+          <button type="button" aria-label="删除" style="flex:none;border:0;background:transparent;padding:2px;font-size:11px;color:#76808e;cursor:pointer">删除</button>
+        </li>
+      </ul>
+    </section>
+
+    <section style="flex:none;display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid #d8dee8;border-radius:12px">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600">运行时</div>
+        <div style="font-size:11px;color:#76808e;line-height:1.8">0.1.11 · 镜像 sha256:9f2c…</div>
+      </div>
+      <button type="button" style="flex:none;height:30px;padding:0 10px;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;font-size:12px;cursor:pointer">检查更新</button>
+    </section>
+
+    <div style="flex:1"></div>
+
+    <section style="flex:none;border:1px solid color-mix(in srgb,#b42318 24%,transparent);border-radius:12px;padding:12px 14px;display:flex;align-items:flex-start;gap:10px;background:#fef7f6">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:#b42318">关闭个人助理</div>
+        <div style="font-size:11px;color:#8a4a45;line-height:1.8;margin-top:2px">释放云电脑资源。记忆、会话历史与工作区文件保留 7 天，期间重新开通会接上原来的数据。</div>
+      </div>
+      <button type="button" style="flex:none;height:30px;padding:0 10px;border:1px solid color-mix(in srgb,#b42318 32%,transparent);border-radius:8px;background:#ffffff;color:#b42318;font-size:12px;cursor:pointer">关闭</button>
+    </section>
+
+    <div style="flex:none;font-size:11px;color:#76808e;line-height:1.8">关闭需要再次输入实例标识确认，避免误操作释放付费资源。</div>
+
+  </main>
+
+  <footer style="flex:none;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:7px 12px;border-top:1px solid #d8dee8;font-size:12px;color:#536174">
+    <details>
+      <summary>诊断</summary>
+      <div style="padding-top:8px;line-height:1.8">
+        <div>云端实例：ar-8f31c2</div>
+        <div>网关：wss://…/personal-assistant/desktop/ws</div>
+        <div>配置来源：Studio</div>
+      </div>
+    </details>
+    <small style="opacity:0.75">构建 开发模式</small>
+  </footer>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":720,"height":920}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

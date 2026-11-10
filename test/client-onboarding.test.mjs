@@ -57,7 +57,7 @@ test('needs-create：配置接口失败也走开通引导，并回落到 desktop
 });
 
 test('已发现实例：只提供复用连接，不再引导创建', async t => {
-  const panel = harness(t, { configurationError: fail(503, 'PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE'), status: { configured: false, reason: 'needs-create', candidates: [{ agentId: 'ar-abc', name: '旧助理' }] } });
+  const panel = harness(t, { configurationError: fail(503, 'PERSONAL_ASSISTANT_HOST_UNAVAILABLE'), status: { configured: false, reason: 'needs-create', candidates: [{ agentId: 'ar-abc', name: '旧助理' }] } });
   await flush();
   assert.match(panel.text(), /发现已开通的个人助理/);
   assert.ok(panel.buttons().includes('连接已发现的个人助理'), '复用连接是唯一主操作');
@@ -65,7 +65,7 @@ test('已发现实例：只提供复用连接，不再引导创建', async t => 
 });
 
 test('读不到状态：引导重新检查，创建降为二次确认，避免重复创建', async t => {
-  const panel = harness(t, { configurationError: fail(401, 'PERSONAL_ASSISTANT_TICKET_REFUSED'), statusError: fail(503, 'PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE') });
+  const panel = harness(t, { configurationError: fail(401, 'PERSONAL_ASSISTANT_TICKET_REFUSED'), statusError: fail(503, 'PERSONAL_ASSISTANT_HOST_UNAVAILABLE') });
   await flush();
   assert.match(panel.text(), /暂时读不到开通状态/);
   assert.match(panel.text(), /检查开通状态/);

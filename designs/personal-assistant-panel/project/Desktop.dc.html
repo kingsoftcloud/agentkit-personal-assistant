@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>云电脑</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif;font-size:13px;color:#17202c;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+ul,ol{margin:0;padding:0;list-style:none}
+summary{cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:'▸';display:inline-block;width:12px;color:#76808e}
+details[open] summary::before{content:'▾'}
+a{color:#2f6bff;text-decoration:none}
+a:hover{color:#1f54cc}
+</style>
+</helmet>
+<div style="width:720px;height:920px;box-sizing:border-box;display:flex;flex-direction:column;background:#ffffff;border:1px solid #d8dee8;overflow:hidden">
+
+  <header style="flex:none;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;border-bottom:1px solid #d8dee8">
+    <div style="display:flex;align-items:center;gap:8px;min-width:0">
+      <span style="font-size:14px;font-weight:600;letter-spacing:-0.01em">云电脑</span>
+      <span style="border-radius:999px;padding:1px 8px;font-size:12px;line-height:1.7;background:color-mix(in srgb, #946200 14%, transparent);color:#946200">只读旁观</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;flex:none">
+      <span style="display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#536174;white-space:nowrap;margin-right:2px">
+        <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#067647"></span>
+        本机已授权
+      </span>
+      <button type="button" aria-label="全屏" style="width:32px;height:32px;display:grid;place-items:center;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;color:#536174;cursor:pointer;padding:0">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M6 2.4H3.2c-.4 0-.8.4-.8.8V6M10 2.4h2.8c.4 0 .8.4.8.8V6M6 13.6H3.2c-.4 0-.8-.4-.8-.8V10M10 13.6h2.8c.4 0 .8-.4.8-.8V10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+      </button>
+      <button type="button" aria-label="更多" style="width:32px;height:32px;display:grid;place-items:center;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;color:#536174;cursor:pointer;padding:0">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="3.4" cy="8" r="1.1" fill="currentColor"/><circle cx="8" cy="8" r="1.1" fill="currentColor"/><circle cx="12.6" cy="8" r="1.1" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main style="flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;padding:16px">
+
+    <div style="flex:none;height:430px;position:relative;border:1px solid #d8dee8;border-radius:12px;overflow:hidden;background:#2b3444">
+
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="margin:22px auto 0;width:552px;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 10px 26px rgba(16,24,40,0.38)">
+          <div style="height:28px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#f1f3f6;border-bottom:1px solid #e3e8ef">
+            <span aria-hidden="true" style="display:flex;gap:4px">
+              <span style="width:8px;height:8px;border-radius:999px;background:#dfe4ec"></span>
+              <span style="width:8px;height:8px;border-radius:999px;background:#dfe4ec"></span>
+              <span style="width:8px;height:8px;border-radius:999px;background:#dfe4ec"></span>
+            </span>
+            <span style="flex:1;height:18px;display:flex;align-items:center;padding:0 8px;border-radius:999px;background:#ffffff;border:1px solid #e3e8ef;font-size:10px;color:#76808e">pa.local/welcome</span>
+          </div>
+          <div style="padding:18px 20px 20px">
+            <div style="font-size:10px;letter-spacing:0.1em;color:#536174">个人助理 · 云电脑</div>
+            <div style="margin-top:6px;font-size:17px;font-weight:600;letter-spacing:-0.01em">欢迎，这台电脑属于你</div>
+            <p style="margin:6px 0 0;font-size:11px;line-height:1.7;color:#536174">助理可以在这里打开浏览器、运行命令、整理文件；你随时可以从 Studio 接管。</p>
+            <div style="display:flex;gap:8px;margin-top:14px">
+              <button type="button" style="height:28px;padding:0 12px;border:0;border-radius:6px;background:#17202c;color:#ffffff;font-size:11px;cursor:pointer">打开终端</button>
+              <button type="button" style="height:28px;padding:0 12px;border:1px solid #d8dee8;border-radius:6px;background:#ffffff;color:#17202c;font-size:11px;cursor:pointer">文件管理器</button>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top:auto;height:42px;display:flex;align-items:center;justify-content:center;gap:10px;background:#1b2431">
+          <span aria-hidden="true" style="width:22px;height:22px;border-radius:6px;background:#3d4a5e"></span>
+          <span aria-hidden="true" style="width:22px;height:22px;border-radius:6px;background:#3d4a5e"></span>
+          <span aria-hidden="true" style="width:22px;height:22px;border-radius:6px;background:#3d4a5e"></span>
+          <span aria-hidden="true" style="width:22px;height:22px;border-radius:6px;background:#3d4a5e"></span>
+          <span style="font-size:10px;color:#9aa6b8;margin-left:6px;font-variant-numeric:tabular-nums">12:04</span>
+        </div>
+      </div>
+
+      <span style="position:absolute;top:10px;left:10px;display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:2px 9px;background:rgba(255,255,255,0.92);font-size:11px;color:#17202c">
+        <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#946200"></span>
+        助理正在操作
+      </span>
+
+      <div style="position:absolute;left:352px;top:264px;display:flex;align-items:center;gap:5px">
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2.4 1.6 11.6 6.4 7.5 7.5 6.4 11.6 2.4 1.6Z" fill="#ffffff" stroke="#17202c" stroke-width="1.1" stroke-linejoin="round"/></svg>
+        <span style="border-radius:4px;padding:0 4px;background:#17202c;color:#ffffff;font-size:10px;line-height:15px">助理</span>
+      </div>
+
+    </div>
+
+    <div style="flex:none;display:flex;justify-content:center">
+      <div style="display:inline-flex;align-items:center;gap:10px;border:1px solid #d8dee8;border-radius:999px;padding:5px 6px 5px 14px;background:#ffffff;box-shadow:0 1px 2px rgba(16,24,40,0.05)">
+        <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#946200"></span>
+        <span style="font-size:12px;color:#536174">助理正在使用 · 点画面即可接管</span>
+        <button type="button" style="height:28px;padding:0 14px;border:0;border-radius:999px;background:#17202c;color:#ffffff;font-size:12px;font-weight:500;cursor:pointer">接管</button>
+      </div>
+    </div>
+
+    <div style="flex:none;margin-top:auto;display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:2px">
+      <span style="font-size:12px;font-weight:600;color:#536174">助理最近在做什么</span>
+      <span style="font-size:11px;color:#76808e">只读旁观时也能看到</span>
+    </div>
+
+    <div style="flex:none;border:1px solid #d8dee8;border-radius:12px;overflow:hidden;background:#ffffff">
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 14px">
+        <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="none" style="flex:none;color:#536174"><circle cx="8" cy="8" r="6.2" stroke="currentColor" stroke-width="1.3"/><path d="M2.4 8h11.2M8 1.8c1.7 1.8 2.6 3.9 2.6 6.2S9.7 12.4 8 14.2c-1.7-1.8-2.6-3.9-2.6-6.2S6.3 3.6 8 1.8Z" stroke="currentColor" stroke-width="1.2"/></svg>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">打开浏览器，加载欢迎页</span>
+        <span style="flex:none;font-size:11px;color:#76808e">3 秒前</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-top:1px solid #d8dee8">
+        <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="none" style="flex:none;color:#536174"><path d="M9.4 1.8H4.6c-.9 0-1.6.7-1.6 1.6v9.2c0 .9.7 1.6 1.6 1.6h6.8c.9 0 1.6-.7 1.6-1.6V5.4l-3.6-3.6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.2 2v3.4h3.3" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">写入 ~/reports/week-45.md</span>
+        <span style="flex:none;font-size:11px;color:#76808e">12 秒前</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-top:1px solid #d8dee8">
+        <svg aria-hidden="true" width="15" height="15" viewBox="0 0 16 16" fill="none" style="flex:none;color:#536174"><rect x="1.9" y="2.6" width="12.2" height="10.8" rx="1.7" stroke="currentColor" stroke-width="1.3"/><path d="M4.6 6.4l2 1.6 2-1.6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.6 10.6h6.8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px">执行命令 ls ~/workspace/notes</span>
+        <span style="flex:none;font-size:11px;color:#76808e">40 秒前</span>
+      </div>
+    </div>
+
+  </main>
+
+  <footer style="flex:none;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:7px 12px;border-top:1px solid #d8dee8;font-size:12px;color:#536174">
+    <details>
+      <summary>诊断</summary>
+      <div style="padding-top:8px;line-height:1.8">
+        <div>云端实例：ar-8f31c2</div>
+        <div>画面：1280×800 · 12 fps</div>
+        <div>快捷键会转发到云电脑；Esc 优先退出全屏</div>
+      </div>
+    </details>
+    <small style="opacity:0.75">构建 开发模式</small>
+  </footer>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":720,"height":920}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

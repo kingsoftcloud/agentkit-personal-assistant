@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>开通引导</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif;font-size:13px;color:#17202c;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+ul,ol{margin:0;padding:0;list-style:none}
+summary{cursor:pointer;list-style:none}
+summary::-webkit-details-marker{display:none}
+summary::before{content:'▸';display:inline-block;width:12px;color:#76808e}
+details[open] summary::before{content:'▾'}
+a{color:#2f6bff;text-decoration:none}
+a:hover{color:#1f54cc}
+</style>
+</helmet>
+<div style="width:720px;height:920px;box-sizing:border-box;display:flex;flex-direction:column;background:#ffffff;border:1px solid #d8dee8;overflow:hidden">
+
+  <header style="flex:none;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;border-bottom:1px solid #d8dee8">
+    <div style="display:flex;align-items:center;gap:8px;min-width:0">
+      <span style="font-size:14px;font-weight:600;letter-spacing:-0.01em">个人助理</span>
+      <span style="border-radius:999px;padding:1px 8px;font-size:12px;line-height:1.7;background:color-mix(in srgb, #946200 14%, transparent);color:#946200">未开通</span>
+    </div>
+    <button type="button" style="height:32px;padding:0 10px;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;color:#536174;font-size:12px;cursor:pointer">设置</button>
+  </header>
+
+  <main style="flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:28px 36px">
+    <div style="font-size:11px;letter-spacing:0.1em;color:#536174">个人助理 · 开通引导</div>
+    <h1 style="margin:0;font-size:20px;font-weight:600;letter-spacing:-0.01em;text-align:center">开通个人助理</h1>
+    <p style="margin:0;max-width:460px;text-align:center;line-height:1.75;color:#536174">一个子账号可开通一个个人助理。开通后会得到一位云端持续运行的助理和一台专属云电脑，关掉 Studio 也会继续工作。</p>
+
+    <section style="width:100%;max-width:460px;border:1px solid #d8dee8;border-radius:12px;overflow:hidden;background:#ffffff">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:#f4f6fa;border-bottom:1px solid #d8dee8">
+        <span style="font-size:12px;color:#536174">开通需要三步</span>
+        <span style="font-size:12px;color:#536174">约 1–2 分钟</span>
+      </div>
+      <ol>
+        <li style="display:flex;align-items:center;gap:10px;padding:12px 14px;line-height:1.7">
+          <span aria-hidden="true" style="flex:none;width:20px;height:20px;border-radius:999px;display:grid;place-items:center;background:color-mix(in srgb, #067647 12%, transparent);color:#067647">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.2 4.8 8.5 9.5 3.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span style="flex:1;min-width:0">登录 Studio 云端账号</span>
+          <span style="flex:none;font-size:12px;color:#067647">已完成</span>
+        </li>
+        <li style="display:flex;align-items:center;gap:10px;padding:12px 14px;line-height:1.7;border-top:1px solid #d8dee8">
+          <span aria-hidden="true" style="flex:none;width:20px;height:20px;border-radius:999px;display:grid;place-items:center;background:#17202c;color:#ffffff;font-size:12px">2</span>
+          <span style="flex:1;min-width:0">开通个人助理，云端 7×24 运行</span>
+          <span style="flex:none;font-size:12px;color:#536174">进行中</span>
+        </li>
+        <li style="display:flex;align-items:center;gap:10px;padding:12px 14px;line-height:1.7;border-top:1px solid #d8dee8">
+          <span aria-hidden="true" style="flex:none;width:20px;height:20px;border-radius:999px;display:grid;place-items:center;border:1px solid #d8dee8;background:#ffffff;color:#536174;font-size:12px">3</span>
+          <span style="flex:1;min-width:0;color:#536174">连接后即可对话，需要动手时打开「云电脑」</span>
+          <span style="flex:none;font-size:12px;color:#76808e">自动</span>
+        </li>
+      </ol>
+    </section>
+
+    <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:#536174">
+      <span aria-hidden="true" style="width:6px;height:6px;border-radius:999px;background:#946200"></span>
+      上次检查 16:44:02 · 账号下没有个人助理
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center">
+      <button type="button" style="height:44px;padding:0 20px;border:0;border-radius:8px;background:#17202c;color:#ffffff;font-size:13px;font-weight:500;cursor:pointer">开通个人助理</button>
+      <button type="button" style="height:44px;padding:0 16px;border:1px solid #d8dee8;border-radius:8px;background:#ffffff;color:#17202c;font-size:13px;cursor:pointer">检查开通状态</button>
+    </div>
+
+    <p style="margin:0;font-size:12px;color:#76808e">已有实例会自动复用，不会重复创建。</p>
+  </main>
+
+  <footer style="flex:none;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:7px 12px;border-top:1px solid #d8dee8;font-size:12px;color:#536174">
+    <details>
+      <summary>诊断</summary>
+      <div style="padding-top:8px;line-height:1.8;color:#536174">
+        <div>云端实例：未开通</div>
+        <div>连接标识：未连接</div>
+        <div>目录连接关闭码：—</div>
+      </div>
+    </details>
+    <small style="opacity:0.75">构建 开发模式</small>
+  </footer>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":720,"height":920}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

@@ -86,7 +86,7 @@ test('client desktop ticket and frame operations stay on the gateway RPC boundar
   assert.equal(requests.every(item => !Object.hasOwn(item.payload, 'token')), true);
 });
 
-test('client maps durable session, memory, and schedule operations to the public gateway', async () => {
+test('client maps durable session and memory operations to the public gateway', async () => {
   const requests = [];
   const client = createPersonalAssistantClient({ gateway: { request: async (operation, payload) => { requests.push({ operation, payload }); return { ok: true }; } } });
   client.selectBot('researcher');
@@ -98,17 +98,16 @@ test('client maps durable session, memory, and schedule operations to the public
   await client.submitTurn('session-1', { input: 'continue' });
   await client.remember({ key: 'project', content: 'marker' });
   await client.searchMemory('marker');
-  await client.createSchedule({ scheduleId: 'review', runAt: 123 });
-  await client.listSchedules();
-  await client.deleteSchedule('review');
   assert.deepEqual(requests.map(item => item.operation), [
     'personal-assistant.session.create', 'personal-assistant.sessions.list',
     'personal-assistant.sessions.messages.list', 'personal-assistant.sessions.messages.append',
     'personal-assistant.sessions.turns.list', 'personal-assistant.sessions.turns.submit',
     'personal-assistant.memory.upsert', 'personal-assistant.memory.search',
-    'personal-assistant.schedules.create', 'personal-assistant.schedules.list',
-    'personal-assistant.schedules.delete',
   ]);
+  // Host 白名单从来没有复数 schedules operation，客户端不再暴露这三个死方法（E4）。
+  assert.equal('createSchedule' in client, false);
+  assert.equal('listSchedules' in client, false);
+  assert.equal('deleteSchedule' in client, false);
   assert.equal(requests[0].payload.botId, 'researcher');
   assert.equal(requests.find(item => item.operation === 'personal-assistant.memory.upsert').payload.key, 'project');
 });

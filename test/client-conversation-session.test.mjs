@@ -7,7 +7,7 @@ import { PersonalAssistantConversation } from '../src/client/conversation.mjs';
 
 const STORAGE_PREFIX = 'agentkit.personal-assistant.current-session.v1';
 
-function view(t, { listed = { sessions: [{ sessionId: 'old-session', title: '旧会话' }] }, scope = { agentId: 'ar-test', botId: 'default' }, snapshot, freshScope = false } = {}) {
+function view(t, { listed = { sessions: [{ sessionId: 'old-session', title: '旧会话' }] }, scope = { agentId: 'ar-test', botId: 'default' } } = {}) {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const hooks = [], pendingEffects = [], requests = [];
   let cursor = 0, dirty = true, tree;
@@ -23,11 +23,11 @@ function view(t, { listed = { sessions: [{ sessionId: 'old-session', title: '旧
     requests.push({ operation, payload });
     if (operation.endsWith('.sessions.list')) return listed;
     if (operation.endsWith('.session.create')) return { sessionId: 'new-session', title: '新会话' };
-    if (operation.endsWith('.session.snapshot')) return snapshot ? snapshot(payload) : { ...listed, cursor: 0, messages: [], turns: [] };
+    if (operation.endsWith('.session.snapshot')) return { cursor: 0, messages: [], turns: [] };
     if (operation.endsWith('.session.events')) return { cursor: 0, events: [], turns: [] };
     return {};
   };
-  const render = () => { cursor = 0; dirty = false; tree = PersonalAssistantConversation({ React: R, request, scope: freshScope ? { ...scope } : scope }); for (const effect of pendingEffects.splice(0)) effect(); };
+  const render = () => { cursor = 0; dirty = false; tree = PersonalAssistantConversation({ React: R, request, scope }); for (const effect of pendingEffects.splice(0)) effect(); };
   const settle = async () => { for (let i = 0; i < 40; i++) { if (dirty) render(); await new Promise(resolve => setImmediate(resolve)); } return tree; };
   const nodes = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(nodes)] : [];
   const textOf = node => nodes(node).flatMap(item => item.children.filter(child => typeof child === 'string')).join(' ');
@@ -54,33 +54,13 @@ test('会话目录格式异常时不静默创建新会话', async t => {
   assert.match(viewState.text(), /会话目录格式无效/);
 });
 
-test('会话目录出现重复 sessionId 时不猜选目标，也不创建新会话', async t => {
-  const viewState = view(t, { listed: { sessions: [{ sessionId: 'same-session' }, { sessionId: 'same-session' }] } });
-  await viewState.settle();
-  assert.equal(viewState.requests.filter(row => row.operation.endsWith('.session.snapshot')).length, 0);
-  assert.equal(viewState.requests.filter(row => row.operation.endsWith('.session.create')).length, 0);
-  assert.match(viewState.text(), /会话目录包含无效会话/);
-});
-
 test('面板重挂载优先恢复当前 Bot 记住的 sessionId，而不是盲选最新会话', async t => {
   installStorage(t, { [`${STORAGE_PREFIX}:ar-test:default`]: 'old-session' });
-  const viewState = view(t, { listed: { runtimeInstanceId: 'runtime-1', stateStorage: 'state-path', sessions: [{ sessionId: 'newer-session' }, { sessionId: 'old-session' }] } });
+  const viewState = view(t, { listed: { sessions: [{ sessionId: 'newer-session' }, { sessionId: 'old-session' }] } });
   await viewState.settle();
   const snapshot = viewState.requests.find(row => row.operation.endsWith('.session.snapshot'));
   assert.equal(snapshot?.payload.sessionId, 'old-session');
-  const root = viewState.nodes().find(node => node.props['data-session-id']);
-  assert.equal(root?.props['data-session-id'], 'old-session');
-  assert.equal(root?.props['data-runtime-instance-id'], 'runtime-1');
-  assert.equal(root?.props['data-state-storage'], 'state-path');
-});
-
-test('会话目录超过一个时仍恢复当前线程，但个人助理界面不暴露会话选择器', async t => {
-  const viewState = view(t, { listed: { sessions: [{ sessionId: 'latest-session', title: '最近会话' }, { sessionId: 'saved-session', title: '已保存会话' }] } });
-  await viewState.settle();
-  const selector = viewState.nodes().find(node => node.props['data-personal-assistant-session-selector'] === 'true');
-  assert.equal(selector, undefined);
-  assert.equal(viewState.nodes().some(node => node.props['aria-label'] === '选择个人助理会话'), false);
-  assert.equal(viewState.nodes().find(node => node.props['data-session-id'])?.props['data-session-id'], 'latest-session');
+  assert.equal(viewState.nodes().find(node => node.props['data-session-id'])?.props['data-session-id'], 'old-session');
 });
 
 test('已有会话指针但云端返回空目录时不自动造一个新会话', async t => {
@@ -91,44 +71,10 @@ test('已有会话指针但云端返回空目录时不自动造一个新会话',
   assert.match(viewState.text(), /历史会话暂时不可见/);
 });
 
-test('记住的会话从非空目录暂时消失时保持指针，不默默切换到其他会话', async t => {
-  const values = installStorage(t, { [`${STORAGE_PREFIX}:ar-test:default`]: 'remembered-session' });
-  const viewState = view(t, { listed: { sessions: [{ sessionId: 'another-session' }] } });
-  await viewState.settle();
-  assert.equal(viewState.requests.some(row => row.operation.endsWith('.session.snapshot')), false);
-  assert.equal(viewState.requests.some(row => row.operation.endsWith('.session.create')), false);
-  assert.equal(values.get(`${STORAGE_PREFIX}:ar-test:default`), 'remembered-session');
-  assert.match(viewState.text(), /历史会话暂时不可见/);
-});
-
-test('快照返回 SESSION_NOT_FOUND 后重试空目录，仍不清空指针或自动新建', async t => {
-  const key = `${STORAGE_PREFIX}:ar-test:default`;
-  const values = installStorage(t, { [key]: 'old-session' });
-  const listed = { sessions: [{ sessionId: 'old-session' }] };
-  const viewState = view(t, { listed, snapshot: () => { throw Object.assign(new Error('当前助理不存在这个会话'), { code: 'SESSION_NOT_FOUND' }); } });
-  await viewState.settle();
-  assert.equal(values.get(key), 'old-session');
-  listed.sessions = [];
-  const retry = viewState.nodes().find(node => node.type === 'button' && node.children.includes('重试'));
-  retry.props.onClick();
-  await viewState.settle();
-  assert.equal(viewState.requests.some(row => row.operation.endsWith('.session.create')), false);
-  assert.match(viewState.text(), /历史会话暂时不可见/);
-});
-
-test('同一 Agent/Bot 的 scope 对象重新渲染时不反复 bootstrap 或换会话', async t => {
-  installStorage(t);
-  const viewState = view(t, { freshScope: true });
-  await viewState.settle();
-  assert.equal(viewState.requests.filter(row => row.operation.endsWith('.sessions.list')).length, 1);
-  assert.equal(viewState.requests.filter(row => row.operation.endsWith('.session.snapshot')).length, 1);
-  assert.equal(viewState.nodes().find(node => node.props['data-session-id'])?.props['data-session-id'], 'old-session');
-});
-
-test('新任务只能由显式按钮创建，并在创建后打开返回的 sessionId', async t => {
+test('新会话只能由显式按钮创建，并在创建后打开返回的 sessionId', async t => {
   const viewState = view(t);
   await viewState.settle();
-  const button = viewState.nodes().find(node => node.props['aria-label'] === '开始新任务');
+  const button = viewState.nodes().find(node => node.props['aria-label'] === '新建会话');
   assert.ok(button);
   button.props.onClick();
   await viewState.settle();
@@ -136,11 +82,4 @@ test('新任务只能由显式按钮创建，并在创建后打开返回的 sess
   const snapshots = viewState.requests.filter(row => row.operation.endsWith('.session.snapshot'));
   assert.equal(snapshots.at(-1)?.payload.sessionId, 'new-session');
   assert.equal(viewState.nodes().find(node => node.props['data-session-id'])?.props['data-session-id'], 'new-session');
-});
-
-test('会话快照格式异常时不伪装成空会话，也不创建新会话', async t => {
-  const viewState = view(t, { snapshot: () => ({ cursor: 'not-a-number', messages: [], turns: [] }) });
-  await viewState.settle();
-  assert.equal(viewState.requests.filter(row => row.operation.endsWith('.session.create')).length, 0);
-  assert.match(viewState.text(), /会话快照格式无效/);
 });

@@ -1,5 +1,14 @@
 /** Browser-safe Personal Assistant client and Cloud Computer panel. */
 
+// 新面板视图（纯函数，见 docs/prototype-implementation-plan.md 第 1 章）。
+// 数据与回调统一在本文件的 PersonalAssistantPanelShell 里注入，视图本身不发请求。
+import { renderBotsList } from './views/bots-list.mjs';
+import { renderBotDetail } from './views/bot-detail.mjs';
+import { renderSettings } from './views/settings.mjs';
+import { renderLocalAccess, LOCAL_ACCESS_SCOPES } from './views/local-access.mjs';
+import { renderCreateProgress } from './views/create-progress.mjs';
+import { backIcon, button as panelButton, connectionDot, connectionStateOf, styles as panelUi, TOKENS as PANEL_TOKENS } from './views/ui.mjs';
+
 export class PersonalAssistantGatewayUnavailableError extends Error {
   constructor() {
     super('Personal Assistant gateway is not connected');
@@ -43,9 +52,6 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
     submitTurn: (sessionId, input) => request('personal-assistant.sessions.turns.submit', { sessionId, ...input, botId: input?.botId ?? selectedBotId }),
     searchMemory: query => request('personal-assistant.memory.search', { query, botId: selectedBotId }),
     remember: input => request('personal-assistant.memory.upsert', { ...input, botId: input?.botId ?? selectedBotId }),
-    listSchedules: botId => request('personal-assistant.schedules.list', { botId: botId ?? selectedBotId }),
-    createSchedule: input => request('personal-assistant.schedules.create', { ...input, botId: input?.botId ?? selectedBotId }),
-    deleteSchedule: scheduleId => request('personal-assistant.schedules.delete', { scheduleId, botId: selectedBotId }),
     computerStatus: computerId => request('personal-assistant.computer.status', { computerId, botId: selectedBotId }),
     computerAction: input => request('personal-assistant.computer.action', { ...input, botId: input?.botId ?? selectedBotId }),
     browserOpen: url => request('personal-assistant.computer.action', { action: 'open', args: { url }, botId: selectedBotId }),
@@ -70,11 +76,18 @@ export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
-import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, readCloudClipboardAfterCopy, clipboardTextOf, pasteToCloud, readLocalClipboard, writeLocalClipboard } from './components/desktop-clipboard.mjs';
+import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard, clipboardTextOf } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
 import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
 export const PERSONAL_ASSISTANT_CLIENT_BUILD = typeof __PA_CLIENT_BUILD__ === 'string' ? __PA_CLIENT_BUILD__ : '开发模式';
+/** 构建标记按本机时区显示（构建串是 UTC，直接截断会让用户看到 8 小时前的时间）。 */
+export function localBuildLabel(build) {
+  const time = new Date(build);
+  if (Number.isNaN(time.getTime())) return String(build || '开发模式');
+  const pad = value => String(value).padStart(2, '0');
+  return `${pad(time.getHours())}:${pad(time.getMinutes())}`;
+}
 const FIRST_FRAME_TIMEOUT_MS = 12_000;
 let clientReact;
 export function setClientReactRuntime(runtime) { clientReact = runtime; }
@@ -96,8 +109,8 @@ const directoryUnsupported = error => Number(error?.status) === 409 && ['PERSONA
 /**
  * 「未开通」引导页的唯一事实来源：云电脑面板、设置页、首页共用同一套判断与动作。
  *
- * reason 由 Studio 给出：needs-create（账号下确实没有实例）、credential-unavailable（有实例但
- * 凭证取不到）、unavailable（连状态都读不到，多为 Studio 未登录云端或网关不可达）。
+ * reason 由 DSH Host 给出：needs-create（账号下确实没有实例）、credential-unavailable（有实例但
+ * 凭证取不到）、unavailable（连状态都读不到，多为 DSH Host 未登录云端或网关不可达）。
  * 只有确认没有实例时才给「开通」入口——一个子账号一个个人助理，已开通必须复用，避免重复创建；
  * candidates 非空时一律优先连接已发现的实例。
  */
@@ -112,7 +125,7 @@ export function unconfiguredGuidance(binding) {
   };
   if (reason === 'needs-create') return {
     tone: 'create', title: '开通个人助理',
-    detail: '一个子账号可开通一个个人助理。开通后会得到一位云端持续运行的助理和一台专属云电脑，关掉 Studio 也会继续工作。',
+    detail: '一个子账号可开通一个个人助理。开通后会得到一位云端持续运行的助理和一台专属云电脑，关掉 DSH Host 也会继续工作。',
     actions: [{ id: 'create', label: '开通个人助理', primary: true }, check],
   };
   if (reason === 'credential-unavailable') return {
@@ -123,14 +136,14 @@ export function unconfiguredGuidance(binding) {
   const detail = typeof binding?.detail === 'string' && binding.detail ? binding.detail : '';
   return {
     tone: 'retry', title: '暂时读不到开通状态',
-    detail: `${detail}请先确认 Studio 已登录云端账号，再重新检查一次；确认账号下确实没有个人助理后再开通，避免重复创建。`,
+    detail: `${detail}请先确认 DSH Host 已登录云端账号，再重新检查一次；确认账号下确实没有个人助理后再开通，避免重复创建。`,
     actions: [check, { id: 'create', label: '确认未开通后开通', primary: false }],
   };
 }
 
 const onboardingSteps = tone => tone === 'reuse'
   ? ['确认账号下的个人助理实例', '直接连接即可复用，不会重复创建', '需要看画面或动手时，打开「云电脑」接管']
-  : ['登录 Studio 云端账号，开通个人助理（约 1–2 分钟）', '连接后即可在「个人助理」页对话，云端 7×24 运行', '需要看画面或动手时，打开「云电脑」接管'];
+  : ['登录 DSH Host 云端账号，开通个人助理（约 1–2 分钟）', '连接后即可在「个人助理」页对话，云端 7×24 运行', '需要看画面或动手时，打开「云电脑」接管'];
 
 const onboardingStyle = {
   page: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: '32px 20px', textAlign: 'center', boxSizing: 'border-box' },
@@ -147,9 +160,10 @@ const onboardingStyle = {
   diag: { alignSelf: 'center', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' },
 };
 
-const keyNames = { Control: 'Control_L', Meta: 'Super_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
+// 故意不映射 Meta：⌘ 在 Linux 里没有对应键，映射成 Super_L 只会在云端卡住它。
+const keyNames = { Control: 'Control_L', Alt: 'Alt_L', Shift: 'Shift_L', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace', Delete: 'Delete', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', ' ': 'space' };
 
-export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page', nativeFullscreen = false } = {}) {
+export function PersonalAssistantPanel({ request, initialBotId = '', openInSidebar = null, variant = 'page', nativeFullscreen = false, connectionDot = null, onBack = null } = {}) {
   const R = clientReact || globalThis.React;
   if (!R) return '个人助理页面尚未就绪，请重新打开';
   const { createElement: h, useEffect, useRef, useState } = R;
@@ -169,7 +183,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const [binding, setBinding] = useState(null);
   const [busy, setBusy] = useState('');
   const [clipboardNotice, setClipboardNotice] = useState('');
-  const [desktopDiagnostics, setDesktopDiagnostics] = useState(null);
   // 桌面卡片尺寸由「可用宽 × 可用高」共同决定：全屏后高度不够时按高度反推宽度，
   // 保证远端整幅画面（含云浏览器顶部地址/输入条）完整可见，不靠滚动兜底。
   const [desktopDisplay, setDesktopDisplay] = useState(() => normalizeDisplay());
@@ -181,7 +194,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false, controlError: '' });
   state.current.botId = botId;
   const rpc = async (operation, payload = {}) => {
-    if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
+    if (typeof request !== 'function') throw new Error('DSH Host Host 尚未连接');
     return request(operation, payload);
   };
   const send = body => {
@@ -191,7 +204,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   };
   const releaseInputs = () => {
     const current = state.current;
-    for (const key of current.pressed) controlRef.current?.input({ type: 'key', action: 'up', key });
+    for (const key of current.pressed) { if (key === '_copyShortcut') continue; controlRef.current?.input({ type: 'key', action: 'up', key }); }
     for (const button of current.buttons) controlRef.current?.input({ type: 'button', action: 'up', button });
     current.pressed.clear(); current.buttons.clear();
   };
@@ -203,7 +216,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     send,
     changed: value => {
       const current = state.current; current.controlPhase = value.phase; current.readOnly = value.readOnly; current.controlEpoch = value.controlEpoch;
-      if (value.phase === 'controlling') current.controlError = '';
       if (value.readOnly && cursorRef.current) cursorRef.current.style.visibility = 'hidden';
       if (value.phase === 'observe') { current.pressed.clear(); current.buttons.clear(); }
       if (current.mounted) { setReadOnly(value.readOnly); setControlPhase(value.phase); }
@@ -228,12 +240,15 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     state.current.reconnect = null; state.current.firstFrame = null;
   };
   const close = (announce = true) => {
-    const current = state.current; current.reconnectAllowed = false; clearTimers(); releaseControl(); current.generation += 1;
+    const current = state.current; current.reconnectAllowed = false;
+    // E6：_copyShortcut 是合成复制用的伪按键，不是真实按下的键。关闭/卸载前先移除，
+    // 否则 releaseInputs 会把它当真实按键发一条 keyup 给云电脑（也可能跨连接残留）。
+    current.pressed.delete('_copyShortcut');
+    clearTimers(); releaseControl(); current.generation += 1;
     clipboardRef.current?.rejectAll();
     try { send({ type: 'close' }); current.socket?.close(1000, 'panel closed'); } catch {}
     controlRef.current.reset({ readOnly: true }); current.lastDrawnFrame = null; current.socket = null; current.session = null; current.pendingFrame = null; current.frameMetadata = null; current.readOnly = true; inputRef.current?.blur();
     current.suspended = false; current.resuming = false; current.pendingInputs = []; current.frameEpoch++;
-    if (current.mounted) setDesktopDiagnostics(null);
     if (announce && current.mounted) { setPhase(current.config?.configured ? 'idle' : 'unconfigured'); setReadOnly(true); }
   };
   const ended = value => {
@@ -273,7 +288,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     return sent;
   };
   // 剪贴板读写和桌面输入共用 human 控制租约。旁观状态下先申请接管并等待
-  // 服务端回执，避免“写入剪贴板”先于 lease 成功而稳定收到 409。
+  // 服务端回执，避免写入剪贴板先于 lease 成功而稳定收到 409。
   const ensureClipboardControl = async () => {
     const current = state.current;
     const snapshot = controlRef.current?.snapshot;
@@ -296,41 +311,38 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   // ⌘C：先把复制按键交给云电脑，让云端应用自己完成“复制”，再取回云端剪贴板。
   // 云端桌面始终是 Linux，不能把 macOS 的 Meta 映射为 Super_L，否则 Linux 应用不会执行复制。
   const copyCloudClipboardToLocal = async () => {
-    if (!await ensureClipboardControl()) return { ok: false, code: 'CLIPBOARD_CONTROL_REQUIRED' };
-    // 先记住旧 selection，再发 Ctrl+C；X11 的 selection owner 在按键后异步更新，
-    // 直接 sleep 150ms 仍可能读到旧文本，尤其是中文/浏览器渲染进程较忙时。
-    const before = await clipboardRef.current.read().catch(() => ({ text: '' }));
-    let sent = false;
+    let previousText;
     if (!state.current.pressed.has('_copyShortcut')) {
       state.current.pressed.add('_copyShortcut');
-      try { sent = sendDesktopKeys(copyShortcutEvents()) !== false; }
-      finally { state.current.pressed.delete('_copyShortcut'); }
+      try {
+        // 先记下复制前的云端剪贴板：应用把内容发布到 selection 是异步的，
+        // 没有基线就分不清「应用没复制」和「读得太早」。
+        try { previousText = clipboardTextOf(await clipboardRef.current.read()); } catch { previousText = undefined; }
+        sendDesktopKeys(copyShortcutEvents());
+      } finally { state.current.pressed.delete('_copyShortcut'); }
     }
-    if (!sent) { clipboardNotify('复制按键未发送，请先接管云电脑后再试'); return { ok: false, code: 'CLIPBOARD_KEY_NOT_SENT' }; }
-    let settled;
-    try {
-      settled = await readCloudClipboardAfterCopy({
-        readCloud: () => clipboardRef.current.read(),
-        beforeText: clipboardTextOf(before),
-      });
-    } catch (error) {
-      clipboardNotify(error?.message || '读取云电脑剪贴板失败，请重试');
-      return { ok: false, code: error?.code || 'CLIPBOARD_READ_FAILED' };
-    }
-    return copyCloudClipboard({ readCloud: async () => settled, writeLocal: text => writeHostClipboard(text), notify: clipboardNotify });
+    return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify, previousText });
   };
-  // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
+  // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：DSH Host 渲染器没有 clipboard 权限，
   // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。
   const readHostClipboard = async () => {
     try {
       const value = await rpc('personal-assistant.clipboard.read');
       if (typeof value?.text === 'string') return value.text;
-    } catch { /* 旧 Host 没有剪贴板 RPC，退回浏览器剪贴板 */ }
+    } catch (error) {
+      // Host 已明确回复「内容超过 64 KiB」：这是可读的业务结论，不能退回浏览器剪贴板把它吞掉。
+      if (error?.code === 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE') throw error;
+      /* 旧 Host 没有剪贴板 RPC，退回浏览器剪贴板 */
+    }
     return readLocalClipboard();
   };
   const writeHostClipboard = async text => {
     try { await rpc('personal-assistant.clipboard.write', { text: String(text ?? '') }); return; }
-    catch { /* 同上 */ }
+    catch (error) {
+      // 写方向同理：Host 明确说超限就上抛，交给 clipboardFriendlyError 显示可读文案。
+      if (error?.code === 'PERSONAL_ASSISTANT_CLIPBOARD_TOO_LARGE') throw error;
+      /* 旧 Host 没有剪贴板 RPC，退回浏览器剪贴板 */
+    }
     await writeLocalClipboard(String(text ?? ''));
   };
   const pasteLocalClipboardToCloud = () => pasteToCloud({
@@ -404,7 +416,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const generation = ++current.generation;
     current.reconnectAllowed = true;
     if (!reconnecting) current.retries = 0;
-    current.mode = mode; current.taskId ||= `studio-desktop-${globalThis.crypto.randomUUID()}`;
+    current.mode = mode; current.taskId ||= `dsh-host-desktop-${globalThis.crypto.randomUUID()}`;
     current.receivedSeq = -1; current.frameMetadata = null;
     setPhase(reconnecting ? 'reconnecting' : 'connecting'); setNotice('首次或休眠后连接可能需要数秒，请稍候。');
     try {
@@ -431,7 +443,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         if (value.type === 'ready') {
           current.suspended = false; current.resuming = false; current.receivedSeq = -1;
           current.session = value.sessionId; current.readOnly = Boolean(value.readOnly); current.display = normalizeDisplay(value.display); setDesktopDisplay(current.display);
-          setDesktopDiagnostics(value.diagnostics || null);
           current.mode = mode;
           controlRef.current.reset(value);
           const inputs = current.pendingInputs; current.pendingInputs = [];
@@ -445,9 +456,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         if (value.type === 'clipboard.response') { clipboardRef.current?.accept(value); return; }
         if (value.type === 'closed') { if (value.retryable !== true) ended(value); return; }
         if (value.type === 'error') {
-          // 旧版 runtime 对 clipboard 消息只回无 requestId 的通用错误帧；
-          // 立刻结束在途请求，直接给出“版本较旧”提示，避免再等 5 秒超时。
-          if (clipboardRef.current?.accept(value)) return;
           if (Number.isSafeInteger(value.controlEpoch) && value.controlEpoch < current.controlEpoch) return;
           setNotice(value.message || value.code || '云电脑请求失败');
           if (current.handoffSupported && value.recoverable === true) { controlRef.current.reject(value); return; }
@@ -464,11 +472,8 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       socket.onerror = () => { if (valid()) setNotice('桌面通道暂时断开，正在重连'); };
       socket.onclose = event => {
         if (!valid()) return;
-        // 挂起/异常关闭都要立即结束在途请求；否则面板会等到超时才知道
-        // 剪贴板操作没有完成，而重连后的响应也不应误认领旧 requestId。
-        clipboardRef.current?.rejectAll();
         if (current.suspended && event.code !== 1000) { clearTimeout(current.firstFrame); current.firstFrame = null; current.socket = null; setPhase('dormant'); return; }
-        current.session = null; clearTimeout(current.firstFrame); current.firstFrame = null;
+        current.session = null; clipboardRef.current?.rejectAll(); clearTimeout(current.firstFrame); current.firstFrame = null;
         if (!current.reconnectAllowed || event.code === 1000) { ended(); return; }
         if (document.hidden) { setPhase('hidden'); return; }
         const count = ++current.retries; setAttempt(count);
@@ -477,7 +482,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       };
     } catch (error) { if (current.mounted && generation === current.generation) { setPhase('error'); setNotice(failure(error)); } }
   };
-  // Studio 负责发现实例、恢复/生成凭证；页面只读取公开状态，绝不接触凭据。
+  // DSH Host 负责发现实例、恢复/生成凭证；页面只读取公开状态，绝不接触凭据。
   const bindingSnapshot = async signal => {
     if (signal?.aborted) return null;
     try { const value = await rpc('personal-assistant.desktop.status'); return value && typeof value === 'object' ? value : null; }
@@ -520,7 +525,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       if (signal?.aborted || !state.current.mounted) return;
       if (Number.isInteger(error?.closeCode) && error.closeCode >= 1000 && error.closeCode <= 4999) setDirectoryCloseCode(error.closeCode);
       state.current.bots = []; setBots([]); setBotId('');
-      // 配置接口本身失败（Studio 未登录、网关不可达）时不能直接判死：desktop.status 不抛错，
+      // 配置接口本身失败（DSH Host 未登录、网关不可达）时不能直接判死：desktop.status 不抛错，
       // 用它区分「账号下确实没有实例」与「暂时读不到状态」，把开通/复用入口交给引导页。
       const snapshot = retried ? null : await bindingSnapshot(signal).catch(() => null);
       if (signal?.aborted || !state.current.mounted) return;
@@ -540,16 +545,37 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     void refreshConnection(controller.signal);
     const interval = setInterval(() => { if (current.mounted) setFps(current.frames); current.frames = 0; }, 1000);
     const visibility = () => {
-      if (document.hidden) { releaseControl(); send({ type: 'pause' }); }
+      if (document.hidden) { releasePressedKeys(); releaseControl(); send({ type: 'pause' }); }
       else if (current.socket?.readyState === 1) send({ type: 'resume' });
       else if (current.reconnectAllowed && current.config?.configured && current.session === null && current.socket) void open(current.mode, true);
     };
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(() => { if (current.lastDrawnFrame) { current.pendingFrame = current.lastDrawnFrame; void drawLatest(); } }) : null;
     if (canvasRef.current) observer?.observe(canvasRef.current);
-    const blur = () => releaseControl();
-    const outside = event => { if (!viewRef.current?.contains(event.target)) releaseControl(); };
-    document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('pointerdown', outside, true);
-    return () => { current.mounted = false; observer?.disconnect(); if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame); if (current.wheelFrame) cancelAnimationFrame(current.wheelFrame); controller.abort(); close(false); clearInterval(interval); document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true); };
+    const blur = () => { releasePressedKeys(); releaseControl(); };
+    const outside = event => { if (!viewRef.current?.contains(event.target)) { releasePressedKeys(); releaseControl(); } };
+    // 快捷键兜底：焦点不在隐藏输入框时（用户可能刚点过对话区），⌘C/⌘V 仍应作用到云电脑。
+    // 走到这里时隐藏输入框已经把事件 preventDefault 过，说明正常路径处理完了，不重复执行。
+    // 面板自己的文本输入框保留原生复制粘贴，绝不抢。
+    const shortcut = event => {
+      if (event.type !== 'keydown' || event.defaultPrevented) return;
+      if (!isCopyShortcut(event) && !isPasteShortcut(event)) return;
+      const target = event.target;
+      const tag = String(target?.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable === true) return;
+      if (!current.session || current.readOnly) return;
+      key(event);
+    };
+    document.addEventListener('visibilitychange', visibility); window.addEventListener('blur', blur); document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', shortcut);
+    return () => {
+      current.mounted = false;
+      // E5：剪贴板提示的 4s 定时器属于本面板，卸载时清掉并置空引用，避免残留回调写已卸载状态。
+      if (clipboardTimerRef.current) { clearTimeout(clipboardTimerRef.current); clipboardTimerRef.current = null; }
+      observer?.disconnect();
+      if (current.pointerFrame) cancelAnimationFrame(current.pointerFrame);
+      if (current.wheelFrame) cancelAnimationFrame(current.wheelFrame);
+      controller.abort(); releasePressedKeys(); clearKeyWatchdogs(); close(false); clearInterval(interval);
+      document.removeEventListener('visibilitychange', visibility); window.removeEventListener('blur', blur); document.removeEventListener('pointerdown', outside, true); document.removeEventListener('keydown', shortcut);
+    };
   }, [request]);
   const point = event => mapDisplayPoint({ clientX: event.clientX, clientY: event.clientY, rect: canvasRef.current.getBoundingClientRect(), display: state.current.display });
   // 触控板一次滑动手势会推几十上百个 wheel 事件。以前每个事件都发一条 input，
@@ -576,14 +602,61 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     if (event.type === 'pointerdown') { inputRef.current?.focus(); canvasRef.current?.setPointerCapture(event.pointerId); if (input({ type: 'button', action: 'down', button, ...point(event) })) current.buttons.add(button); }
     else { input({ type: 'button', action: 'up', button, ...point(event) }); current.buttons.delete(button); if (canvasRef.current?.hasPointerCapture(event.pointerId)) canvasRef.current.releasePointerCapture(event.pointerId); }
   };
+  // 云端桌面是 X11：只按下、不发抬起，系统会**自动重复**这个键——用户看到的就是
+  // 「疯狂输入某个字符，我根本没动键盘」。失焦、面板隐藏、连接抖动都可能吞掉那一条抬起。
+  const KEY_STUCK_MS = 2500;
+  const keyTimers = () => {
+    const current = state.current;
+    if (!(current.keyTimers instanceof Map)) current.keyTimers = new Map();
+    return current.keyTimers;
+  };
+  const releasePressedKeys = () => {
+    const current = state.current;
+    const keys = [...current.pressed];
+    if (!keys.length) return;
+    for (const name of keys) current.pressed.delete(name);
+    for (const name of keys) { try { input({ type: 'key', action: 'up', key: name }); } catch { /* 通道已断：云端会由下一次连接重置 */ } }
+  };
+  const clearKeyWatchdogs = () => {
+    const timers = keyTimers();
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
+  };
+  /** 每次按键事件（含自动重复）续命；真卡住时补一次抬起，避免 X11 无限重复。 */
+  const armKeyWatchdog = name => {
+    const timers = keyTimers();
+    const previous = timers.get(name);
+    if (previous) clearTimeout(previous);
+    timers.set(name, setTimeout(() => {
+      timers.delete(name);
+      if (!state.current.pressed.has(name)) return;
+      state.current.pressed.delete(name);
+      try { input({ type: 'key', action: 'up', key: name }); } catch { /* ignore */ }
+    }, KEY_STUCK_MS));
+  };
+  const disarmKeyWatchdog = name => {
+    const timers = keyTimers();
+    const timer = timers.get(name);
+    if (timer) { clearTimeout(timer); timers.delete(name); }
+  };
   const key = event => {
     if (state.current.composition || event.isComposing || event.nativeEvent?.isComposing || event.key === 'Process' || event.key === 'Unidentified') return;
+    // 宿主的 ⌘/Win 键本身绝不能转发：Linux 里它等于 Super_L，按下去就卡住，
+    // 之后所有 Ctrl 组合都会变成 Super+Ctrl+X 而被应用忽略——网页正文复制失效就是这么来的。
+    if (event.key === 'Meta' || event.key === 'OS') return;
     // 画布上的 ⌘V/Ctrl+V 是"把本地剪贴板贴进云电脑"，不能把裸按键转给 Linux 桌面（它要的是 Ctrl+V）。
     if (isPasteShortcut(event)) { event.preventDefault(); void pasteLocalClipboardToCloud(); return; }
     if (isCopyShortcut(event)) {
       event.preventDefault();
       // 长按/重复的 keydown 不再触发第二次复制。
       if (event.type === 'keydown' && !event.repeat) void copyCloudClipboardToLocal();
+      return;
+    }
+    // ⌘ + 字符：Linux 应用认的是 Ctrl，翻译成一次原子按下（'ctrl+a'），
+    // 而不是把 Super 和字母分两条消息发过去——两条消息云端会并发处理，顺序不保证。
+    if (event.metaKey && !event.ctrlKey && !event.altKey && event.key.length === 1) {
+      event.preventDefault();
+      if (event.type === 'keydown' && !event.repeat) input({ type: 'key', action: 'tap', key: `ctrl+${event.key.toLowerCase()}` });
       return;
     }
     const modified = event.ctrlKey || event.metaKey || event.altKey;
@@ -593,8 +666,14 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     event.preventDefault();
     const name = keyNames[event.key] || event.key;
     if (!/^[A-Za-z0-9_]+$/u.test(name)) return;
-    if (event.type === 'keydown') { if (!event.repeat && input({ type: 'key', action: 'down', key: name })) state.current.pressed.add(name); }
-    else { input({ type: 'key', action: 'up', key: name }); state.current.pressed.delete(name); }
+    if (event.type === 'keydown') {
+      if (!event.repeat && input({ type: 'key', action: 'down', key: name })) state.current.pressed.add(name);
+      armKeyWatchdog(name);
+    } else {
+      disarmKeyWatchdog(name);
+      input({ type: 'key', action: 'up', key: name });
+      state.current.pressed.delete(name);
+    }
   };
   const stateText = { loading: '正在检查助理状态', idle: '准备连接', dormant: '已空闲', resuming: '正在恢复桌面', unconfigured: '个人助理尚未开通', empty: '暂时没有可用助理', 'directory-error': '暂时无法读取助理列表', connecting: '正在启动云电脑', readonly: '只读旁观', ready: '正在控制云电脑', reconnecting: '正在恢复连接', hidden: '画面已暂停', closed: '桌面连接已结束', error: '连接暂时不可用' }[phase];
   const buttonStyle = { ...ui, borderRadius: 6, padding: '7px 12px', cursor: 'pointer', font: 'inherit' };
@@ -620,9 +699,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const measure = () => {
       const rect = node.getBoundingClientRect();
       const measuredCapsuleHeight = controlCapsuleRef.current?.getBoundingClientRect?.().height || 0;
-      // Some hosts expose the parent rect for an unlaid-out child during the
-      // first pass. Cap the measurement so that transient geometry cannot
-      // collapse the desktop card to 0x0; ResizeObserver will refine it later.
       const capsuleHeight = active || selectable ? Math.min(128, Math.max(44, measuredCapsuleHeight)) : 0;
       const availableHeight = Math.max(0, rect.height - (capsuleHeight ? capsuleHeight + 10 : 0));
       const next = fitDesktopBox({ availableWidth: rect.width, availableHeight, display: desktopDisplay, maxWidth: 1280 });
@@ -679,6 +755,11 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         phase === 'unconfigured' && (bindingReason === 'credential-unavailable' || candidateCount > 0) ? h('button', { style: buttonStyle, disabled: Boolean(busy), onClick: () => void bindAssistant('connect') }, busy === 'connect' ? '正在获取…' : bindingReason === 'credential-unavailable' ? '重新获取连接凭证' : '连接已发现的个人助理') : null,
         h('button', { style: { ...buttonStyle, background: 'transparent' }, disabled: Boolean(busy), onClick: () => void refreshConnection() }, '检查开通状态'),
         busy ? h('span', { role: 'status', style: { color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12 } }, '处理中，请稍候…') : null) : null) : null,
+    // 可见的构建标记：面板是否加载了新代码不该靠猜（支持排障时也能一眼比对）。
+    h('span', { 'data-personal-assistant-build-badge': PERSONAL_ASSISTANT_CLIENT_BUILD, 'aria-hidden': true,
+      style: { position: 'absolute', left: 6, bottom: 4, zIndex: 3, pointerEvents: 'none', fontSize: 10, lineHeight: '12px',
+        padding: '1px 5px', borderRadius: 4, color: '#fff', background: '#0f172acc', fontFamily: 'ui-monospace, monospace' } },
+      `构建 ${localBuildLabel(PERSONAL_ASSISTANT_CLIENT_BUILD)}`),
     h('input', { ref: inputRef, 'aria-label': '云电脑文本输入', autoComplete: 'off', disabled: !active || (readOnly && !controlRef.current.snapshot.available && !(state.current.mode === 'control' && ['dormant', 'resuming'].includes(phase))), tabIndex: -1, style: { position: 'absolute', width: 1, height: 1, opacity: 0, left: 0, top: 0 }, onKeyDown: key, onKeyUp: key, onPaste: event => { const text = event.clipboardData?.getData?.('text/plain') ?? ''; if (!text) return; event.preventDefault(); void pasteTextToCloud(text); }, onCompositionStart: () => { state.current.composition = true; }, onCompositionEnd: event => { state.current.composition = false; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); }, onInput: event => { if (state.current.composition || event.nativeEvent?.isComposing) return; const text = event.currentTarget.value; event.currentTarget.value = ''; if (text) input({ type: 'text', text }); } }));
   const secondaryInk = 'var(--dsw-alias-label-secondary, #536174)';
   const ghostStyle = { ...buttonStyle, background: 'transparent', color: 'inherit', border: ui.border };
@@ -703,38 +784,27 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
         // 剪贴板不再放按钮：面板里只保留 ⌘V 粘贴 / ⌘C 复制与一行状态文字。
         active && clipboardNotice ? h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, clipboardNotice) : null) : null),
       ),
-      h('details', { style: { flex: 'none', alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } },
-        h('summary', { style: { cursor: 'pointer' } }, '诊断'),
-        h('div', { style: { paddingTop: 8, lineHeight: 1.7 } },
-          h('div', null, `客户端：${PERSONAL_ASSISTANT_CLIENT_BUILD}`),
-          desktopDiagnostics ? h('div', null, `云电脑包：${desktopDiagnostics.packageVersion || '未知'} · 清单：${desktopDiagnostics.manifestVersion || '未知'}`) : null,
-          desktopDiagnostics?.runtimeBuild && desktopDiagnostics.runtimeBuild !== 'unknown' ? h('div', null, `运行时构建：${desktopDiagnostics.runtimeBuild}`) : null,
-          desktopDiagnostics?.computerImage && desktopDiagnostics.computerImage !== 'unknown' ? h('div', null, `电脑镜像：${desktopDiagnostics.computerImage}`) : null,
-          desktopDiagnostics?.dock ? h('div', null, `Dock：${desktopDiagnostics.dock.position} · ${desktopDiagnostics.dock.iconCount} 个图标`) : null,
-        )),
-      );
+      h('details', { style: { flex: 'none', alignSelf: 'flex-end', color: 'var(--dsw-alias-label-tertiary, #76808e)', fontSize: 11, opacity: 0.8, maxWidth: '100%', overflowWrap: 'anywhere' } }, h('summary', { style: { cursor: 'pointer' } }, '诊断'), h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
   }
   return h('section', { 'data-personal-assistant-panel': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', fontSize: 13 } },
     h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: 12, borderBottom: ui.border } },
+      typeof onBack === 'function' ? h('button', { type: 'button', 'aria-label': '返回', title: '返回对话', onClick: onBack, style: { ...buttonStyle, padding: '4px 8px' } }, '←') : null,
       h('strong', { style: { fontWeight: 500, marginRight: 8 } }, '个人助理'),
       selectable && ['idle', 'closed', 'error'].includes(phase) ? h('button', { style: buttonStyle, onClick: () => void refreshConnection() }, '刷新助理列表') : null,
       typeof openInSidebar === 'function' ? h('button', { style: buttonStyle, onClick: openInSidebar }, '放到右侧栏') : null,
       selectable ? h('button', { style: buttonStyle, disabled: ['connecting', 'resuming'].includes(phase), onClick: () => phase === 'dormant' ? resumeIdle() : void open(state.current.handoffSupported ? 'observe' : 'control') }, phase === 'dormant' ? '恢复画面' : readOnly && phase === 'readonly' ? '申请控制' : active ? '重新连接' : '连接云电脑') : null,
       selectable ? h('button', { style: buttonStyle, disabled: phase === 'connecting', onClick: () => void open('read') }, '只读旁观') : null,
-      active ? h('span', { role: 'status', 'aria-live': 'polite', style: { marginLeft: 'auto', color: 'var(--dsw-alias-label-secondary, #536174)' } }, stateText) : null),
+      connectionDot ? h('span', { style: { marginLeft: 'auto', display: 'inline-flex', alignItems: 'center' } }, connectionDot) : null,
+      active ? h('span', { role: 'status', 'aria-live': 'polite', style: { marginLeft: connectionDot ? 4 : 'auto', color: 'var(--dsw-alias-label-secondary, #536174)' } }, stateText) : null),
     phase === 'readonly' ? h('div', { role: 'alert', style: { background: '#fff0d6', color: '#763c00', padding: '8px 12px' } }, '当前为只读旁观，鼠标和键盘输入不会发送；可申请控制') : null,
     active && notice ? h('div', { role: 'status', style: { padding: '8px 12px' } }, notice) : null,
+    // E7：整页面板（shell 桌面 tab）也要显示剪贴板提示，不能只留在 computer 变体里。
+    active && clipboardNotice ? h('div', { role: 'status', 'aria-live': 'polite', style: { padding: '8px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12 } }, clipboardNotice) : null,
     onboarding || stage,
     h('footer', { style: { display: 'flex', alignItems: 'start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', color: 'var(--dsw-alias-label-secondary, #536174)', borderTop: ui.border } },
       h('details', { open: diagnosticsOpen, onToggle: event => setDiagnosticsOpen(event.currentTarget.open) }, h('summary', { style: { cursor: 'pointer' } }, '诊断'),
         directoryCloseCode ? h('div', { style: { paddingTop: 8 } }, `目录连接关闭码：${directoryCloseCode}`) : null,
-        h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } },
-          h('div', null, `云端实例：${config?.agentId || '未开通'}`),
-          h('div', null, `连接标识：${botId || '未连接'}`),
-          h('div', null, `画面帧率：${fps} fps`),
-          desktopDiagnostics ? h('div', null, `云电脑包：${desktopDiagnostics.packageVersion || '未知'} · 清单：${desktopDiagnostics.manifestVersion || '未知'}`) : null,
-          desktopDiagnostics?.dock ? h('div', null, `Dock：${desktopDiagnostics.dock.position} · ${desktopDiagnostics.dock.iconCount} 个图标`) : null,
-          h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
+        h('div', { style: { paddingTop: 8, lineHeight: 1.8, overflowWrap: 'anywhere' } }, h('div', null, `云端实例：${config?.agentId || '未开通'}`), h('div', null, `连接标识：${botId || '未连接'}`), h('div', null, `画面帧率：${fps} fps`), h('div', null, '快捷键会转发到云电脑；Esc 优先退出全屏'))),
       h('small', { 'data-personal-assistant-build': PERSONAL_ASSISTANT_CLIENT_BUILD, style: { opacity: 0.75 } }, `构建 ${PERSONAL_ASSISTANT_CLIENT_BUILD}`)));
 }
 
@@ -802,7 +872,7 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
       }, bindingBusy === action.id ? '处理中…' : action.label))),
     error ? h('p', { role: 'alert', style: { ...onboardingStyle.notice, color: '#b42318' } }, error) : null);
   if (!scope) return h('div', { role: 'status', style: { padding: 24 } }, error || '正在连接云端个人助理…', error ? h('button', { onClick: () => retry(value => value + 1) }, '重新连接') : null);
-  if (!nativeWorkbench?.available) return h('div', { role: 'alert', style: { padding: 24 } }, '当前宿主尚未提供原生云电脑侧栏，请更新 Studio 后重新打开。');
+  if (!nativeWorkbench?.available) return h('div', { role: 'alert', style: { padding: 24 } }, '当前宿主尚未提供原生云电脑侧栏，请更新 DSH Host 后重新打开。');
   return h('div', {
     key: `${scope.agentId}:${scope.botId}`, 'data-personal-assistant-home': 'true',
     'data-agent-id': scope.agentId, 'data-bot-id': scope.botId,
@@ -811,6 +881,1030 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
 
 }
 
+
+/* ------------------------------------------------------------------ *
+ * 面板外壳：panelView 状态机（list|detail|settings|create|chat|desktop）。
+ *
+ * 职责边界（契约第 1、4 章）：
+ * - 视图是纯函数，只接收数据与回调；本文件负责所有 personal-assistant.* RPC。
+ * - 每个新 RPC 都允许 Host 尚未实现：catch 后回落到 localStorage 缓存 / 空状态 / 骨架，
+ *   绝不让异常冒到 React 树外，也不出现整页空白。
+ * - stale-while-revalidate：overview、bot.detail、settings.inspect 先回显缓存再校准。
+ * ------------------------------------------------------------------ */
+
+/** 面板缓存前缀（契约第 4 章第 2 条）。 */
+const PANEL_CACHE_PREFIX = 'personal-assistant.cache.';
+/** 只保留最近几份面板数据，避免长期占用 localStorage 配额。 */
+const PANEL_CACHE_MAX_ENTRIES = 8;
+
+const panelCacheKey = name => `${PANEL_CACHE_PREFIX}${name}`;
+const panelCacheStorage = () => {
+  try { return globalThis.localStorage || null; } catch { return null; }
+};
+
+/** 读缓存：JSON 损坏、隐私模式、配额满都返回 null，调用方按无缓存处理。 */
+function readPanelCache(name) {
+  try {
+    const raw = panelCacheStorage()?.getItem(panelCacheKey(name));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !('value' in parsed)) return null;
+    return parsed;
+  } catch { return null; }
+}
+
+/** 写缓存：失败静默降级（不阻断请求结果上屏）。 */
+function writePanelCache(name, value) {
+  try {
+    const storage = panelCacheStorage();
+    if (!storage) return false;
+    storage.setItem(panelCacheKey(name), JSON.stringify({ at: Date.now(), value }));
+    prunePanelCache(storage);
+    return true;
+  } catch { return false; }
+}
+
+function removePanelCache(name) {
+  try { panelCacheStorage()?.removeItem(panelCacheKey(name)); } catch { /* 忽略 */ }
+}
+
+function prunePanelCache(storage) {
+  try {
+    const entries = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (typeof key !== 'string' || !key.startsWith(PANEL_CACHE_PREFIX)) continue;
+      let at = 0;
+      try { at = Number(JSON.parse(storage.getItem(key) || '{}')?.at) || 0; } catch { at = 0; }
+      entries.push({ key, at });
+    }
+    if (entries.length <= PANEL_CACHE_MAX_ENTRIES) return;
+    for (const entry of entries.sort((left, right) => left.at - right.at).slice(0, entries.length - PANEL_CACHE_MAX_ENTRIES)) storage.removeItem(entry.key);
+  } catch { /* 忽略 */ }
+}
+
+const BOT_STATUSES = new Set(['running', 'idle', 'offline']);
+const COMPUTER_STATES = new Set(['connected', 'idle', 'offline']);
+const isUnavailableFailure = failure => failure?.code === 'PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE'
+  || failure?.code === 'PERSONAL_ASSISTANT_OPERATION_UNKNOWN' || Number(failure?.status) === 404;
+
+/** 列表/详情共用的 Bot 概要归一化：字段缺失时给安全默认值，不把 undefined 画到界面上。 */
+function normalizeBot(row, index = 0, primaryId = '') {
+  const id = String(row?.id ?? row?.botId ?? '').trim() || `bot-${index}`;
+  const role = row?.role === 'primary' || row?.role === 'custom'
+    ? row.role
+    : (id === primaryId || (index === 0 && !primaryId) ? 'primary' : 'custom');
+  return {
+    id,
+    name: String(row?.name ?? row?.displayName ?? '个人助理').slice(0, 64) || '个人助理',
+    role,
+    status: BOT_STATUSES.has(row?.status) ? row.status : 'idle',
+    model: String(row?.model ?? ''),
+    memoryCount: Number.isFinite(Number(row?.memoryCount)) ? Number(row.memoryCount) : 0,
+    capabilityCount: Number.isFinite(Number(row?.capabilityCount)) ? Number(row.capabilityCount) : 0,
+    computer: COMPUTER_STATES.has(row?.computer) ? row.computer : 'offline',
+  };
+}
+
+function normalizeActive(row, index, bots) {
+  const kind = row?.kind === 'approval' ? 'approval' : 'turn';
+  const botId = String(row?.botId ?? '');
+  const bot = bots.find(item => item.id === botId);
+  return {
+    id: String(row?.id ?? `${kind}-${index}`),
+    kind, botId, botName: String(row?.botName ?? bot?.name ?? ''),
+    title: String(row?.title ?? (kind === 'approval' ? '需要你确认一个操作' : '助理正在执行任务')),
+    detail: String(row?.detail ?? ''),
+    approvalId: String(row?.approvalId ?? ''),
+    elapsedMs: Number(row?.elapsedMs) || 0,
+  };
+}
+
+function normalizeRecent(row, index, bots) {
+  const botId = String(row?.botId ?? '');
+  const bot = bots.find(item => item.id === botId);
+  return {
+    id: String(row?.id ?? `recent-${index}`),
+    title: String(row?.title ?? '完成了一个任务'),
+    status: row?.status === 'failed' ? 'failed' : 'done',
+    at: String(row?.at ?? ''),
+    botId, botName: String(row?.botName ?? bot?.name ?? ''),
+  };
+}
+
+/** bots.overview → 视图数据；目录兜底时标记 degraded，UI 显示「部分数据暂不可用」。 */
+function normalizeOverview(raw, fallbackBots = [], primaryId = '') {
+  const rows = Array.isArray(raw?.bots) && raw.bots.length ? raw.bots : fallbackBots;
+  const bots = rows.map((row, index) => normalizeBot(row, index, primaryId));
+  return {
+    bots,
+    active: Array.isArray(raw?.active) ? raw.active.filter(row => row && typeof row === 'object').map((row, index) => normalizeActive(row, index, bots)) : [],
+    recent: Array.isArray(raw?.recent) ? raw.recent.filter(row => row && typeof row === 'object').map((row, index) => normalizeRecent(row, index, bots)) : [],
+    counts: raw?.counts && typeof raw.counts === 'object' ? {
+      schedules: Number(raw.counts.schedules) || 0,
+      memories: Number(raw.counts.memories) || 0,
+      files: Number(raw.counts.files) || 0,
+    } : null,
+    degraded: raw?.degraded === true,
+  };
+}
+
+/** 目录兜底：Host 还没实现 bots.overview 时，用已有 bots.list 拼出可点击的列表。 */
+function overviewFromDirectory(directoryBots, primaryId) {
+  return normalizeOverview({ bots: directoryBots.map((row, index) => normalizeBot(row, index, primaryId)), active: [], recent: [], counts: null, degraded: true });
+}
+
+function normalizeDetail(raw, botId, fallbackBot = null) {
+  const botRow = raw?.bot && typeof raw.bot === 'object' ? raw.bot : (fallbackBot || { id: botId });
+  const bot = {
+    ...normalizeBot(botRow, 0, botRow.role === 'primary' ? botId : ''),
+    id: String(botRow.id ?? botId),
+    name: String(botRow.name ?? fallbackBot?.name ?? '个人助理'),
+    description: String(botRow.description ?? ''),
+    createdAt: String(raw?.createdAt ?? botRow.createdAt ?? ''),
+    lastActiveAt: String(botRow.lastActiveAt ?? ''),
+    modelDetail: String(botRow.modelDetail ?? ''),
+  };
+  const memoryItems = Array.isArray(raw?.memory?.items) ? raw.memory.items : [];
+  return {
+    bot,
+    memory: {
+      count: Number.isFinite(Number(raw?.memory?.count)) ? Number(raw.memory.count) : memoryItems.length,
+      items: memoryItems.filter(item => item && typeof item === 'object').map((item, index) => ({
+        id: String(item.id ?? `memory-${index}`),
+        text: String(item.text ?? ''),
+        scope: String(item.scope ?? ''),
+      })),
+    },
+    capabilities: Array.isArray(raw?.capabilities) ? raw.capabilities.filter(row => row && typeof row === 'object').map(row => ({
+      id: String(row.id ?? ''), label: String(row.label ?? row.id ?? '能力'),
+      source: row.source === 'mcp' ? 'mcp' : 'builtin', status: row.status === 'error' ? 'error' : 'ready',
+    })) : [],
+    computer: raw?.computer && typeof raw.computer === 'object' ? {
+      connected: raw.computer.connected === true,
+      resolution: String(raw.computer.resolution ?? ''),
+      usage: raw.computer.usage && typeof raw.computer.usage === 'object'
+        ? { tokens: String(raw.computer.usage.tokens ?? ''), hours: String(raw.computer.usage.hours ?? '') } : null,
+    } : null,
+    // Host 的目录/本机状态不可用时会显式给 degraded，页面按「部分数据暂不可用」展示。
+    degraded: raw?.degraded === true,
+  };
+}
+
+function normalizeCreateStatus(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const stage = String(raw.stage ?? '');
+  return {
+    instanceId: String(raw.instanceId ?? ''),
+    stage,
+    stages: Array.isArray(raw.stages) ? raw.stages.filter(row => row && typeof row === 'object').map(row => ({
+      id: String(row.id ?? ''),
+      status: ['done', 'active', 'pending', 'failed'].includes(row.status) ? row.status : 'pending',
+      detail: String(row.detail ?? ''),
+    })) : [],
+    elapsedMs: Number(raw.elapsedMs) || 0,
+    estimatedRemainingMs: Number(raw.estimatedRemainingMs) || 0,
+    error: raw.error ? String(raw.error) : '',
+  };
+}
+
+function settingsDraftFrom(inspect) {
+  return {
+    model: String(inspect?.model ?? ''),
+    prompt: String(inspect?.prompt ?? ''),
+    environmentVariables: Array.isArray(inspect?.environmentVariables)
+      ? inspect.environmentVariables.filter(row => row && typeof row === 'object').map(row => ({
+        key: String(row.key ?? ''), value: String(row.value ?? ''), sensitive: row.sensitive === true, saved: true, dirty: false,
+      }))
+      : [],
+  };
+}
+
+const SHELL_KEYFRAMES = '@keyframes pa-skeleton { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }@keyframes pa-spin { to { transform: rotate(360deg) } }';
+
+/** 页脚：诊断 + 构建号（各画板页脚口径）。 */
+function panelFooter({ h, config, selectedBotId, connection, updatedAt, build }) {
+  return h('footer', { style: { flex: 'none', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', borderTop: `1px solid ${PANEL_TOKENS.border}`, fontSize: 12, color: PANEL_TOKENS.inkSoft } },
+    h('details', { 'data-pa-diagnostics': 'true' },
+      h('summary', { style: { cursor: 'pointer' } }, '诊断'),
+      h('div', { style: { paddingTop: 8, lineHeight: 1.8 } },
+        h('div', null, `云端实例：${config?.agentId || '未开通'}`),
+        h('div', null, `连接标识：${selectedBotId || '未连接'}`),
+        h('div', null, `本机授权：${connection?.authorized ? '已授权' : connection?.connected ? '未授权' : '未连接'}`),
+        h('div', null, `数据刷新：${updatedAt || '—'}`),
+        h('div', null, '历史会话：按需打开，不占主界面'))),
+    h('small', { 'data-personal-assistant-build': build, style: { opacity: 0.75 } }, `构建 ${build}`));
+}
+
+/**
+ * 面板外壳组件：注册在 main 槽位。
+ * props 与旧 PersonalAssistantHome 对齐，便于宿主无感切换。
+ */
+export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId = '' } = {}) {
+  const R = clientReact || globalThis.React;
+  if (!R) return '个人助理页面尚未就绪，请重新打开';
+  const { createElement: h, useEffect, useRef, useState } = R;
+
+  // G3.5：把「已开通 + 云实例/Bot 身份」与概览一起放进 SWR 缓存。重开面板时首帧直接按
+  // 上次的 Bot 列表渲染，configuration 仍在后台真实校准（失败只提示，不退回开通报板）。
+  // 缓存只在首帧读一次，后续重新渲染不重复打 localStorage。
+  const bootCacheRef = useRef(null);
+  if (!bootCacheRef.current) bootCacheRef.current = { shell: readPanelCache('shell'), overview: readPanelCache('overview') };
+  const bootShellCache = bootCacheRef.current.shell?.value;
+  const bootOverviewCache = bootCacheRef.current.overview?.value || null;
+  const bootConfig = bootShellCache?.configured === true
+    ? { configured: true, agentId: String(bootShellCache.agentId || ''), botId: String(bootShellCache.botId || '') }
+    : null;
+
+  // —— 导航 ——
+  const [panelView, setPanelView] = useState('list');
+  // —— 本机连接/授权（三态圆点口径）——
+  const [connection, setConnection] = useState({ connected: false, authorized: false, scopes: [], riskConfirm: true, grantedAt: null, host: null, loading: true, unavailable: false });
+  const [localAccessOpen, setLocalAccessOpen] = useState(false);
+  const [localScopes, setLocalScopes] = useState(LOCAL_ACCESS_SCOPES.map(scope => scope.id));
+  const [riskConfirmDraft, setRiskConfirmDraft] = useState(true);
+  const [localBusy, setLocalBusy] = useState('');
+  const [localError, setLocalError] = useState('');
+  const [localNotice, setLocalNotice] = useState('');
+  // 撤销时间戳：对话页未挂载时也要能补系统提示（契约第 4 章第 4 条）。
+  const [localRevokedAt, setLocalRevokedAt] = useState('');
+  // —— 列表概览（首帧用缓存，避免在 configuration 返回前停在「正在读取开通状态…」）——
+  const [overview, setOverview] = useState(bootOverviewCache);
+  const [overviewLoading, setOverviewLoading] = useState(!bootOverviewCache);
+  const [overviewDegraded, setOverviewDegraded] = useState(bootOverviewCache?.degraded === true);
+  const [config, setConfig] = useState(bootConfig);
+  const [binding, setBinding] = useState(null);
+  const [bindingBusy, setBindingBusy] = useState('');
+  const [scope, setScope] = useState(bootConfig ? { agentId: bootConfig.agentId, botId: bootConfig.botId } : null);
+  const [selectedBotId, setSelectedBotId] = useState(String(initialBotId || bootConfig?.botId || ''));
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [updatedAt, setUpdatedAt] = useState('');
+  const [showAllActivity, setShowAllActivity] = useState(false);
+  // —— 历史会话 ——
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+  const [sessions, setSessions] = useState([]);
+  const [chatSessionId, setChatSessionId] = useState('');
+  // —— 详情 ——
+  const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailDegraded, setDetailDegraded] = useState(false);
+  const [manageMemory, setManageMemory] = useState(false);
+  const [showAllMemory, setShowAllMemory] = useState(false);
+  const [modelBusy, setModelBusy] = useState('');
+  const [deleteConfirm, setDeleteConfirm] = useState({ open: false, text: '', busy: false, error: '' });
+  const [createBot, setCreateBot] = useState({ open: false, name: '', busy: false, error: '' });
+  // —— 设置 ——
+  const [settingsInspect, setSettingsInspect] = useState(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsDegraded, setSettingsDegraded] = useState(false);
+  const [settingsVersions, setSettingsVersions] = useState(null);
+  const [settingsBusy, setSettingsBusy] = useState('');
+  const [settingsError, setSettingsError] = useState('');
+  const [settingsNotice, setSettingsNotice] = useState('');
+  const [settingsDraft, setSettingsDraft] = useState({ model: '', prompt: '', environmentVariables: [] });
+  const [envDeletes, setEnvDeletes] = useState([]);
+  const [closeAssistant, setCloseAssistant] = useState({ open: false, text: '', busy: false, error: '', closedNotice: '' });
+  // —— 首次创建 ——
+  const [createStatus, setCreateStatus] = useState(null);
+  const [createCollapsed, setCreateCollapsed] = useState(false);
+  const [createDiagnostics, setCreateDiagnostics] = useState(false);
+  const [createNotice, setCreateNotice] = useState('');
+  const [createError, setCreateError] = useState('');
+
+  const aliveRef = useRef(true);
+  const previousAuthorizedRef = useRef(undefined);
+  const createTimerRef = useRef(null);
+  const createStartedAtRef = useRef(0);
+  const createCollapsedRef = useRef(false);
+  createCollapsedRef.current = createCollapsed;
+
+  const rpc = async (operation, payload = {}) => {
+    if (typeof request !== 'function') throw new Error('DSH Host Host 尚未连接');
+    return request(operation, payload);
+  };
+  /** 带上 scope 的请求：会话类 RPC 需要 agentId/botId 一起传，宿主按 scope 路由。 */
+  const scopedCall = (operation, payload = {}) => {
+    const extra = {};
+    if (scope?.agentId) extra.agentId = scope.agentId;
+    if (scope?.botId && !payload.botId) extra.botId = scope.botId;
+    return rpc(operation, { ...payload, ...extra });
+  };
+  /** 给指定 scope 造一个绑定请求：切换 Bot 后立即绑定，不依赖下一次渲染的闭包。 */
+  const requestForScope = targetScope => (operation, payload = {}) => {
+    if (!targetScope) throw new Error('云端助理尚未连接');
+    if (payload.agentId && payload.agentId !== targetScope.agentId) throw new Error('云端实例不一致');
+    if (operation !== 'personal-assistant.bots.list' && payload.botId && payload.botId !== targetScope.botId) throw new Error('云端助理不一致');
+    return request(operation, { ...payload, ...targetScope });
+  };
+  const scopedRequest = scope ? requestForScope(scope) : null;
+  /** 云电脑面板自己会选 Bot，这里只补 agentId，不校验 botId。 */
+  const panelRequest = (operation, payload = {}) => request(operation, {
+    ...payload,
+    ...(scope?.agentId && !payload.agentId ? { agentId: scope.agentId } : {}),
+  });
+  const clearCreateTimer = () => { if (createTimerRef.current) { clearTimeout(createTimerRef.current); createTimerRef.current = null; } };
+  const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
+
+  /* ---------- 本机连接/授权 ---------- */
+
+  const loadConnection = async () => {
+    try {
+      const value = await rpc('personal-assistant.local-access.status');
+      const next = {
+        connected: value?.connected === true,
+        authorized: value?.authorized === true,
+        scopes: Array.isArray(value?.scopes) ? value.scopes.map(String) : [],
+        riskConfirm: value?.riskConfirm !== false,
+        grantedAt: value?.grantedAt ? String(value.grantedAt) : null,
+        host: value?.host && typeof value.host === 'object' ? value.host : null,
+        loading: false,
+        unavailable: false,
+      };
+      setConnection(next);
+      // 授权可能被 Host 自动撤销（超时/权限变更），这里也要补系统提示，不能只看按钮动作。
+      const previousAuthorized = previousAuthorizedRef.current;
+      previousAuthorizedRef.current = next.authorized;
+      if (previousAuthorized === true && next.authorized === false) setLocalRevokedAt(String(Date.now()));
+      if (!next.authorized) setLocalScopes(next.scopes.length ? next.scopes : LOCAL_ACCESS_SCOPES.map(item => item.id));
+      setRiskConfirmDraft(next.riskConfirm);
+      return next;
+    } catch {
+      // Host 尚未实现 local-access.status：按「未连接」处理。绝不能猜成已授权。
+      setConnection({ connected: false, authorized: false, scopes: [], riskConfirm: true, grantedAt: null, host: null, loading: false, unavailable: true });
+      setLocalScopes(LOCAL_ACCESS_SCOPES.map(item => item.id));
+      return null;
+    }
+  };
+
+  const grantLocalAccess = async () => {
+    if (localBusy) return;
+    setLocalBusy('grant'); setLocalError(''); setLocalNotice('');
+    try {
+      await rpc('personal-assistant.local-access.grant', { scopes: localScopes, riskConfirm: riskConfirmDraft });
+      const next = await loadConnection();
+      setLocalNotice(next?.authorized ? '已授权本机控制' : '授权已提交，等待本机确认');
+    } catch (failure) {
+      setLocalError(failure?.message || '授权失败：Host 尚未提供本机授权能力');
+    } finally { setLocalBusy(''); }
+  };
+
+  const revokeLocalAccess = async () => {
+    if (localBusy) return;
+    setLocalBusy('revoke'); setLocalError(''); setLocalNotice('');
+    try {
+      await rpc('personal-assistant.local-access.revoke');
+      setLocalRevokedAt(String(Date.now()));
+      await loadConnection();
+      setLocalNotice('已撤销本机授权');
+    } catch (failure) {
+      setLocalError(failure?.message || '撤销失败：Host 尚未提供本机授权能力');
+    } finally { setLocalBusy(''); }
+  };
+
+  /* ---------- 概览 / 作用域 ---------- */
+
+  const loadOverview = async ({ fallbackBots = [], primaryId = '' } = {}) => {
+    try {
+      const raw = await rpc('personal-assistant.bots.overview');
+      const normalized = normalizeOverview(raw, fallbackBots, primaryId);
+      setOverview(normalized);
+      setOverviewDegraded(normalized.degraded === true);
+      writePanelCache('overview', normalized);
+      setUpdatedAt(stamp());
+    } catch (failure) {
+      // 降级 1：用目录拼最小概览（可点、可进详情）；降级 2：保留缓存；否则空状态。
+      const fallback = fallbackBots.length ? overviewFromDirectory(fallbackBots, primaryId) : null;
+      if (fallback) {
+        setOverview(previous => previous || fallback);
+        setOverviewDegraded(true);
+        writePanelCache('overview', fallback);
+      } else {
+        setOverview(previous => previous || { bots: [], active: [], recent: [], counts: null, degraded: true });
+        setOverviewDegraded(true);
+      }
+      if (!isUnavailableFailure(failure)) setNotice(failure?.message || '暂时读不到 Bot 概览，已展示缓存数据');
+    } finally {
+      setOverviewLoading(false);
+    }
+  };
+
+  const loadSessions = async () => {
+    setHistoryLoading(true); setHistoryError('');
+    try {
+      const value = await scopedCall('personal-assistant.sessions.list');
+      const rows = Array.isArray(value?.sessions) ? value.sessions.filter(row => row && row.sessionId) : [];
+      setSessions(rows.map(row => ({ id: String(row.sessionId), title: String(row.title ?? row.sessionId), at: String(row.updatedAt ?? row.at ?? '') })));
+    } catch (failure) {
+      setHistoryError('历史会话暂时读不到，稍后重试');
+      if (!isUnavailableFailure(failure)) setSessions(previous => previous);
+    } finally { setHistoryLoading(false); }
+  };
+
+  /** 首次装载：先回显缓存，再解析 scope 与概览；任何一步失败都落回可操作的界面。 */
+  const boot = async () => {
+    // 1) 首帧已由 state 初值回显缓存；这里兜底「本次渲染之后才写入」的概览缓存（stale-while-revalidate）。
+    const cachedOverview = readPanelCache('overview');
+    if (cachedOverview?.value) {
+      setOverview(cachedOverview.value);
+      setOverviewDegraded(cachedOverview.value.degraded === true);
+      setOverviewLoading(false);
+    }
+    void loadConnection();
+    let configValue = null;
+    let configFailed = false;
+    try { configValue = await rpc('personal-assistant.configuration'); } catch { configFailed = true; }
+    if (!aliveRef.current) return;
+    // G3.5：真实校准失败时保留缓存首帧（列表、Bot 身份都还在），只提示；不能把列表打回开通报板。
+    if (configFailed && bootConfig) {
+      setOverviewLoading(false);
+      setNotice('暂时读不到云端状态，先展示上次的数据');
+      return;
+    }
+    setConfig(configValue || null);
+    if (!configValue?.configured) {
+      // 未开通不是错误：交给开通报板（01）。desktop.status 不抛错，用它区分「没有实例」与「读不到」。
+      removePanelCache('shell');
+      const snapshot = await rpc('personal-assistant.desktop.status').catch(() => null);
+      if (!aliveRef.current) return;
+      setBinding(snapshot || { configured: false, reason: 'unavailable', candidates: [] });
+      setOverview(null); setOverviewLoading(false);
+      return;
+    }
+    setBinding(null);
+    let directory = null;
+    try { directory = await rpc('personal-assistant.bots.list'); } catch { directory = null; }
+    let directoryBots = [];
+    try { directoryBots = directory?.directoryAvailable === true ? publicBotDirectory(directory.bots) : []; } catch { directoryBots = []; }
+    let botId = '';
+    try { botId = directoryBots.length ? resolveAssistantBotId(directoryBots, initialBotId || configValue.botId) : ''; } catch { botId = directoryBots[0]?.botId || ''; }
+    if (!aliveRef.current) return;
+    const nextScope = { agentId: String(configValue.agentId || ''), botId };
+    setScope(nextScope);
+    setSelectedBotId(previous => previous || botId);
+    // 写回「已开通 + 当前 Bot」：下次重开面板首帧就能直接渲染列表，而不是停在开通报板。
+    writePanelCache('shell', { configured: true, agentId: nextScope.agentId, botId });
+    if (nativeWorkbench?.available) {
+      try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 原生侧栏绑定失败不阻断面板 */ }
+    }
+    await loadOverview({ fallbackBots: directoryBots, primaryId: botId });
+    if (!aliveRef.current) return;
+    if (!botId) { setOverviewLoading(false); return; }
+  };
+
+  useEffect(() => {
+    aliveRef.current = true;
+    void boot();
+    return () => {
+      aliveRef.current = false;
+      clearCreateTimer();
+    };
+    // request 由宿主注入且生命周期内稳定；挂载一次即可，后续动作都走显式刷新。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request]);
+
+  /* ---------- 列表动作 ---------- */
+
+  const openChat = (botId = '') => {
+    const target = String(botId || '');
+    if (target && scope && target !== scope.botId) {
+      const nextScope = { ...scope, botId: target };
+      setScope(nextScope);
+      setSelectedBotId(target);
+      setChatSessionId('');
+      if (nativeWorkbench?.available) { try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 忽略 */ } }
+      writePanelCache('shell', { configured: true, agentId: nextScope.agentId, botId: target });
+    }
+    setPanelView('chat');
+  };
+
+  const openDetail = (botId) => {
+    const id = String(botId || '');
+    if (!id) return;
+    setSelectedBotId(id);
+    setManageMemory(false); setShowAllMemory(false);
+    setDeleteConfirm({ open: false, text: '', busy: false, error: '' });
+    setPanelView('detail');
+    const cached = readPanelCache(`bot-detail.${id}`);
+    if (cached?.value) { setDetail(cached.value); setDetailLoading(false); setDetailDegraded(cached.value.degraded === true); }
+    else { setDetail(null); setDetailLoading(true); }
+    void loadDetail(id);
+  };
+
+  const loadDetail = async (botId) => {
+    setDetailLoading(true);
+    try {
+      const raw = await scopedCall('personal-assistant.bot.detail', { botId });
+      const fallback = botSummary(botId);
+      const normalized = normalizeDetail(raw, botId, fallback);
+      setDetail(normalized); setDetailDegraded(normalized.degraded === true);
+      writePanelCache(`bot-detail.${botId}`, normalized);
+      setUpdatedAt(stamp());
+    } catch (failure) {
+      // 降级：退回列表里的概要（可看模型与状态），记忆/能力显示空状态。
+      setDetail(previous => previous || normalizeDetail({}, botId, botSummary(botId)));
+      setDetailDegraded(true);
+      if (!isUnavailableFailure(failure)) setNotice(failure?.message || '详情暂时读不到，已展示概要');
+    } finally { setDetailLoading(false); }
+  };
+
+  const botSummary = botId => (overview?.bots || []).find(bot => bot.id === botId) || { id: botId, name: botId, role: 'custom', status: 'idle', model: '', memoryCount: 0, capabilityCount: 0, computer: 'offline' };
+
+  const changeBotModel = async model => {
+    const botId = selectedBotId || detail?.bot?.id;
+    if (!botId || !model || modelBusy) return;
+    setModelBusy('model'); setNotice('');
+    try {
+      await scopedCall('personal-assistant.bot.model.update', { botId, model });
+      setDetail(previous => previous ? { ...previous, bot: { ...previous.bot, model } } : previous);
+      setOverview(previous => previous ? { ...previous, bots: previous.bots.map(bot => bot.id === botId ? { ...bot, model } : bot) } : previous);
+      setNotice('模型已切换，从下一条消息生效');
+    } catch (failure) {
+      setNotice(failure?.message || '模型切换失败，请稍后重试');
+    } finally { setModelBusy(''); }
+  };
+
+  const deleteMemory = async memoryId => {
+    const botId = selectedBotId || detail?.bot?.id;
+    if (!botId || !memoryId) return;
+    try {
+      const result = await scopedCall('personal-assistant.bot.memory.delete', { botId, memoryId });
+      if (result?.deleted === false) { setNotice('记忆删除未生效：本机状态存储暂不可用'); return; }
+      setDetail(previous => previous ? {
+        ...previous,
+        memory: {
+          count: Math.max(0, Number(previous.memory?.count || 0) - 1),
+          items: (previous.memory?.items || []).filter(item => item.id !== memoryId),
+        },
+      } : previous);
+    } catch (failure) { setNotice(failure?.message || '删除记忆失败，请稍后重试'); }
+  };
+
+  const submitDeleteBot = async () => {
+    const name = String(detail?.bot?.name || '');
+    const confirmName = String(deleteConfirm.text || '').trim();
+    if (!name || confirmName !== name || deleteConfirm.busy) return;
+    const botId = selectedBotId || detail?.bot?.id;
+    setDeleteConfirm(previous => ({ ...previous, busy: true, error: '' }));
+    try {
+      await scopedCall('personal-assistant.bot.delete', { botId, confirmName });
+      removePanelCache(`bot-detail.${botId}`);
+      setDetail(null); setPanelView('list');
+      setNotice('Bot 已删除；云电脑与工作区文件保留');
+      await loadOverview();
+    } catch (failure) {
+      setDeleteConfirm(previous => ({ ...previous, busy: false, error: failure?.message || '删除失败，请稍后重试' }));
+    }
+  };
+
+  const submitCreateBot = async () => {
+    const name = createBot.name.trim();
+    if (!name || createBot.busy) return;
+    setCreateBot(previous => ({ ...previous, busy: true, error: '' }));
+    try {
+      const result = await rpc('personal-assistant.bot.create', { name });
+      const id = String(result?.bot?.id ?? '');
+      setCreateBot({ open: false, name: '', busy: false, error: '' });
+      await loadOverview();
+      if (id) openDetail(id);
+    } catch (failure) {
+      setCreateBot(previous => ({ ...previous, busy: false, error: isUnavailableFailure(failure) ? 'Host 尚未提供 Bot 创建能力，请稍后重试' : (failure?.message || '创建 Bot 失败') }));
+    }
+  };
+
+  /* ---------- 设置 ---------- */
+
+  const applySettingsDraft = inspect => {
+    setSettingsInspect(inspect && typeof inspect === 'object' ? inspect : null);
+    setSettingsDraft(settingsDraftFrom(inspect));
+    setEnvDeletes([]);
+  };
+
+  const openSettings = () => {
+    setPanelView('settings'); setSettingsError(''); setSettingsNotice('');
+    setCloseAssistant(previous => ({ ...previous, open: false, text: '', error: '' }));
+    const cached = readPanelCache('settings-inspect');
+    if (cached?.value) { applySettingsDraft(cached.value); setSettingsDegraded(false); }
+    else { setSettingsInspect(null); setSettingsDraft({ model: config?.model || '', prompt: '', environmentVariables: [] }); }
+    void loadSettings();
+  };
+
+  const loadSettings = async () => {
+    setSettingsLoading(true);
+    try {
+      const raw = await scopedCall('personal-assistant.settings.inspect');
+      applySettingsDraft(raw);
+      setSettingsDegraded(false);
+      writePanelCache('settings-inspect', raw || {});
+      setUpdatedAt(stamp());
+      try {
+        const versions = await scopedCall('personal-assistant.settings.versions', { currentVersion: raw?.runtime?.version || '' });
+        setSettingsVersions(versions && typeof versions === 'object' ? versions : { catalogAvailable: false, versions: [] });
+      } catch {
+        setSettingsVersions({ catalogAvailable: false, versions: [] });
+      }
+    } catch (failure) {
+      // 降级：保留缓存/空草稿，页面仍可操作（保存时会把真实错误抛回）。
+      setSettingsDegraded(true);
+      if (!readPanelCache('settings-inspect')?.value) setSettingsDraft({ model: config?.model || '', prompt: '', environmentVariables: [] });
+      if (!isUnavailableFailure(failure)) setSettingsError(failure?.message || '读取云端配置失败');
+    } finally { setSettingsLoading(false); }
+  };
+
+  const saveSettings = async () => {
+    if (settingsBusy) return;
+    setSettingsBusy('save'); setSettingsError(''); setSettingsNotice('');
+    try {
+      const environmentVariables = (settingsDraft.environmentVariables || [])
+        .filter(row => String(row.key || '').trim())
+        .map(row => ({ key: String(row.key).trim(), value: String(row.value ?? ''), sensitive: row.sensitive === true }));
+      await scopedCall('personal-assistant.settings.update', {
+        model: String(settingsDraft.model || '').trim(),
+        prompt: String(settingsDraft.prompt || ''),
+        environmentVariables,
+        deleteKeys: envDeletes,
+      });
+      setEnvDeletes([]);
+      setSettingsNotice('已提交云端更新，通常 1–2 分钟完成，期间云电脑可能短暂重连。');
+      await loadSettings();
+    } catch (failure) {
+      setSettingsError(failure?.message || '保存失败，请稍后重试');
+    } finally { setSettingsBusy(''); }
+  };
+
+  const closeAssistantNow = async () => {
+    const agentId = String(config?.agentId || '');
+    const confirmText = String(closeAssistant.text || '').trim();
+    if (!agentId || confirmText !== agentId || closeAssistant.busy) return;
+    setCloseAssistant(previous => ({ ...previous, busy: true, error: '' }));
+    try {
+      await rpc('personal-assistant.desktop.destroy', { confirmAgentId: agentId });
+      setCloseAssistant({ open: false, text: '', busy: false, error: '', closedNotice: '个人助理已关闭：云端实例已删除，关联的云资源订单正在释放，本机绑定已清除。' });
+      setConfig(previous => ({ ...(previous || {}), configured: false }));
+      setOverview(null); setScope(null);
+      setPanelView('list');
+    } catch (failure) {
+      const message = String(failure?.message || '');
+      setCloseAssistant(previous => ({
+        ...previous, busy: false,
+        error: /更新 DSH Host|云连接服务/iu.test(message) ? '当前 DSH Host 版本还不支持关闭个人助理，请更新 DSH Host 后重试。' : (message || '关闭个人助理失败，请稍后重试'),
+      }));
+    }
+  };
+
+  /* ---------- 首次创建 ---------- */
+
+  const pollDesktopReady = async () => {
+    try { const value = await rpc('personal-assistant.desktop.status'); return value?.configured === true; } catch { return false; }
+  };
+
+  const pollCreateStatus = async () => {
+    if (!aliveRef.current) return;
+    try {
+      const raw = await rpc('personal-assistant.create.status');
+      const status = normalizeCreateStatus(raw);
+      if (!status) throw Object.assign(new Error('create.status 格式无效'), { code: 'PERSONAL_ASSISTANT_CREATE_STATUS_INVALID' });
+      // elapsedMs 缺失时用本地起点补齐，进度页的「已用时」仍然在走。
+      if (!status.elapsedMs) status.elapsedMs = Date.now() - createStartedAtRef.current;
+      setCreateStatus(status);
+      setCreateError(status.error || '');
+      if (status.stage === 'done') {
+        setCreateNotice('创建完成，正在刷新 Bot 列表…');
+        await loadConnection();
+        await boot();
+        setPanelView('list'); setCreateStatus(null);
+        return;
+      }
+      if (status.stage === 'failed') return;
+    } catch (failure) {
+      // Host 没实现 create.status：退化为轮询 desktop.status，仍然能等到「已开通」；
+      // 这段时间用本地阶段占位，界面不空白。
+      if (isUnavailableFailure(failure) || Number(failure?.status) === 404) {
+        setCreateStatus(previous => previous && previous.stage !== 'failed' ? { ...previous, stage: previous.stage || 'runtime' } : { stage: 'runtime', stages: [], elapsedMs: Date.now() - createStartedAtRef.current, estimatedRemainingMs: 90_000 });
+        if (await pollDesktopReady()) {
+          setCreateNotice('创建完成，正在刷新 Bot 列表…');
+          await loadConnection();
+          await boot();
+          setPanelView('list'); setCreateStatus(null);
+          return;
+        }
+      } else {
+        setCreateError(failure?.message || '读取创建进度失败，仍在后台创建');
+      }
+    }
+    if (createCollapsedRef.current) return;
+    clearCreateTimer();
+    createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 1000);
+  };
+
+  const startCreate = async () => {
+    if (bindingBusy) return;
+    setBindingBusy('create'); setNotice(''); setError('');
+    setCreateStatus({ stage: 'instance', stages: [], elapsedMs: 0, estimatedRemainingMs: 150_000 });
+    setCreateCollapsed(false); setCreateDiagnostics(false);
+    setCreateError(''); setCreateNotice('');
+    setPanelView('create');
+    createStartedAtRef.current = Date.now();
+    try {
+      await rpc('personal-assistant.desktop.create');
+    } catch (failure) {
+      setCreateError(failure?.message || '开通请求没有被云端接受');
+      setCreateStatus({ stage: 'failed', stages: [], elapsedMs: 0, estimatedRemainingMs: 0, error: failure?.message || '开通请求没有被云端接受' });
+      setBindingBusy('');
+      return;
+    }
+    setBindingBusy('');
+    clearCreateTimer();
+    createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 1000);
+  };
+
+  const toggleCreateCollapsed = () => {
+    const next = !createCollapsed;
+    setCreateCollapsed(next);
+    if (next) {
+      // 收起即停止轮询，但保留已拿到的状态；展开时补一次校准。
+      clearCreateTimer();
+    } else if (createStatus && !['done', 'failed'].includes(createStatus.stage)) {
+      void pollCreateStatus();
+    }
+  };
+
+  const cancelCreate = () => {
+    // 契约没有取消创建的 RPC：创建在云端继续，这里只退出进度页，避免用户以为已取消。
+    clearCreateTimer();
+    setCreateNotice('创建会在云端继续；完成后会自动出现在列表里。');
+    setPanelView('list');
+  };
+
+  /* ---------- 历史会话 ---------- */
+
+  const toggleHistory = () => {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next) void loadSessions();
+  };
+
+  const openHistorySession = sessionId => {
+    setChatSessionId(String(sessionId || ''));
+    setPanelView('chat');
+  };
+
+  /* ---------- 渲染 ---------- */
+
+  const bots = overview?.bots || [];
+  const runningCount = bots.filter(bot => bot.status === 'running').length;
+  const degraded = overviewDegraded || detailDegraded || settingsDegraded;
+  // 圆点三态点击口径（契约第 2 章）：authorized/connected 打开授权弹层；offline 是重连。
+  const onDotOpen = () => {
+    if (connectionStateOf(connection) === 'offline') {
+      // offline 的点击含义是「重连」：立刻重查连接，并把结果直接显示在弹层里。
+      setLocalAccessOpen(true); setLocalError(''); setLocalNotice('正在重新检查本机连接…');
+      void loadConnection().then(next => {
+        setLocalNotice(next?.connected ? '本机已连接，可继续授权' : '本机仍未连接：请确认 DSH Host 本机客户端在运行');
+      });
+      return;
+    }
+    setLocalAccessOpen(open => !open);
+    setLocalError(''); setLocalNotice('');
+  };
+  const dotNode = connectionDot({ h, connection, onOpen: onDotOpen });
+  const configured = config?.configured === true;
+
+  const renderHeader = () => {
+    if (panelView === 'list') {
+      return h('header', { style: panelUi.header, 'data-window-drag': '' },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
+          h('span', { style: panelUi.title }, '个人助理'),
+          h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 12, color: PANEL_TOKENS.inkSoft, minWidth: 0 } },
+            h('span', { 'aria-hidden': 'true', style: { flex: 'none', width: 6, height: 6, borderRadius: 999, background: PANEL_TOKENS.success } }),
+            h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${bots.length} 个 Bot · ${runningCount} 个运行中`))),
+        h('div', { style: { flex: 'none', display: 'flex', alignItems: 'center', gap: 12 } },
+          h('button', { type: 'button', 'data-window-drag-recall': '', onClick: openSettings, style: { border: 'none', background: 'transparent', padding: 0, font: 'inherit', fontSize: 12, color: PANEL_TOKENS.inkSoft, cursor: 'pointer' } }, '设置'),
+          dotNode,
+          panelButton({ h, label: '新建 Bot', variant: 'primary', 'data-window-drag-recall': '', onClick: () => setCreateBot({ open: true, name: '', busy: false, error: '' }) })));
+    }
+    if (panelView === 'create') {
+      return h('header', { style: panelUi.header, 'data-window-drag': '' },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
+          h('span', { style: panelUi.title }, '个人助理'),
+          h('span', { style: { fontSize: 11, color: PANEL_TOKENS.warn } }, '正在开通')),
+        h('div', { style: { flex: 'none', display: 'flex', alignItems: 'center', gap: 8 } },
+          dotNode,
+          panelButton({ h, label: createCollapsed ? '展开' : '收起', variant: 'ghost', 'data-window-drag-recall': '', onClick: toggleCreateCollapsed, style: { height: 30 } })));
+    }
+    // detail / settings：返回 + 标题 + 徽章 + 圆点 + 右侧动作（画板 04/08）
+    return h('header', { style: { ...panelUi.header, padding: '0 12px 0 8px' }, 'data-window-drag': '' },
+      h('button', {
+        type: 'button', 'aria-label': '返回', title: '返回 Bot 列表', 'data-window-drag-recall': '', onClick: () => setPanelView('list'),
+        style: { flex: 'none', width: 32, height: 32, display: 'grid', placeItems: 'center', padding: 0, border: 'none', borderRadius: 8, background: 'transparent', color: PANEL_TOKENS.inkSoft, cursor: 'pointer' },
+      }, backIcon({ h, size: 14 })),
+      h('div', { style: { flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 } },
+        h('span', { style: { ...panelUi.title, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, panelView === 'settings' ? '设置' : (detail?.bot?.name || 'Bot 详情')),
+        panelView === 'detail' && detail?.bot?.role === 'primary'
+          ? h('span', { style: { borderRadius: 999, padding: '1px 7px', fontSize: 11, lineHeight: 1.7, background: PANEL_TOKENS.subtle, color: PANEL_TOKENS.inkSoft } }, '主助理')
+          : null),
+      dotNode,
+      panelView === 'settings'
+        ? panelButton({ h, label: settingsBusy === 'save' ? '保存中…' : '保存', variant: 'primary', 'data-window-drag-recall': '', disabled: settingsBusy === 'save' || !configured || !settingsInspect, onClick: saveSettings, style: { height: 32 } })
+        : panelButton({ h, label: '编辑', variant: 'ghost', 'data-window-drag-recall': '', onClick: () => setNotice('模型、记忆与能力可直接在下方调整'), style: { height: 32 } }));
+  };
+
+  const renderOnboarding = () => {
+    const guidance = binding ? unconfiguredGuidance(binding) : null;
+    if (!guidance) return h('div', { role: 'status', style: { flex: '1 1 0px', display: 'grid', placeItems: 'center', padding: 24, color: PANEL_TOKENS.inkSoft } }, '正在读取开通状态…');
+    return h('div', { 'data-personal-assistant-onboarding': 'true', style: panelUi.page },
+      h('main', { style: { ...onboardingStyle.page, flex: '1 1 0px', minHeight: 0 } },
+        h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
+        h('h1', { style: onboardingStyle.title }, guidance.title),
+        h('p', { style: onboardingStyle.detail }, guidance.detail),
+        h('ol', { style: onboardingStyle.steps },
+          onboardingSteps(guidance.tone).map((text, index) => h('li', { key: text, style: onboardingStyle.step },
+            h('span', { style: onboardingStyle.stepIndex }, String(index + 1)), h('span', null, text)))),
+        h('div', { style: onboardingStyle.actions },
+          guidance.actions.map(action => h('button', {
+            key: action.id, disabled: Boolean(bindingBusy),
+            style: action.primary ? onboardingStyle.primary : onboardingStyle.ghost,
+            onClick: () => {
+              if (action.id === 'check') { void boot(); return; }
+              if (action.id === 'create') { void startCreate(); return; }
+              // connect 复用现有 desktop.connect（旧宿主可能没有 create.status，仍能等到 configured）
+              void (async () => {
+                setBindingBusy(action.id); setError('');
+                try { await rpc(`personal-assistant.desktop.${action.id}`); await boot(); }
+                catch (failure) { setError(failure?.message || '操作失败，请稍后重试'); }
+                finally { setBindingBusy(''); }
+              })();
+            },
+          }, bindingBusy === action.id ? '处理中…' : action.label))),
+        error ? h('p', { role: 'alert', style: { ...onboardingStyle.notice, color: PANEL_TOKENS.danger } }, error) : null,
+        notice ? h('p', { role: 'status', style: onboardingStyle.notice }, notice) : null));
+  };
+
+  const renderBody = () => {
+    if (panelView === 'create') {
+      return h('main', { style: { ...panelUi.main, alignItems: 'center', justifyContent: 'center', gap: 18, padding: '28px 32px' } },
+        renderCreateProgress({
+          h, status: createStatus, collapsed: createCollapsed, diagnosticsOpen: createDiagnostics,
+          notice: createNotice, error: createError,
+          actions: {
+            onExpand: () => { setCreateCollapsed(false); if (createStatus && !['done', 'failed'].includes(createStatus.stage)) void pollCreateStatus(); },
+            onDiagnostics: () => setCreateDiagnostics(open => !open),
+            onCancel: cancelCreate,
+            onRetry: () => void startCreate(),
+          },
+        }));
+    }
+    if (panelView === 'settings') {
+      return h('main', { style: panelUi.main },
+        renderSettings({
+          h, loading: settingsLoading, degraded: settingsDegraded, notice: settingsNotice, error: settingsError, busy: settingsBusy,
+          inspect: settingsInspect, versions: settingsVersions, localAccess: connection, modelOptions: MODEL_OPTIONS,
+          instance: { configured, agentId: config?.agentId || '', version: settingsInspect?.runtime?.version || '', status: settingsInspect?.status || (configured ? '运行中' : '未开通'), editable: configured },
+          draft: settingsDraft, closeAssistant,
+          actions: {
+            onModelChange: value => setSettingsDraft(previous => ({ ...previous, model: value })),
+            onPromptChange: value => setSettingsDraft(previous => ({ ...previous, prompt: value })),
+            onAddEnv: () => setSettingsDraft(previous => ({ ...previous, environmentVariables: [...(previous.environmentVariables || []), { key: '', value: '', sensitive: false, saved: false, dirty: true }] })),
+            onRemoveEnv: index => setSettingsDraft(previous => {
+              const rows = [...(previous.environmentVariables || [])];
+              const [removed] = rows.splice(index, 1);
+              if (removed?.saved && removed?.key) setEnvDeletes(deletes => deletes.includes(removed.key) ? deletes : [...deletes, removed.key]);
+              return { ...previous, environmentVariables: rows };
+            }),
+            onEnvChange: (index, patch) => setSettingsDraft(previous => ({
+              ...previous,
+              environmentVariables: (previous.environmentVariables || []).map((row, at) => at === index ? { ...row, ...patch, dirty: true } : row),
+            })),
+            onDiagnostics: () => setLocalAccessOpen(false),
+            onRevokeLocal: () => { void revokeLocalAccess(); },
+            onOpenLocalAccess: () => setLocalAccessOpen(true),
+            onCheckUpdate: () => { if (settingsVersions?.catalogAvailable) setSettingsNotice('云端有可升级版本，升级入口暂未接入面板'); },
+            onCloseStart: () => setCloseAssistant({ open: true, text: '', busy: false, error: '', closedNotice: closeAssistant.closedNotice }),
+            onCloseText: value => setCloseAssistant(previous => ({ ...previous, text: value })),
+            onCloseCancel: () => setCloseAssistant(previous => ({ ...previous, open: false, text: '', error: '' })),
+            onCloseConfirm: () => void closeAssistantNow(),
+          },
+        }));
+    }
+    if (panelView === 'detail') {
+      return h('main', { style: panelUi.main },
+        renderBotDetail({
+          h, loading: detailLoading, degraded: detailDegraded, notice,
+          bot: detail?.bot || (selectedBotId ? botSummary(selectedBotId) : null),
+          memory: detail?.memory || null,
+          capabilities: detail?.capabilities || [],
+          computer: detail?.computer || null,
+          modelOptions: MODEL_OPTIONS,
+          manageMemory, showAllMemory, modelBusy, deleteConfirm,
+          actions: {
+            onChangeModel: model => void changeBotModel(model),
+            onToggleManageMemory: () => setManageMemory(value => !value),
+            onToggleAllMemory: () => setShowAllMemory(value => !value),
+            onDeleteMemory: id => void deleteMemory(id),
+            onAddCapability: () => setNotice('添加能力入口暂未接入面板，可在 MCP 服务里配置'),
+            onOpenComputer: () => setPanelView('desktop'),
+            onDeleteStart: () => setDeleteConfirm({ open: true, text: '', busy: false, error: '' }),
+            onDeleteCancel: () => setDeleteConfirm({ open: false, text: '', busy: false, error: '' }),
+            onDeleteText: value => setDeleteConfirm(previous => ({ ...previous, text: value, error: '' })),
+            onDeleteConfirm: () => void submitDeleteBot(),
+          },
+        }));
+    }
+    if (panelView === 'chat') {
+      if (!configured) return renderOnboarding();
+      return h('div', { style: { flex: '1 1 0px', minHeight: 0, minWidth: 0, display: 'flex', position: 'relative' } },
+        h(PersonalAssistantConversation, {
+          key: `${scope?.botId || 'default'}:${chatSessionId || 'auto'}`,
+          React: R, request: scopedRequest, scope, markdown: clientMarkdown,
+          initialSessionId: chatSessionId, onBack: () => setPanelView('list'),
+          onOpenComputer: () => setPanelView('desktop'),
+          revokedAt: localRevokedAt,
+          connectionDot: dotNode,
+        }));
+    }
+    if (panelView === 'desktop') {
+      return h('div', { style: { flex: '1 1 0px', minHeight: 0, minWidth: 0, display: 'flex', position: 'relative' } },
+        h(PersonalAssistantPanel, {
+          request: panelRequest, variant: 'page',
+          connectionDot: dotNode, onBack: () => setPanelView('chat'),
+        }));
+    }
+    // list
+    if (!configured) return renderOnboarding();
+    return h('main', { style: panelUi.main },
+      renderBotsList({
+        h, connection, loading: overviewLoading, degraded: overviewDegraded, notice,
+        bots, active: overview?.active || [], recent: overview?.recent || [], counts: overview?.counts || null,
+        showAllActivity, historyOpen, historyLoading, historyError, sessions,
+        createBot,
+        actions: {
+          onEnter: botId => openChat(botId),
+          onOpenBot: botId => openDetail(botId),
+          onOpenChat: botId => openChat(botId),
+          onOpenDetail: botId => openDetail(botId),
+          onOpenMemory: botId => openDetail(botId),
+          onOpenComputer: () => setPanelView('desktop'),
+          onOpenSettings: openSettings,
+          onOpenLocalAccess: () => setLocalAccessOpen(true),
+          onToggleActivity: () => setShowAllActivity(value => !value),
+          onToggleHistory: toggleHistory,
+          onOpenSession: sessionId => openHistorySession(sessionId),
+          onOpenShortcut: kind => setNotice(kind === 'memories' ? '记忆入口请在 Bot 详情里管理' : '该入口暂未接入面板，后续版本提供'),
+          onApprove: approvalId => setNotice(approvalId ? '审批入口暂未接入面板，请在 DSH Host 的待办里处理' : '暂时没有待确认的操作'),
+          onCreateBot: () => setCreateBot({ open: true, name: '', busy: false, error: '' }),
+          onOpenHistoryItem: sessionId => openHistorySession(sessionId),
+        },
+      }),
+      // 新建 Bot 的内联对话框：画板没有这一块，沿用卡片视觉，避免跳页。
+      createBot.open ? h('div', { role: 'dialog', 'aria-label': '新建 Bot', style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', background: 'rgba(23,32,44,0.18)', zIndex: 40, padding: 24 } },
+        h('div', { style: { width: '100%', maxWidth: 360, background: PANEL_TOKENS.surface, border: `1px solid ${PANEL_TOKENS.border}`, borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 10, boxShadow: '0 18px 40px rgba(23,32,44,0.18)' } },
+          h('div', { style: { fontSize: 13, fontWeight: 600 } }, '新建 Bot'),
+          h('div', { style: { fontSize: 11, color: PANEL_TOKENS.inkMuted, lineHeight: 1.7 } }, '新 Bot 有独立的模型、记忆与能力，共用同一台云电脑。'),
+          h('input', {
+            value: createBot.name, 'aria-label': 'Bot 名称', placeholder: '例如：文档助理', autoFocus: true,
+            onChange: event => setCreateBot(previous => ({ ...previous, name: String(event?.target?.value ?? ''), error: '' })),
+            style: { fontSize: 12, padding: '7px 9px', borderRadius: 8, border: `1px solid ${PANEL_TOKENS.border}`, font: 'inherit' },
+          }),
+          createBot.error ? h('div', { role: 'alert', style: { fontSize: 11, color: PANEL_TOKENS.danger } }, createBot.error) : null,
+          h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8 } },
+            panelButton({ h, label: '取消', variant: 'ghost', onClick: () => setCreateBot({ open: false, name: '', busy: false, error: '' }) }),
+            panelButton({ h, label: createBot.busy ? '创建中…' : '创建', variant: 'primary', disabled: createBot.busy || !createBot.name.trim(), onClick: () => void submitCreateBot() })))) : null);
+  };
+
+  const popover = renderLocalAccess({
+    h, open: localAccessOpen, connection, status: connection,
+    selectedScopes: connection.authorized ? (connection.scopes.length ? connection.scopes : localScopes) : localScopes,
+    riskConfirm: connection.authorized ? connection.riskConfirm : riskConfirmDraft,
+    busy: localBusy, error: localError, notice: localNotice,
+    actions: {
+      onToggleScope: id => setLocalScopes(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id]),
+      onToggleRisk: () => setRiskConfirmDraft(value => !value),
+      onGrant: () => void grantLocalAccess(),
+      onRevoke: () => void revokeLocalAccess(),
+      onOpenLocalSettings: () => setNotice('请在这台 Mac 的 系统设置 › 隐私与安全性 里调整 DSH Host 的权限'),
+    },
+  });
+
+  return h('section', { 'data-personal-assistant-shell': 'true', 'data-panel-view': panelView, style: { ...panelUi.page, position: 'relative' } },
+    h('style', null, SHELL_KEYFRAMES),
+    renderHeader(),
+    h('div', {
+      'data-pa-body': 'true',
+      style: { flex: '1 1 0px', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column', position: 'relative', ...(localAccessOpen ? { opacity: 0.32, pointerEvents: 'none' } : {}) },
+    }, renderBody()),
+    localAccessOpen ? h('button', {
+      type: 'button', 'aria-label': '关闭本机授权弹层', tabIndex: -1,
+      onClick: () => setLocalAccessOpen(false),
+      style: { position: 'absolute', inset: 0, border: 'none', background: 'transparent', cursor: 'default', zIndex: 20 },
+    }) : null,
+    popover,
+    panelFooter({ h, config, selectedBotId, connection, updatedAt, build: PERSONAL_ASSISTANT_CLIENT_BUILD }));
+}
+
+/** 可切换的模型目录：Host 侧 bot.model.update 不限制取值，这里只给常见档位。 */
+const MODEL_OPTIONS = Object.freeze(['deepseek-v4.1-flash-1017', 'deepseek-v4.1-pro']);
 
 const settingsStyle = {
   page: { padding: '2px 2px 28px', display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 700, fontSize: 13, color: 'var(--dsw-alias-label-primary, #17202c)' },
@@ -855,7 +1949,7 @@ const settingsStyle = {
 /** 设置页里的「个人助理」一节：状态、连接自检、能力与记忆位置。 */
 export function PersonalAssistantSettings({ request, openComputer = null } = {}) {
   const R = clientReact || globalThis.React;
-  if (!R) return '设置页尚未就绪，请重新打开 Studio';
+  if (!R) return '设置页尚未就绪，请重新打开 DSH Host';
   const { createElement: h, useEffect, useState, useCallback } = R;
   const [config, setConfig] = useState(null);
   const [bots, setBots] = useState(null);
@@ -937,7 +2031,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       setCheckedAt('');
     } catch (reason) {
       const message = String(reason?.message || '');
-      setError(/更新 Studio|云连接服务/iu.test(message) ? '当前 Studio 版本还不支持关闭个人助理，请更新 Studio 后重试。' : (message || '关闭个人助理失败，请稍后重试'));
+      setError(/更新 DSH Host|云连接服务/iu.test(message) ? '当前 DSH Host 版本还不支持关闭个人助理，请更新 DSH Host 后重试。' : (message || '关闭个人助理失败，请稍后重试'));
     } finally { setClosing(false); }
   }, [agentId, canConfirm, request]);
 
@@ -949,7 +2043,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     setEnvRows(rows => rows.filter((_, at) => at !== index));
     if (row.saved && row.key) setEnvDeletes(keys => keys.includes(row.key) ? keys : [...keys, row.key]);
   };
-  const editable = settings?.recordSource === 'studio';
+  const editable = settings?.recordSource === 'host';
   const saveSettings = useCallback(async () => {
     if (!editable || settingsBusy) return;
     setSettingsBusy(true); setSettingsError(''); setSettingsNotice('');
@@ -1003,10 +2097,10 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
         line('云端配置', h('div', { style: settingsStyle.note },
           settingsBusy ? '读取中…' : (settingsError || '暂时读不到云端配置；请点下方“检查连接”重试')), true));
     }
-    if (settings.recordSource !== 'studio') {
+    if (settings.recordSource !== 'host') {
       return h('div', { style: settingsStyle.card },
         line('云端配置', h('div', { style: settingsStyle.note },
-          '这个个人助理是用旧版 Studio 创建的，本机没有记录它的配置清单，暂时不能在线修改。可以关闭后重新创建；等云端平台提供读取接口后即可直接编辑。'), true));
+          '这个个人助理是用旧版 DSH Host 创建的，本机没有记录它的配置清单，暂时不能在线修改。可以关闭后重新创建；等云端平台提供读取接口后即可直接编辑。'), true));
     }
     const versionControl = versions && versions.catalogAvailable
       ? h('select', { style: settingsStyle.input, value: version, disabled: settingsBusy, 'aria-label': '运行时版本',
@@ -1065,8 +2159,8 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     guidanceCard,
     h('div', { style: settingsStyle.card },
       line('状态', h('span', null, h('span', { style: statusStyle }, status), checkedAt ? h('span', { style: settingsStyle.note }, `　上次检查 ${checkedAt}`) : null), true),
-      line('云端实例', config?.agentId ? h('span', { style: settingsStyle.mono }, config.agentId) : h('span', { style: settingsStyle.note }, configured ? '未返回实例标识' : '开通后由 Studio 绑定')),
-      line('网关', config?.gatewayUrl ? h('span', { style: settingsStyle.mono }, config.gatewayUrl) : h('span', { style: settingsStyle.note }, '由 Studio Host 配置')),
+      line('云端实例', config?.agentId ? h('span', { style: settingsStyle.mono }, config.agentId) : h('span', { style: settingsStyle.note }, configured ? '未返回实例标识' : '开通后由 DSH Host 绑定')),
+      line('网关', config?.gatewayUrl ? h('span', { style: settingsStyle.mono }, config.gatewayUrl) : h('span', { style: settingsStyle.note }, '由 DSH Host Host 配置')),
       line('助理连接', h('span', { style: settingsStyle.note }, bots === null ? '检查中' : bots.length ? '已连接你的助理' : '助理尚未就绪')),
       line('记忆', h('div', null, h('div', { style: settingsStyle.mono }, '/workspace/assistant-state'),
         h('div', { style: settingsStyle.note }, '记忆、会话与定时任务随云电脑持久保存，换设备也在'))),
@@ -1136,10 +2230,10 @@ export function apply(ctx) {
   const request = async (operation, payload = {}) => {
     if (!ctx.connection?.rpc?.call) throw new PersonalAssistantGatewayUnavailableError();
     const result = await ctx.connection.rpc.call('/api', 'personal-assistant', { operation, payload });
-    if (!result?.ok) throw Object.assign(new Error(result?.error?.message || 'Studio Host 请求失败'), { code: result?.error?.code, status: result?.error?.details?.status, closeCode: result?.error?.details?.closeCode });
+    if (!result?.ok) throw Object.assign(new Error(result?.error?.message || 'DSH Host Host 请求失败'), { code: result?.error?.code, status: result?.error?.details?.status, closeCode: result?.error?.details?.closeCode });
     return result.value;
   };
-  // 注册一律走作用域助手：任一条注册失败只降级该入口，绝不让插件激活整体失败（激活失败会导致 Studio 重置 profile）。
+  // 注册一律走作用域助手：任一条注册失败只降级该入口，绝不让插件激活整体失败（激活失败会导致 DSH Host 重置 profile）。
   const scope = (factory, label) => {
     try {
       const run = () => factory();
@@ -1157,11 +2251,11 @@ export function apply(ctx) {
   }
   scope(() => ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request, nativeWorkbench }),
-  }, PersonalAssistantHome)), 'personal-assistant: main panel');
+  }, PersonalAssistantShell)), 'personal-assistant: main panel');
   scope(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PERSONAL_ASSISTANT_PANEL_ID, order: 90, label: '个人助理',
   }, PersonalAssistantPanelIcon)), 'personal-assistant: sidebar row');
-  // Studio 设置页里的「个人助理」一节（原产品页被去重后留下的位置）。
+  // DSH Host 设置页里的「个人助理」一节（原产品页被去重后留下的位置）。
   scope(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section', id: `${PERSONAL_ASSISTANT_PANEL_ID}-settings`, order: 196, label: '个人助理',
     inject: () => ({ request }),

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** 离线安装个人助理、原生侧栏和可选的 Studio 宿主包；默认仅检查。 */
+/** 离线安装个人助理、原生侧栏和DSH 宿主包；默认仅检查。 */
 import { promises as fs } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -9,9 +9,8 @@ import { spawnSync } from 'node:child_process';
 
 const PA = '@kingsoftcloud/agentkit-personal-assistant';
 const SIDEBAR = '@deepseek-ai/dsh-client-ui-sidebar-right';
-const STUDIO = '@kingsoftcloud/agentkit-studio';
-const NODE = '/Applications/AgentKit Studio.app/Contents/MacOS/AgentKit Studio';
-const DSH = '/Applications/AgentKit Studio.app/Contents/Resources/app.asar/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js';
+const NODE = process.env.DSH_NODE || process.execPath;
+const DSH = process.env.DSH_BIN || '';
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 const stat = async path => fs.lstat(path).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
 const fail = message => { throw new Error(message); };
@@ -105,10 +104,10 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
   const original = await fs.readFile(packagePath), pkg = parseJson(original, 'profile package.json');
   const manifestPath = resolve(manifest), manifestBytes = await fs.readFile(manifestPath);
   const release = parseJson(manifestBytes, 'release manifest');
-  if (!Array.isArray(release.packages) || ![2, 3].includes(release.packages.length)) fail('manifest 必须包含个人助理、原生侧栏和可选的 Studio 包');
+  if (!Array.isArray(release.packages) || release.packages.length !== 2) fail('manifest 必须包含个人助理和原生侧栏');
   const names = release.packages.map(item => item.pkgName);
   if (new Set(names).size !== names.length || !names.includes(PA) || !names.includes(SIDEBAR) ||
-      names.some(name => ![PA, SIDEBAR, STUDIO].includes(name))) fail('manifest 包集合不正确');
+      names.some(name => ![PA, SIDEBAR].includes(name))) fail('manifest 包集合不正确');
   const sourceCommit = release.sidebar?.sourceCommit || release.packages.find(item => item.pkgName === SIDEBAR).sourceCommit;
   if (!/^[a-f0-9]{40}$/.test(sourceCommit || '')) fail('manifest 缺少侧栏 sourceCommit');
   const prepared = [];
@@ -207,7 +206,7 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
       timeout: 60000, maxBuffer: 32 * 1024 * 1024, encoding: 'utf8' });
     if (dump.error || dump.status !== 0) fail('DSH 配置合成失败，退出码 ' + String(dump.status ?? dump.error?.code ?? 'unknown') + '；输出可能含凭据，不打印');
     const proof = { ...plan, dryRun: false, backup, dumpConfigExit: 0, dumpConfigLines: dump.stdout.split('\n').length,
-      dumpConfigWarningLines: dump.stderr.split('\n').filter(Boolean).length, artifactCache: cache, studioRestarted: false };
+      dumpConfigWarningLines: dump.stderr.split('\n').filter(Boolean).length, artifactCache: cache, hostRestarted: false };
     await fs.writeFile(join(backup, 'install-proof.json'), JSON.stringify(proof, null, 2) + '\n', { mode: 0o600 });
     return proof;
   } catch (error) {
@@ -237,7 +236,7 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
     for (const file of newCache) await restore(() => fs.rm(file, { force: true }));
     if (setupStarted && !cacheExisted) await restore(() => fs.rmdir(cache));
     if (setupStarted && !modulesExisted) await restore(() => fs.rmdir(modules));
-    error.installResult = { rolledBack: rollbackErrors.length === 0, rollbackErrors, backup, studioRestarted: false };
+    error.installResult = { rolledBack: rollbackErrors.length === 0, rollbackErrors, backup, hostRestarted: false };
     throw error;
   } finally {
     await fs.rm(stage, { recursive: true, force: true });

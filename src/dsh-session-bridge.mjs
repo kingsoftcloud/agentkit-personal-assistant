@@ -39,6 +39,39 @@ function contentOf(input) {
   return [{ type: 'text', text }];
 }
 
+function eventRecords(value) {
+  if (Array.isArray(value?.events)) return value.events.filter(event => event && typeof event === 'object');
+  if (Array.isArray(value?.records)) {
+    return value.records.flatMap(record => {
+      if (record?.type === 'event' && record.event && typeof record.event === 'object') return [record.event];
+      return [];
+    });
+  }
+  return [];
+}
+
+function lastEventSeq(events) {
+  let result = -1;
+  for (const event of events) if (Number.isSafeInteger(event?.seq)) result = Math.max(result, event.seq);
+  return result;
+}
+
+/**
+ * Read the public DSH 0.2.2 SessionController history surface. Older local
+ * doubles used `inspect(id)`; cloud DSH exposes `events({ address })` instead.
+ */
+async function readSessionEvents(controller, sessionId, signal) {
+  if (typeof controller.inspect === 'function') {
+    const value = await controller.inspect(sessionId, signal);
+    return { mode: 'index', events: eventRecords(value) };
+  }
+  if (typeof controller.events === 'function') {
+    const value = await controller.events({ address: { kind: 'session', sessionId }, maxMessages: 1000 }, signal);
+    return { mode: 'seq', events: eventRecords(value), cursor: Number.isSafeInteger(value?.cursor) ? value.cursor : undefined };
+  }
+  return undefined;
+}
+
 /**
  * Adapt the public DSH Host SessionController to the Personal Assistant turn
  * contract. The controller remains the source of truth for execution and
@@ -145,7 +178,12 @@ export function createDshTurnBridge({ ctx, sessionController, registry, platform
     try {
     const resources = await ensureSession({ sessionId: session, botId: id, bot, signal: requestSignal });
     sessionOwners.set(session, id);
-    const baseline = typeof controller.inspect === 'function' ? (await controller.inspect(session, requestSignal))?.events?.length || 0 : 0;
+    const before = await readSessionEvents(controller, session, requestSignal);
+    const baseline = before?.mode === 'index'
+      ? { mode: 'index', value: before.events.length }
+      : before === undefined
+        ? undefined
+        : { mode: 'seq', value: Math.max(lastEventSeq(before.events), Number.isSafeInteger(before.cursor) ? before.cursor : -1) };
     const request = { sessionId: session, requestId: rpcId, mode, content };
     if (clientTimeZone !== undefined) request.clientTimeZone = String(clientTimeZone);
     const result = await controller.prompt(request, requestSignal);
@@ -159,13 +197,16 @@ export function createDshTurnBridge({ ctx, sessionController, registry, platform
 
   async function waitForTurn({ botId, sessionId, requestId, timeoutMs = 300000, onProgress } = {}) {
     const entry = pending.get(requestId);
-    if (!entry || entry.botId !== botId || entry.sessionId !== sessionId || typeof controller.inspect !== 'function') throw new DshSessionControllerUnavailableError('DSH turn observation is unavailable');
+    if (!entry || entry.botId !== botId || entry.sessionId !== sessionId || (typeof controller.inspect !== 'function' && typeof controller.events !== 'function')) throw new DshSessionControllerUnavailableError('DSH turn observation is unavailable');
     const deadline = Date.now() + timeoutMs;
     let progressSeq = -1;
     try {
       while (Date.now() < deadline) {
-        const inspection = await controller.inspect(sessionId, new AbortController().signal);
-        const events = (inspection?.events || []).slice(entry.baseline);
+        const observed = await readSessionEvents(controller, sessionId, new AbortController().signal);
+        if (!observed) throw new DshSessionControllerUnavailableError('DSH turn observation is unavailable');
+        const events = entry.baseline?.mode === 'index'
+          ? observed.events.slice(entry.baseline.value)
+          : observed.events.filter(event => !Number.isSafeInteger(event?.seq) || event.seq > (entry.baseline?.value ?? -1));
         const latest = events.findLast(event => event.type === 'tool/call' || event.type === 'tool/result');
         if (latest && latest.seq !== progressSeq) {
           progressSeq = latest.seq;

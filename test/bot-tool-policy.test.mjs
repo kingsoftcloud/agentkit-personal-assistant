@@ -9,7 +9,14 @@ function scope(getPolicy, approval, timeoutMs) {
   const tools = { restrict() {}, guard(value) { guard = value; } };
   const agent = { ctx: { get: name => name === 'tools' ? tools : name === 'approval' ? approval : undefined, on: (name, callback) => handlers.set(name, callback) } };
   restrictPersonalAssistantToolScope(agent, 'writer', { getPolicy, approvalTimeoutMs: timeoutMs });
-  return { agent, guard: execution => guard(execution), pre: (execution, next = async () => ({ kind: 'allow' })) => handlers.get('tools/pre-execute')(execution, next), result: execution => handlers.get('tools/result')(execution), filter: () => handlers.get('system-prompt/assemble')({}, {}, async () => ({ tools: ['bot_memory_search', 'bot_memory_save', 'cloud_bash', 'bash'].map(name => ({ name })) })) };
+  return {
+    agent,
+    guard: execution => guard(execution),
+    pre: (execution, next = async () => ({ kind: 'allow' })) => handlers.get('tools/pre-execute')(execution, next),
+    result: execution => handlers.get('tools/result')(execution),
+    filter: () => handlers.get('system-prompt/assemble')({}, {}, async () => ({ tools: ['bot_memory_search', 'bot_memory_save', 'cloud_bash', 'bash'].map(name => ({ name })) })),
+    filterMissingTools: () => handlers.get('system-prompt/assemble')({}, {}, async () => ({ sections: ['unchanged'] })),
+  };
 }
 const execution = (patch = {}) => ({ name: 'bot_memory_save', token: Symbol('server-owned-execution'), callId: 'same-model-call-id', signal: new AbortController().signal, ...patch });
 
@@ -30,6 +37,12 @@ test('伪造调用即使跳过 pre-execute 也被最终 guard 拒绝，并按每
   current = policy({ mode: 'denylist', deny: ['bot_memory_search'] });
   assert.match(h.guard(execution({ name: 'bot_memory_search' })), /^BOT_TOOL_POLICY_DENIED:/u);
   assert.equal(h.guard(execution()), undefined);
+});
+
+test('兼容 DSH 0.2.2：提示词 waterfall 尚未提供 tools 时保持原结果', async () => {
+  const h = scope(() => policy());
+  const result = await h.filterMissingTools();
+  assert.deepEqual(result, { sections: ['unchanged'] });
 });
 
 test('requireApproval 缺服务/无答复者/拒绝/异常都 fail-closed，并提供可操作错误', async () => {
