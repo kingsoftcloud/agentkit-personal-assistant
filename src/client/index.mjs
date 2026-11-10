@@ -141,16 +141,11 @@ export function unconfiguredGuidance(binding) {
   };
 }
 
-const onboardingSteps = () => [];
-
 const onboardingStyle = {
   page: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: '32px 20px', textAlign: 'center', boxSizing: 'border-box' },
   eyebrow: { fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--dsw-alias-label-secondary, #536174)' },
   title: { margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em' },
   detail: { margin: 0, maxWidth: 460, lineHeight: 1.75, color: 'var(--dsw-alias-label-secondary, #536174)' },
-  steps: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8, textAlign: 'left', maxWidth: 460 },
-  step: { display: 'flex', gap: 10, alignItems: 'flex-start', lineHeight: 1.7 },
-  stepIndex: { flex: 'none', width: 20, height: 20, borderRadius: 999, display: 'grid', placeItems: 'center', fontSize: 12, background: 'color-mix(in srgb, currentColor 10%, transparent)' },
   actions: { display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', marginTop: 4 },
   primary: { ...ui, borderRadius: 8, padding: '8px 16px', cursor: 'pointer', font: 'inherit', fontSize: 13, fontWeight: 500, border: 'none', background: 'var(--dsw-alias-label-primary, #17202c)', color: 'var(--dsw-alias-bg-layer-1, #fff)' },
   ghost: { ...ui, borderRadius: 8, padding: '8px 14px', cursor: 'pointer', font: 'inherit', fontSize: 13, background: 'transparent' },
@@ -856,9 +851,6 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
       h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
       h('h2', { style: onboardingStyle.title }, guidance.title)),
     h('p', { style: onboardingStyle.detail }, guidance.detail),
-    h('ol', { style: onboardingStyle.steps },
-      onboardingSteps(guidance.tone).map((text, index) => h('li', { key: text, style: onboardingStyle.step },
-        h('span', { style: onboardingStyle.stepIndex }, String(index + 1)), h('span', null, text)))),
     h('div', { style: onboardingStyle.actions },
       guidance.actions.map(action => h('button', {
         key: action.id, disabled: Boolean(bindingBusy),
