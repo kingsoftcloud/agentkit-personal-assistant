@@ -168,12 +168,12 @@ export function renderSettings({
   actions = {},
 } = {}) {
   if (loading && !inspect) return settingsSkeleton({ h });
-  const editable = inspect?.recordSource !== 'studio' ? false : true;
+  const editable = inspect?.recordSource !== 'host' ? false : true;
   return [
     noticeBar({ h, text: error || notice, tone: error ? 'danger' : 'neutral' }),
     noticeBar({ h, text: degraded ? '部分数据暂不可用：云端配置没有返回，编辑可能无法保存。' : '', tone: 'warn' }),
-    inspect?.recordSource && inspect.recordSource !== 'studio'
-      ? noticeBar({ h, text: '这个个人助理是用旧版 Studio 创建的，本机没有配置清单，暂时不能在线修改。', tone: 'warn' })
+    inspect?.recordSource && inspect.recordSource !== 'host'
+      ? noticeBar({ h, text: '这个个人助理是用旧版 DSH Host 创建的，本机没有配置清单，暂时不能在线修改。', tone: 'warn' })
       : null,
     instanceSection({ h, instance, inspect, actions }),
     localAccessSection({ h, localAccess, actions }),

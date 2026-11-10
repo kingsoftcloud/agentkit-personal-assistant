@@ -8,7 +8,7 @@
  * ## 事件来源：已核对的宿主真实 API（未臆造）
  *
  * 宿主 `ctx.sessionController` 由 `@deepseek-ai/dsh-api-session-controller` 提供，实测位于
- * `/Applications/AgentKit Studio.app/Contents/Resources/app.asar` 内的
+ * `/Applications/AgentKit DSH Host.app/Contents/Resources/app.asar` 内的
  * `dsh/node_modules/@deepseek-ai/dsh-api-session-controller/lib/index.js`，公开方法有：
  *
  *   list(request, signal)                     → { items: SessionSummary[] }（冷热会话均可读，不激活 Agent）
@@ -43,7 +43,7 @@
  *    Host 重启后退回 `defaultBotId`。持久归属属于云端 runtime 的 sessionOwnerResolver
  *    （见 `dsh-session-bridge.mjs` 的 `setSessionOwnerResolver`）。
  * 5. 命名空间：只创建/列出 `sessionIdPrefix`（默认 `pa-`）前缀的会话，避免把用户
- *    在 Studio 中的其它会话暴露到个人助理面板（DSH `list` 返回全部可见会话）。
+ *    在 DSH Host 中的其它会话暴露到个人助理面板（DSH `list` 返回全部可见会话）。
  */
 import { randomUUID } from 'node:crypto';
 import { DshSessionControllerUnavailableError } from './dsh-session-bridge.mjs';

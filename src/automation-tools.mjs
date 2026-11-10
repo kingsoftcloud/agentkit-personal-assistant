@@ -1,8 +1,8 @@
-/** 闭包固定 Bot；任务由云端持久调度器执行，关闭 Studio 不影响触发。 */
+/** 闭包固定 Bot；任务由云端持久调度器执行，关闭 DSH Host 不影响触发。 */
 export function registerAutomationTools({ agent, botId, service }) {
   agent.ctx.get('tools').register({
     name: 'assistant_schedule',
-    description: 'Create/list/cancel a persistent one-off cloud task. Convert the user time using their timezone; runAt must include a timezone offset. The cloud DSH executes input even after Studio closes. Never create a task without the user asking for it.',
+    description: 'Create/list/cancel a persistent one-off cloud task. Convert the user time using their timezone; runAt must include a timezone offset. The cloud DSH executes input even after DSH Host closes. Never create a task without the user asking for it.',
     parameters: { type: 'object', required: ['action'], additionalProperties: false, properties: {
       action: { type: 'string', enum: ['create', 'list', 'cancel'] }, scheduleId: { type: 'string' }, runAt: { type: 'string' }, input: { type: 'string' },
     } },

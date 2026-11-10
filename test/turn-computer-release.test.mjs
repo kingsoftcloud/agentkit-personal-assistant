@@ -24,3 +24,29 @@ test('云端回合完成即交还电脑，后续定时任务不等待旧回合�
   assert.equal(installed, 1);
   assert.deepEqual(progress, { tool: 'cloud_bash', state: 'settled' });
 });
+
+test('DSH 0.2.2 public SessionController.events 可观察回合结束', async () => {
+  const events = [];
+  const agent = { ctx: { get: () => ({ section() {} }) } };
+  let created = false;
+  const controller = {
+    async projections() { return created ? {} : null; },
+    async create() { created = true; },
+    async resolveAgent() { return { agent }; },
+    async events() {
+      return { cursor: events.at(-1)?.seq ?? -1, records: events.map(event => ({ type: 'event', event })) };
+    },
+    async prompt() {
+      events.push(
+        { seq: 0, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'public-events-ok' }] } } },
+        { seq: 1, type: 'turn/end', data: { reason: { kind: 'completed' } } },
+      );
+      return { accepted: true };
+    },
+  };
+  const bridge = createDshTurnBridge({ sessionController: controller });
+  const receipt = await bridge.submitTurn({ botId: 'default', sessionId: 'public-events', input: 'hello', requestId: 'public-events-request' });
+  const result = await bridge.waitForTurn(receipt);
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.messages, ['public-events-ok']);
+});

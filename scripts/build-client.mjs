@@ -7,7 +7,7 @@ import { build, context } from 'esbuild';
  * DSH 客户端插件构建器。
  *
  * 运行入口是 `dist/client.js`（`package.json` 的 `exports['./client']`），
- * 不是 `src/client/*.mjs`；改完源码必须重新构建，Studio 里按 Cmd+R 刷新即可生效，
+ * 不是 `src/client/*.mjs`；改完源码必须重新构建，DSH Host 里按 Cmd+R 刷新即可生效，
  * 不需要退出应用（只有 Host 代码、插件树/package.json bundles 变更才需要重启）。
  *
  * 用法：
@@ -65,7 +65,7 @@ if (watch) {
           try {
             const output = await emit(result);
             const time = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-            console.log(`[${time}] dist/client.js ${output.length} 字节 → ${outDir}（Studio 里 Cmd+R 刷新）`);
+            console.log(`[${time}] dist/client.js ${output.length} 字节 → ${outDir}（DSH Host 里 Cmd+R 刷新）`);
           } catch (error) {
             console.error(`[build:client] ${error.message}`);
           }
@@ -74,7 +74,7 @@ if (watch) {
     }],
   });
   await ctx.watch();
-  console.log(`watching src/client → ${outDir}（改完在 Studio 按 Cmd+R，无需重启应用）`);
+  console.log(`watching src/client → ${outDir}（改完在 DSH Host 按 Cmd+R，无需重启应用）`);
 } else {
   const result = await build(options);
   const output = await emit(result);

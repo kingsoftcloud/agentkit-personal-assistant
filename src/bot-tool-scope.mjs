@@ -35,6 +35,11 @@ export function restrictPersonalAssistantToolScope(agent, botId, { getPolicy = (
   agent.ctx.on('tools/result', execution => { granted.delete(execution.token); });
   agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const result = await next();
+    // DSH 0.2.2 runs this waterfall before the core SystemPrompt service
+    // attaches the collected tool schemas.  A listener must therefore keep
+    // the presentation intact when `tools` is not present yet; the scoped
+    // registry restriction and execution guard still enforce the policy.
+    if (!Array.isArray(result?.tools)) return result;
     return { ...result, tools: result.tools.filter(tool => decide(tool.name).allowed) };
   });
 }

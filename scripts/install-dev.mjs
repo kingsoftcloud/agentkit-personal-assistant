@@ -7,9 +7,9 @@
  * 「按原型实现」而改动/新增的文件，其余一律不动。
  *
  * 用法：
- *   node scripts/install-dev.mjs --profile ~/.dsh/profiles/desktop-agentkit-studio            # 预演，只打印
- *   node scripts/install-dev.mjs --profile ~/.dsh/profiles/desktop-agentkit-studio --apply     # 真正写入（会先备份）
- *   node scripts/install-dev.mjs --profile ~/.dsh/profiles/desktop-agentkit-studio --rollback <备份目录>
+ *   node scripts/install-dev.mjs --profile ~/.dsh/profiles/desktop-agentkit-pa            # 预演，只打印
+ *   node scripts/install-dev.mjs --profile ~/.dsh/profiles/desktop-agentkit-pa --apply     # 真正写入（会先备份）
+ *   node scripts/install-dev.mjs --profile ~/.dsh/profiles/desktop-agentkit-pa --rollback <备份目录>
  *
  * 备份目录形如 <包目录>/.dev-backup-20261104-0230，回滚只需把其中的文件按相对路径复制回去。
  */
@@ -129,7 +129,7 @@ async function main() {
 
   if (!options.apply) return;
   await copyInto(target, files, backupDir);
-  console.log(JSON.stringify({ applied: files.length, backup: backupDir, next: '在 Studio 里 Cmd+R 重开右侧面板' }, null, 2));
+  console.log(JSON.stringify({ applied: files.length, backup: backupDir, next: '在 DSH Host 里 Cmd+R 重开右侧面板' }, null, 2));
 }
 
 main().catch(error => { console.error(JSON.stringify({ error: error.message })); process.exitCode = 1; });

@@ -8,7 +8,7 @@
 
 const FORMAT = 'agentkit-personal-assistant.plugin/v1';
 const PLUGIN_ID = '@kingsoftcloud/agentkit-personal-assistant';
-const REQUIRED_DSH = '0.2.1-rc.2';
+const REQUIRED_DSH = '0.2.2-rc.1';
 const REQUIRED_HOST_API = `dsh-native/${REQUIRED_DSH}`;
 
 function fail(message) {

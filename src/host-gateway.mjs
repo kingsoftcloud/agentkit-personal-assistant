@@ -40,16 +40,16 @@ const SESSION_OPERATIONS = Object.freeze([
   'personal-assistant.file.download',
 ]);
 const BINDING_OPERATIONS = Object.freeze([
-  // Studio owns the cloud account, the instance selection and the credential.
+  // The host owns the cloud account, instance selection and credential.
   // These operations never accept a credential from the page: they only drive
-  // discovery, credential recovery and creation inside the Studio Host.
+  // discovery, credential recovery and creation inside the Host Host.
   'personal-assistant.desktop.status',
   'personal-assistant.desktop.connect',
   'personal-assistant.desktop.create',
   'personal-assistant.desktop.disconnect',
   'personal-assistant.desktop.destroy',
   // The Assistant's own reachable settings. The page never talks to the cloud
-  // control plane; Studio validates and submits every change.
+  // control plane; The host validates and submits every change.
   'personal-assistant.settings.inspect',
   'personal-assistant.settings.update',
   'personal-assistant.settings.versions',
@@ -64,7 +64,7 @@ const BINDING_METHODS = Object.freeze({
   'personal-assistant.settings.update': 'settingsUpdate',
   'personal-assistant.settings.versions': 'settingsVersions',
 });
-// 这些写操作会改变 Studio 侧的实例或绑定（创建/切换/断开/关闭/更新配置），必须绕过
+// 这些写操作会改变 Host 侧的实例或绑定（创建/切换/断开/关闭/更新配置），必须绕过
 // binding 缓存重新读取，否则「刚创建或刚切换的实例」会被几毫秒前的旧绑定吃掉。
 const BINDING_REFRESH_OPERATIONS = new Set([
   'personal-assistant.desktop.create',
@@ -89,7 +89,7 @@ const LOCAL_OPERATIONS = new Set([
   'personal-assistant.local-access.revoke',
   'personal-assistant.create.status',
 ]);
-// 创建进度只观测 Host 真正能看到的阶段：Studio 的 create 是一个整体 RPC，
+// 创建进度只观测 Host 真正能看到的阶段：Host 的 create 是一个整体 RPC，
 // 内部 runtime/computer/assistant 阶段无法逐段回报，因此不伪造中间态。
 const CREATE_STAGES = Object.freeze([
   Object.freeze({ id: 'instance', detail: '云端实例已创建' }),
@@ -100,7 +100,7 @@ const CREATE_STAGES = Object.freeze([
 const CREATE_ESTIMATED_MS = 90_000;
 const BOT_COLLECTION = 'bots';
 const OPERATIONS = new Set(['personal-assistant.configuration', 'personal-assistant.bots.list', 'personal-assistant.desktop.ticket',
-  // 本机剪贴板只能由 Host 进程读写：Studio 的 Electron 渲染器没有 clipboard-read/
+  // 本机剪贴板只能由 Host 进程读写：Host 的 Electron 渲染器没有 clipboard-read/
   // clipboard-write 权限，navigator.clipboard 在面板里一律被拒，⌘C/⌘V 就成了空操作。
   'personal-assistant.clipboard.read', 'personal-assistant.clipboard.write',
   ...BINDING_OPERATIONS, ...SESSION_OPERATIONS, ...LOCAL_OPERATIONS]);
@@ -285,11 +285,13 @@ function requireBotId(value) {
   return text;
 }
 
-export const STUDIO_DESKTOP_SERVICE = 'studioPersonalAssistantDesktop';
+// Generic host adapter name. The plugin may run in Host or another DSH
+// host; no host product name is part of this runtime contract.
+export const PERSONAL_ASSISTANT_DESKTOP_SERVICE = 'agentkitPersonalAssistantDesktop';
 
 // 默认走系统信任链：内网/预发网关的证书不在 Node 内置 CA 里，直接 fetch 会 "fetch failed"。
 const defaultFetchImpl = createSystemFetch();
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getStudioDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, studioVersion, clipboardExecFile } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getHostDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, hostVersion, clipboardExecFile } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -303,12 +305,12 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     } catch { throw fail('PERSONAL_ASSISTANT_GATEWAY_INVALID', '云网关地址无效；预发 HTTP 需由 Host 显式允许'); }
   }
   const configured = Boolean(base && agentId && apiKey);
-  let studioSeen = false;
+  let hostSeen = false;
   // binding 缓存：面板每次打开都会串行读 5 次 configuration（configuration、bots.list 内部
-  // 签票、sessions.list、session.snapshot、session.events），而 Studio 的绑定在 2s 内基本
+  // 签票、sessions.list、session.snapshot、session.events），而 Host 的绑定在 2s 内基本
   // 稳定。这里缓存短 TTL 的公开绑定并合并并发请求（防 stampede）。缓存内容只有
-  // { configured, agentId, studio }，绝不缓存凭据或票据。
-  // 默认关闭（直接构造 gateway 的调用方，含测试，保持“每次向 Studio 确认绑定”的旧语义）；
+  // { configured, agentId, host: hostService }，绝不缓存凭据或票据。
+  // 默认关闭（直接构造 gateway 的调用方，含测试，保持“每次向 Host 确认绑定”的旧语义）；
   // 生产注册路径 registerPersonalAssistantHostGateway 显式开启。
   const bindingCacheTtlMs = Number.isFinite(bindingCacheMs) && bindingCacheMs > 0 ? bindingCacheMs : 0;
   let cachedBinding;
@@ -317,54 +319,54 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
   // 已经过期（期间可能发生了创建/切换），不能把旧绑定重新写回缓存。
   let bindingGeneration = 0;
   const clearBindingCache = () => { bindingGeneration += 1; cachedBinding = undefined; pendingBinding = undefined; };
-  // 服务可晚于本插件加载，也可随 Studio 卸载；缓存绑定但不缓存凭据。
-  async function callStudio(service, method, input, signal) {
+  // 服务可晚于本插件加载，也可随 Host 卸载；缓存绑定但不缓存凭据。
+  async function callHost(service, method, input, signal) {
     try { return await service[method](input, signal || AbortSignal.timeout(10_000)); }
     catch (error) {
       const rawStatus = Number(error?.status ?? error?.details?.status);
       const status = Number.isInteger(rawStatus) && rawStatus >= 400 && rawStatus <= 599 ? rawStatus : 503;
       // 原始异常可能包含上游 HTTP 头或凭据，不能进入页面 RPC。
-      throw fail(status >= 500 ? 'PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE' : 'PERSONAL_ASSISTANT_TICKET_REFUSED', 'Studio 暂时无法授权云电脑连接，请检查实例状态与云端登录', status);
+      throw fail(status >= 500 ? 'PERSONAL_ASSISTANT_HOST_UNAVAILABLE' : 'PERSONAL_ASSISTANT_TICKET_REFUSED', 'Host 暂时无法授权云电脑连接，请检查实例状态与云端登录', status);
     }
   }
   async function binding(signal, fresh = false) {
-    let studio;
-    try { studio = getStudioDesktop(); }
-    catch { clearBindingCache(); throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 云连接服务暂时不可用', 503); }
-    if (studio == null) {
-      // Studio 卸载/服务消失必须立刻生效：静态配置分支本来就不用打 RPC，不缓存。
+    let hostService;
+    try { hostService = getHostDesktop(); }
+    catch { clearBindingCache(); throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 云连接服务暂时不可用', 503); }
+    if (hostService == null) {
+      // Host 卸载或服务消失必须立刻生效：静态配置分支本来就不用打 RPC，不缓存。
       clearBindingCache();
-      if (studioSeen) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 云连接服务已卸载，请重新打开 Studio', 503);
-      // 独立开发 Host 的显式连接仍可用；Studio 拒绝/卸载时绝不降级到此分支。
-      return { configured, agentId, studio: undefined };
+      if (hostSeen) throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 云连接服务已卸载，请重新打开 Host', 503);
+      // 独立开发 Host 的显式连接仍可用；Host 拒绝/卸载时绝不降级到此分支。
+      return { configured, agentId, host: undefined };
     }
-    studioSeen = true;
-    // 服务对象被替换（晚加载/重载）时，旧缓存里的 studio 引用不能继续用。
-    if (cachedBinding && cachedBinding.value.studio !== studio) clearBindingCache();
+    hostSeen = true;
+    // 服务对象被替换（晚加载/重载）时，旧缓存里的 Host 服务引用不能继续用。
+    if (cachedBinding && cachedBinding.value.host !== hostService) clearBindingCache();
     if (!fresh && cachedBinding && Date.now() - cachedBinding.at < bindingCacheTtlMs) return cachedBinding.value;
-    // 并发合并：同一时刻只向 Studio 打一次 configuration，其余请求共享同一个 promise。
+    // 并发合并：同一时刻只向 Host 打一次 configuration，其余请求共享同一个 promise。
     if (!fresh && pendingBinding) return pendingBinding;
-    if (typeof studio.configuration !== 'function' || typeof studio.issueTicket !== 'function') {
+    if (typeof hostService.configuration !== 'function' || typeof hostService.issueTicket !== 'function') {
       clearBindingCache();
-      throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', '请更新 Studio 云连接服务', 503);
+      throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', '请更新 Host 云连接服务', 503);
     }
     const pending = (async () => {
       const generation = bindingGeneration;
-      const value = await callStudio(studio, 'configuration', agentId ? { agentId } : {}, signal);
-      if (!plain(value) || typeof value.configured !== 'boolean' || (value.configured && (typeof value.agentId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(value.agentId)))) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的实例绑定无效', 502);
-      const result = { configured: value.configured, agentId: value.configured ? value.agentId : undefined, studio };
+      const value = await callHost(hostService, 'configuration', agentId ? { agentId } : {}, signal);
+      if (!plain(value) || typeof value.configured !== 'boolean' || (value.configured && (typeof value.agentId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(value.agentId)))) throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 返回的实例绑定无效', 502);
+      const result = { configured: value.configured, agentId: value.configured ? value.agentId : undefined, host: hostService };
       if (bindingCacheTtlMs > 0 && bindingGeneration === generation) cachedBinding = { at: Date.now(), value: result };
       return result;
     })();
     pendingBinding = pending;
     try { return await pending; }
     catch (error) {
-      // 任何一次绑定读取失败都立即失效：下一次请求必须重新向 Studio 确认。
+      // 任何一次绑定读取失败都立即失效：下一次请求必须重新向 Host 确认。
       clearBindingCache();
       throw error;
     } finally { if (pendingBinding === pending) pendingBinding = undefined; }
   }
-  function publicStudioTicket(value, input) {
+  function publicHostTicket(value, input) {
     let ws;
     try { ws = new URL(value?.wsUrl); } catch {}
     const local = ws && ['127.0.0.1', 'localhost', '[::1]'].includes(ws.hostname);
@@ -375,7 +377,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       || value.protocol !== 'agentkit.personal-assistant.desktop.v1' || !Number.isFinite(remaining) || remaining <= 0 || remaining > 60_000
       || !ws || ws.username || ws.password || ws.search || ws.hash || ws.pathname !== '/personal-assistant/desktop/ws'
       || (ws.protocol !== 'wss:' && !(ws.protocol === 'ws:' && (local || allowHttp)))
-      || (value.leaseId != null && (typeof value.leaseId !== 'string' || value.leaseId.length > 256))) throw fail('PERSONAL_ASSISTANT_TICKET_INVALID', 'Studio 返回的桌面授权格式错误', 502);
+      || (value.leaseId != null && (typeof value.leaseId !== 'string' || value.leaseId.length > 256))) throw fail('PERSONAL_ASSISTANT_TICKET_INVALID', 'Host 返回的桌面授权格式错误', 502);
     return { ticket: value.ticket, expiresAt: value.expiresAt, agentId: input.agentId, botId: input.botId,
       wsUrl: ws.href, protocol: value.protocol, leaseId: value.leaseId ?? null, readOnly: input.mode === 'read' };
   }
@@ -384,25 +386,25 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     WebSocketImpl, ca: trustedCAs(),
   });
   function publicBindingStatus(value) {
-    if (!plain(value) || typeof value.configured !== 'boolean') throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的绑定状态无效', 502);
+    if (!plain(value) || typeof value.configured !== 'boolean') throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 返回的绑定状态无效', 502);
     const reason = typeof value.reason === 'string' ? value.reason.slice(0, 80) : '';
     const candidates = Array.isArray(value.candidates) ? value.candidates.filter(row => plain(row) && typeof row.agentId === 'string' && AGENT_ID.test(row.agentId))
       .slice(0, 20).map(row => ({ agentId: row.agentId, name: typeof row.name === 'string' ? row.name.slice(0, 80) : '',
         status: typeof row.status === 'string' ? row.status.slice(0, 32) : '', createdAt: typeof row.createdAt === 'string' ? row.createdAt.slice(0, 40) : '' })) : [];
     // The credential never reaches the page; only the public binding shape does.
     return { configured: value.configured, agentId: value.configured && typeof value.agentId === 'string' ? value.agentId : undefined,
-      mode: 'studio', reason, candidates };
+      mode: 'host', reason, candidates };
   }
   function publicBinding(value) {
     if (!plain(value) || typeof value.configured !== 'boolean' || (value.configured && (typeof value.agentId !== 'string' || !AGENT_ID.test(value.agentId))))
-      throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的绑定结果无效', 502);
-    return { configured: value.configured, agentId: value.configured ? value.agentId : undefined, mode: 'studio' };
+      throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 返回的绑定结果无效', 502);
+    return { configured: value.configured, agentId: value.configured ? value.agentId : undefined, mode: 'host' };
   }
   const settingsText = (value, max) => typeof value === 'string' ? value.slice(0, max) : '';
   /** Settings are whitelisted field by field for the same reason tickets are:
    * the page must never receive anything the Host did not mean to publish. */
   function publicSettings(value) {
-    if (!plain(value) || typeof value.configured !== 'boolean' || !plain(value.runtime)) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的配置格式无效', 502);
+    if (!plain(value) || typeof value.configured !== 'boolean' || !plain(value.runtime)) throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 返回的配置格式无效', 502);
     const environmentVariables = Array.isArray(value.environmentVariables) ? value.environmentVariables.filter(plain)
       .filter(row => typeof row.key === 'string' && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(row.key))
       .slice(0, 64).map(row => ({ key: row.key, sensitive: row.sensitive === true,
@@ -417,11 +419,11 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       model: settingsText(value.model, 120),
       prompt: typeof value.prompt === 'string' ? value.prompt.slice(0, 8_000) : '',
       environmentVariables,
-      recordSource: value.recordSource === 'studio' ? 'studio' : 'missing',
+      recordSource: value.recordSource === 'host' ? 'host' : 'missing',
     };
   }
   function publicSettingsVersions(value) {
-    if (!plain(value) || !Array.isArray(value.versions)) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 返回的版本列表无效', 502);
+    if (!plain(value) || !Array.isArray(value.versions)) throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 返回的版本列表无效', 502);
     const versions = value.versions.filter(plain)
       .filter(row => typeof row.version === 'string' && /^\d+\.\d+\.\d+$/u.test(row.version))
       .slice(0, 200).map(row => ({ version: row.version, image: settingsText(row.image, 200),
@@ -429,7 +431,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     return { currentVersion: settingsText(value.currentVersion, 40), versions, catalogAvailable: versions.length > 0 };
   }
   function publicSettingsUpdate(value) {
-    if (!plain(value) || value.saved !== true) throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', 'Studio 没有确认配置已提交，请稍后重试', 502);
+    if (!plain(value) || value.saved !== true) throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 没有确认配置已提交，请稍后重试', 502);
     return { configured: true, saved: true, agentId: typeof value.agentId === 'string' && AGENT_ID.test(value.agentId) ? value.agentId : undefined,
       version: settingsText(value.version, 40), status: settingsText(value.status, 32) || 'updating' };
   }
@@ -444,10 +446,10 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     return servicesPromise;
   };
 
-  function studioConnected() {
+  function hostConnected() {
     try {
-      const studio = getStudioDesktop();
-      return Boolean(studio && typeof studio.configuration === 'function' && typeof studio.issueTicket === 'function');
+      const hostService = getHostDesktop();
+      return Boolean(hostService && typeof hostService.configuration === 'function' && typeof hostService.issueTicket === 'function');
     } catch { return false; }
   }
 
@@ -463,9 +465,9 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     }
     const access = localAccess ?? createLocalAccess({
       stateStore: store,
-      probeConnection: () => studioConnected(),
+      probeConnection: () => hostConnected(),
       platform: String(platform ?? process.platform),
-      studioVersion: String(studioVersion ?? config.studioVersion ?? env.STUDIO_VERSION ?? ''),
+      hostVersion: String(hostVersion ?? config.hostVersion ?? env.DSH_HOST_VERSION ?? ''),
     });
     if (typeof access.load === 'function') await access.load();
     const deletedBots = new Set();
@@ -776,7 +778,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
 
   /** 页面 RPC 的统一入口：只负责打点，具体分发在 dispatch()。打点只含操作名与耗时，
    *  请求参数、绑定信息与凭据都不落日志（先测量后优化，别删）。 */
-  // session.events 是 ~600ms 一次的轮询，逐条打点会以 1.7 条/秒淹没 Studio 日志；
+  // session.events 是 ~600ms 一次的轮询，逐条打点会以 1.7 条/秒淹没 Host 日志；
   // 这里只保留慢请求与约 1/20 采样，既有耗时数据又不刷屏。
   let pollTraceTicks = 0;
   async function request(operation, payload = {}, signal) {
@@ -813,9 +815,9 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       await writeHostClipboard(payload.text, { execFileImpl: clipboardExecFile });
       return { written: true };
     }
-    // 面板本机数据同样不依赖云端绑定：绑定/目录不可达时在内部降级（degraded:true）。
+    // 面板本机数据同样不依赖云端绑定：绑定或目录不可达时在内部降级（degraded:true）。
     if (LOCAL_OPERATIONS.has(operation)) return handleLocalOperation(operation, payload, signal);
-    // 写操作强制向 Studio 重新确认绑定；随后立刻清空缓存，让紧接着的读也读到新实例。
+    // 写操作强制向 Host 重新确认绑定；随后立刻清空缓存，让紧接着的读也读到新实例。
     const refreshBinding = BINDING_REFRESH_OPERATIONS.has(operation);
     const bindingStartedAt = Date.now();
     const current = await binding(signal, refreshBinding);
@@ -826,9 +828,9 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       if (payload.agentId !== undefined && operation !== 'personal-assistant.desktop.create') {
         if (typeof payload.agentId !== 'string' || !AGENT_ID.test(payload.agentId)) throw fail('PERSONAL_ASSISTANT_AGENT_INVALID', '云端实例标识无效');
       }
-      const studio = current.studio;
-      if (!studio) throw fail('PERSONAL_ASSISTANT_STANDALONE', '独立安装不支持自动发现；请在 Host 配置中连接云端实例', 409);
-      if (typeof studio[bindingMethod] !== 'function') throw fail('PERSONAL_ASSISTANT_STUDIO_UNAVAILABLE', '请更新 Studio 云连接服务', 503);
+      const host = current.host;
+      if (!host) throw fail('PERSONAL_ASSISTANT_STANDALONE', '独立安装不支持自动发现；请在 Host 配置中连接云端实例', 409);
+      if (typeof host[bindingMethod] !== 'function') throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', '请更新 Host 云连接服务', 503);
       const created = operation === 'personal-assistant.desktop.create';
       const closing = operation === 'personal-assistant.desktop.destroy';
       if (created) beginCreateProgress();
@@ -853,7 +855,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
               : !created && operation !== 'personal-assistant.desktop.status' && operation !== 'personal-assistant.desktop.disconnect' && payload.agentId
                 ? { agentId: String(payload.agentId) } : {};
       let value;
-      try { value = await studio[bindingMethod](input, deadline); }
+      try { value = await host[bindingMethod](input, deadline); }
       catch (error) {
         if (created) failCreateProgress(error);
         const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : 503;
@@ -861,7 +863,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       }
       if (created) completeCreateProgress(value?.agentId);
       if (bindingMethod === 'status') return publicBindingStatus(value);
-      if (bindingMethod === 'destroy') return { configured: false, mode: 'studio', ...(value?.closed === true ? { closed: true } : {}) };
+      if (bindingMethod === 'destroy') return { configured: false, mode: 'host', ...(value?.closed === true ? { closed: true } : {}) };
       if (bindingMethod === 'settings') return publicSettings(value);
       if (bindingMethod === 'settingsVersions') return publicSettingsVersions(value);
       if (bindingMethod === 'settingsUpdate') return publicSettingsUpdate(value);
@@ -887,9 +889,9 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     }
     if (payload.mode !== undefined && !['read', 'control'].includes(payload.mode)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '桌面访问模式无效');
     if (botId === DIRECTORY_BOT_ID && payload.mode !== 'read') throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '目录授权只能用于只读查询', 403);
-    if (current.studio) {
+    if (current.host) {
       const input = { agentId: current.agentId, botId, mode: payload.mode === 'read' ? 'read' : 'control', ...(payload.leaseId ? { leaseId: String(payload.leaseId) } : {}) };
-      try { return publicStudioTicket(await callStudio(current.studio, 'issueTicket', input, signal), input); }
+      try { return publicHostTicket(await callHost(current.host, 'issueTicket', input, signal), input); }
       catch (error) { clearBindingCache(); throw error; }
     }
     const response = await fetchImpl(new URL('IssuePersonalAssistantDesktopTicket', base), {
@@ -917,11 +919,11 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
   });
 }
 
-export function registerPersonalAssistantHostGateway(ctx, config = {}, { sessionChannel, channelOptions } = {}) {
+export function registerPersonalAssistantHostGateway(ctx, config = {}, { sessionChannel, channelOptions, getDesktop } = {}) {
   if (!ctx?.connection?.fetch?.register) return undefined;
   // 生产注册路径开启短 TTL 绑定缓存：一次面板打开会以 5 次串行 configuration 起手，
   // 2s 缓存把它们收敛成 1 次。直接构造 gateway（含单测）默认不缓存，保持逐次确认语义。
-  const gateway = createPersonalAssistantHostGateway(config, { getStudioDesktop: () => ctx.get?.(STUDIO_DESKTOP_SERVICE), bindingCacheMs: 2000 });
+  const gateway = createPersonalAssistantHostGateway(config, { getHostDesktop: getDesktop || (() => ctx.get?.(PERSONAL_ASSISTANT_DESKTOP_SERVICE)), bindingCacheMs: 2000 });
   // Connection 的 /api 物理载体先执行 Host/Origin、浏览器鉴权及 owner Peer 校验。
   // 使用公开 exact Fetch 注册表，避免自建服务、抢占 Gateway interceptor 或修改 remotes。
   const unregister = ctx.connection.fetch.register({ path: ENDPOINT, methods: ['POST'], requestBody: 'buffered', async fetch(request) {

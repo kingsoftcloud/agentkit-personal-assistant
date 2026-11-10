@@ -24,7 +24,7 @@ async function withStore(run) {
 }
 
 test('默认未授权：状态可读、local-control 命名空间可识别，且不领取中止信号', async () => {
-  const access = createLocalAccess({ probeConnection: () => true, platform: 'darwin', studioVersion: '1.2.3' });
+  const access = createLocalAccess({ probeConnection: () => true, platform: 'darwin', hostVersion: '1.2.3' });
   await access.load();
   assert.deepEqual(await access.status(), {
     connected: true,
@@ -32,7 +32,7 @@ test('默认未授权：状态可读、local-control 命名空间可识别，且
     scopes: [],
     riskConfirm: false,
     grantedAt: null,
-    host: { platform: 'darwin', studioVersion: '1.2.3' },
+    host: { platform: 'darwin', hostVersion: '1.2.3' },
   });
   assert.equal(isLocalControlOperation('personal-assistant.local-control.session.create'), true);
   assert.equal(isLocalControlOperation('personal-assistant.local-access.status'), false);

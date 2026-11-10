@@ -186,7 +186,7 @@ test('新建 Bot 需要合法名称，删除必须名称确认，删除后重启
 });
 
 test('创建进度只把实例阶段标为 active，完成后全部 done，失败保留可读原因', async () => {
-  function deferredStudio() {
+  function deferredHost() {
     let resolveCreate, rejectCreate;
     return {
       service: {
@@ -199,7 +199,7 @@ test('创建进度只把实例阶段标为 active，完成后全部 done，失�
     };
   }
 
-  const idle = createPersonalAssistantHostGateway({}, { env: {}, getStudioDesktop: () => undefined, localAccess: createLocalAccess({ probeConnection: () => false }) });
+  const idle = createPersonalAssistantHostGateway({}, { env: {}, getHostDesktop: () => undefined, localAccess: createLocalAccess({ probeConnection: () => false }) });
   const before = await idle.request('personal-assistant.create.status');
   assert.deepEqual(before, {
     instanceId: '', stage: 'instance',
@@ -212,8 +212,8 @@ test('创建进度只把实例阶段标为 active，完成后全部 done，失�
     elapsedMs: 0, estimatedRemainingMs: 0,
   });
 
-  const studio = deferredStudio();
-  const gateway = createPersonalAssistantHostGateway({}, { env: {}, getStudioDesktop: () => studio.service, localAccess: createLocalAccess({ probeConnection: () => true }) });
+  const host = deferredHost();
+  const gateway = createPersonalAssistantHostGateway({}, { env: {}, getHostDesktop: () => host.service, localAccess: createLocalAccess({ probeConnection: () => true }) });
   const pending = gateway.request('personal-assistant.desktop.create');
   await tick();
   const active = await gateway.request('personal-assistant.create.status');
@@ -224,20 +224,20 @@ test('创建进度只把实例阶段标为 active，完成后全部 done，失�
   assert.ok(active.elapsedMs >= 0);
   assert.ok(active.estimatedRemainingMs > 0);
 
-  studio.resolve({ configured: true, agentId: 'ar-created' });
-  assert.deepEqual(await pending, { configured: true, agentId: 'ar-created', mode: 'studio' });
+  host.resolve({ configured: true, agentId: 'ar-created' });
+  assert.deepEqual(await pending, { configured: true, agentId: 'ar-created', mode: 'host' });
   const done = await gateway.request('personal-assistant.create.status');
   assert.equal(done.stage, 'done');
   assert.equal(done.instanceId, 'ar-created');
   assert.deepEqual(done.stages.map(stage => stage.status), ['done', 'done', 'done', 'done']);
   assert.equal(done.estimatedRemainingMs, 0);
 
-  const failing = deferredStudio();
-  const failingGateway = createPersonalAssistantHostGateway({}, { env: {}, getStudioDesktop: () => failing.service, localAccess: createLocalAccess({ probeConnection: () => true }) });
+  const failing = deferredHost();
+  const failingGateway = createPersonalAssistantHostGateway({}, { env: {}, getHostDesktop: () => failing.service, localAccess: createLocalAccess({ probeConnection: () => true }) });
   const failingPending = failingGateway.request('personal-assistant.desktop.create');
   await tick();
-  failing.reject(Object.assign(new Error('创建失败：配额不足'), { code: 'STUDIO_CREATE_FAILED', status: 500 }));
-  await assert.rejects(failingPending, { code: 'STUDIO_CREATE_FAILED', status: 500 });
+  failing.reject(Object.assign(new Error('创建失败：配额不足'), { code: 'HOST_CREATE_FAILED', status: 500 }));
+  await assert.rejects(failingPending, { code: 'HOST_CREATE_FAILED', status: 500 });
   const failed = await failingGateway.request('personal-assistant.create.status');
   assert.equal(failed.stage, 'failed');
   assert.equal(failed.error, '创建失败：配额不足');

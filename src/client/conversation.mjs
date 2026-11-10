@@ -1,7 +1,7 @@
 /**
  * 个人助理主面板的对话视图。
  *
- * 数据全部走 Studio Host 的 personal-assistant.* RPC：
+ * 数据全部走 DSH Host Host 的 personal-assistant.* RPC：
  *   sessions.list / session.create / session.snapshot / session.events / turn.submit
  * Host 侧通道尚未就绪时，这里只降级为一条可重试的提示，不抛出、不影响插件激活。
  *
@@ -412,7 +412,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   // 首次挂载时 already-false 不算撤销，不插系统提示。
 
   const call = useCallback(async (operation, payload = {}) => {
-    if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
+    if (typeof request !== 'function') throw new Error('DSH Host Host 尚未连接');
     const startedAt = Date.now();
     try {
       return await request(operation, payload);
@@ -890,7 +890,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     return () => window.removeEventListener('beforeunload', warn);
   }, [queue.length]);
 
-  // Studio(macOS) 的拖拽区靠 data-window-drag 标记：PA 页面没有外壳 tab strip，需要自己的头部行。
+  // DSH Host(macOS) 的拖拽区靠 data-window-drag 标记：PA 页面没有外壳 tab strip，需要自己的头部行。
   const header = h('header', { style: { ...styles.header, minHeight: 52, padding: '8px 16px', gap: 8 }, 'data-window-drag': '' },
     typeof onBack === 'function' ? h('button', {
       type: 'button', 'aria-label': '返回', title: '返回 Bot 列表', 'data-window-drag-recall': '', onClick: onBack,

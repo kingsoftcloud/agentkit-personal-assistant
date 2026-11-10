@@ -1,7 +1,7 @@
 /**
  * 本机授权状态机与持久化（个人助理面板 07 本机授权）。
  *
- * 「连接」与「授权」是两件事：connected 只表示 Host 还能拿到 Studio 的云连接服务；
+ * 「连接」与「授权」是两件事：connected 只表示 Host 还能拿到 DSH Host 的云连接服务；
  * authorized 才表示用户允许助理在本机执行 local-control.* 操作。未授权时任何
  * local-control.* 都必须被 Host 拒绝，不能依赖 UI 置灰。
  *
@@ -66,17 +66,17 @@ export class LocalAccess {
   /**
    * @param {object} options
    * @param {object|null} [options.stateStore] persistent-state 实例；null 表示只存在内存
-   * @param {() => boolean|Promise<boolean>} [options.probeConnection] Studio 连接可用性探测
+   * @param {() => boolean|Promise<boolean>} [options.probeConnection] DSH Host 连接可用性探测
    * @param {() => Date|number} [options.now] 时间源（测试可注入）
    * @param {string} [options.platform] 覆盖 process.platform（测试可注入）
-   * @param {string} [options.studioVersion] Studio 版本；拿不到时为空串
+   * @param {string} [options.hostVersion] DSH Host 版本；拿不到时为空串
    */
-  constructor({ stateStore = null, probeConnection, now, platform, studioVersion } = {}) {
+  constructor({ stateStore = null, probeConnection, now, platform, hostVersion } = {}) {
     this.stateStore = stateStore ?? null;
     this.probeConnection = typeof probeConnection === 'function' ? probeConnection : () => true;
     this.now = typeof now === 'function' ? now : () => new Date();
     this.platform = String(platform ?? (typeof process === 'object' ? process.platform : '') ?? '').slice(0, 32);
-    this.studioVersion = typeof studioVersion === 'string' ? studioVersion.slice(0, 40) : '';
+    this.hostVersion = typeof hostVersion === 'string' ? hostVersion.slice(0, 40) : '';
     this.record = UNAUTHORIZED_RECORD;
     /** 授权撤销时要中止的本机任务（由 local-control 处理函数通过 controlSignal() 领取）。 */
     this.controllers = new Set();
@@ -144,7 +144,7 @@ export class LocalAccess {
       scopes: [...this.record.scopes],
       riskConfirm: this.record.riskConfirm,
       grantedAt: this.record.grantedAt,
-      host: { platform: this.platform, studioVersion: this.studioVersion },
+      host: { platform: this.platform, hostVersion: this.hostVersion },
     };
   }
 

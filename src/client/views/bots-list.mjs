@@ -37,7 +37,7 @@ function primaryCard({ h, bot, actions }) {
           bot.role === 'primary' ? badge({ h, label: '主助理' }) : null,
           statusBadge({ h, status: bot.status })),
         h('div', { style: { ...styles.meta, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
-          `${bot.model || '默认模型'} · 关掉 Studio 也会继续工作`)),
+          `${bot.model || '默认模型'} · 关掉 DSH Host 也会继续工作`)),
       button({ h, label: '进入', variant: 'primary', ariaLabel: `进入${bot.name}`, onClick: () => actions.onEnter?.(bot.id), icon: chevronRightIcon({ h, size: 10, color: '#ffffff' }) })),
     h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, paddingTop: 14, borderTop: `1px solid ${TOKENS.border}` } },
       stat({ h, label: '记忆', value: `${bot.memoryCount || 0} 条偏好`, onClick: () => actions.onOpenMemory?.(bot.id) }),

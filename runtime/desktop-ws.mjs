@@ -1,4 +1,4 @@
-/** Minimal authenticated WebSocket bridge for the Studio desktop view. */
+/** Minimal authenticated WebSocket bridge for the DSH Host desktop view. */
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { verifyDesktopPermit, desktopUnauthorized as unauthorized } from './desktop-permit.mjs';
 // 云端桌面的剪贴板上限与 computer 容器保持一致；这里不导入 desktop-session.mjs，

@@ -19,7 +19,7 @@ function profile({ h, bot }) {
   const meta = [
     bot.createdAt ? `创建于 ${bot.createdAt}` : '',
     bot.lastActiveAt ? `最近活跃 ${bot.lastActiveAt}` : '',
-    '关掉 Studio 也会继续工作',
+    '关掉 DSH Host 也会继续工作',
   ].filter(Boolean).join(' · ');
   return h('section', { style: { display: 'flex', alignItems: 'center', gap: 12, paddingBottom: 12, borderBottom: `1px solid ${TOKENS.border}` } },
     h('span', { 'aria-hidden': 'true', style: { ...styles.avatar, width: 44, height: 44, fontSize: 16 } }, [...String(bot.name || '助')][0] || '助'),

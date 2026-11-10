@@ -109,8 +109,8 @@ const directoryUnsupported = error => Number(error?.status) === 409 && ['PERSONA
 /**
  * 「未开通」引导页的唯一事实来源：云电脑面板、设置页、首页共用同一套判断与动作。
  *
- * reason 由 Studio 给出：needs-create（账号下确实没有实例）、credential-unavailable（有实例但
- * 凭证取不到）、unavailable（连状态都读不到，多为 Studio 未登录云端或网关不可达）。
+ * reason 由 DSH Host 给出：needs-create（账号下确实没有实例）、credential-unavailable（有实例但
+ * 凭证取不到）、unavailable（连状态都读不到，多为 DSH Host 未登录云端或网关不可达）。
  * 只有确认没有实例时才给「开通」入口——一个子账号一个个人助理，已开通必须复用，避免重复创建；
  * candidates 非空时一律优先连接已发现的实例。
  */
@@ -125,7 +125,7 @@ export function unconfiguredGuidance(binding) {
   };
   if (reason === 'needs-create') return {
     tone: 'create', title: '开通个人助理',
-    detail: '一个子账号可开通一个个人助理。开通后会得到一位云端持续运行的助理和一台专属云电脑，关掉 Studio 也会继续工作。',
+    detail: '一个子账号可开通一个个人助理。开通后会得到一位云端持续运行的助理和一台专属云电脑，关掉 DSH Host 也会继续工作。',
     actions: [{ id: 'create', label: '开通个人助理', primary: true }, check],
   };
   if (reason === 'credential-unavailable') return {
@@ -136,14 +136,14 @@ export function unconfiguredGuidance(binding) {
   const detail = typeof binding?.detail === 'string' && binding.detail ? binding.detail : '';
   return {
     tone: 'retry', title: '暂时读不到开通状态',
-    detail: `${detail}请先确认 Studio 已登录云端账号，再重新检查一次；确认账号下确实没有个人助理后再开通，避免重复创建。`,
+    detail: `${detail}请先确认 DSH Host 已登录云端账号，再重新检查一次；确认账号下确实没有个人助理后再开通，避免重复创建。`,
     actions: [check, { id: 'create', label: '确认未开通后开通', primary: false }],
   };
 }
 
 const onboardingSteps = tone => tone === 'reuse'
   ? ['确认账号下的个人助理实例', '直接连接即可复用，不会重复创建', '需要看画面或动手时，打开「云电脑」接管']
-  : ['登录 Studio 云端账号，开通个人助理（约 1–2 分钟）', '连接后即可在「个人助理」页对话，云端 7×24 运行', '需要看画面或动手时，打开「云电脑」接管'];
+  : ['登录 DSH Host 云端账号，开通个人助理（约 1–2 分钟）', '连接后即可在「个人助理」页对话，云端 7×24 运行', '需要看画面或动手时，打开「云电脑」接管'];
 
 const onboardingStyle = {
   page: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: '32px 20px', textAlign: 'center', boxSizing: 'border-box' },
@@ -194,7 +194,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const state = useRef({ mounted: true, socket: null, generation: 0, frameEpoch: 0, session: null, suspended: false, resuming: false, pendingInputs: [], display: { width: 1280, height: 800 }, readOnly: true, botId, config: null, reconnect: null, firstFrame: null, receivedSeq: -1, pendingFrame: null, decoding: false, frames: 0, lastMove: 0, wheelPending: { x: 0, y: 0 }, wheelFrame: 0, pressed: new Set(), buttons: new Set(), composition: false, retries: 0, taskId: '', mode: 'control', frameMetadata: null, reconnectAllowed: false });
   state.current.botId = botId;
   const rpc = async (operation, payload = {}) => {
-    if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
+    if (typeof request !== 'function') throw new Error('DSH Host Host 尚未连接');
     return request(operation, payload);
   };
   const send = body => {
@@ -302,7 +302,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     }
     return copyCloudClipboard({ readCloud: () => clipboardRef.current.read(), writeLocal: text => writeHostClipboard(text), notify: clipboardNotify, previousText });
   };
-  // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：Studio 渲染器没有 clipboard 权限，
+  // 本机剪贴板优先走 Host 进程（pbpaste/pbcopy）：DSH Host 渲染器没有 clipboard 权限，
   // navigator.clipboard 在面板里会被拒，⌘C/⌘V 就成了空操作。旧 Host 不支持时再退回浏览器 API。
   const readHostClipboard = async () => {
     try {
@@ -395,7 +395,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
     const generation = ++current.generation;
     current.reconnectAllowed = true;
     if (!reconnecting) current.retries = 0;
-    current.mode = mode; current.taskId ||= `studio-desktop-${globalThis.crypto.randomUUID()}`;
+    current.mode = mode; current.taskId ||= `dsh-host-desktop-${globalThis.crypto.randomUUID()}`;
     current.receivedSeq = -1; current.frameMetadata = null;
     setPhase(reconnecting ? 'reconnecting' : 'connecting'); setNotice('首次或休眠后连接可能需要数秒，请稍候。');
     try {
@@ -461,7 +461,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       };
     } catch (error) { if (current.mounted && generation === current.generation) { setPhase('error'); setNotice(failure(error)); } }
   };
-  // Studio 负责发现实例、恢复/生成凭证；页面只读取公开状态，绝不接触凭据。
+  // DSH Host 负责发现实例、恢复/生成凭证；页面只读取公开状态，绝不接触凭据。
   const bindingSnapshot = async signal => {
     if (signal?.aborted) return null;
     try { const value = await rpc('personal-assistant.desktop.status'); return value && typeof value === 'object' ? value : null; }
@@ -504,7 +504,7 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       if (signal?.aborted || !state.current.mounted) return;
       if (Number.isInteger(error?.closeCode) && error.closeCode >= 1000 && error.closeCode <= 4999) setDirectoryCloseCode(error.closeCode);
       state.current.bots = []; setBots([]); setBotId('');
-      // 配置接口本身失败（Studio 未登录、网关不可达）时不能直接判死：desktop.status 不抛错，
+      // 配置接口本身失败（DSH Host 未登录、网关不可达）时不能直接判死：desktop.status 不抛错，
       // 用它区分「账号下确实没有实例」与「暂时读不到状态」，把开通/复用入口交给引导页。
       const snapshot = retried ? null : await bindingSnapshot(signal).catch(() => null);
       if (signal?.aborted || !state.current.mounted) return;
@@ -844,7 +844,7 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
       }, bindingBusy === action.id ? '处理中…' : action.label))),
     error ? h('p', { role: 'alert', style: { ...onboardingStyle.notice, color: '#b42318' } }, error) : null);
   if (!scope) return h('div', { role: 'status', style: { padding: 24 } }, error || '正在连接云端个人助理…', error ? h('button', { onClick: () => retry(value => value + 1) }, '重新连接') : null);
-  if (!nativeWorkbench?.available) return h('div', { role: 'alert', style: { padding: 24 } }, '当前宿主尚未提供原生云电脑侧栏，请更新 Studio 后重新打开。');
+  if (!nativeWorkbench?.available) return h('div', { role: 'alert', style: { padding: 24 } }, '当前宿主尚未提供原生云电脑侧栏，请更新 DSH Host 后重新打开。');
   return h('div', {
     key: `${scope.agentId}:${scope.botId}`, 'data-personal-assistant-home': 'true',
     'data-agent-id': scope.agentId, 'data-bot-id': scope.botId,
@@ -1154,7 +1154,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   createCollapsedRef.current = createCollapsed;
 
   const rpc = async (operation, payload = {}) => {
-    if (typeof request !== 'function') throw new Error('Studio Host 尚未连接');
+    if (typeof request !== 'function') throw new Error('DSH Host Host 尚未连接');
     return request(operation, payload);
   };
   /** 带上 scope 的请求：会话类 RPC 需要 agentId/botId 一起传，宿主按 scope 路由。 */
@@ -1521,7 +1521,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       const message = String(failure?.message || '');
       setCloseAssistant(previous => ({
         ...previous, busy: false,
-        error: /更新 Studio|云连接服务/iu.test(message) ? '当前 Studio 版本还不支持关闭个人助理，请更新 Studio 后重试。' : (message || '关闭个人助理失败，请稍后重试'),
+        error: /更新 DSH Host|云连接服务/iu.test(message) ? '当前 DSH Host 版本还不支持关闭个人助理，请更新 DSH Host 后重试。' : (message || '关闭个人助理失败，请稍后重试'),
       }));
     }
   };
@@ -1634,7 +1634,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       // offline 的点击含义是「重连」：立刻重查连接，并把结果直接显示在弹层里。
       setLocalAccessOpen(true); setLocalError(''); setLocalNotice('正在重新检查本机连接…');
       void loadConnection().then(next => {
-        setLocalNotice(next?.connected ? '本机已连接，可继续授权' : '本机仍未连接：请确认 Studio 本机客户端在运行');
+        setLocalNotice(next?.connected ? '本机已连接，可继续授权' : '本机仍未连接：请确认 DSH Host 本机客户端在运行');
       });
       return;
     }
@@ -1832,7 +1832,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           onToggleHistory: toggleHistory,
           onOpenSession: sessionId => openHistorySession(sessionId),
           onOpenShortcut: kind => setNotice(kind === 'memories' ? '记忆入口请在 Bot 详情里管理' : '该入口暂未接入面板，后续版本提供'),
-          onApprove: approvalId => setNotice(approvalId ? '审批入口暂未接入面板，请在 Studio 的待办里处理' : '暂时没有待确认的操作'),
+          onApprove: approvalId => setNotice(approvalId ? '审批入口暂未接入面板，请在 DSH Host 的待办里处理' : '暂时没有待确认的操作'),
           onCreateBot: () => setCreateBot({ open: true, name: '', busy: false, error: '' }),
           onOpenHistoryItem: sessionId => openHistorySession(sessionId),
         },
@@ -1863,7 +1863,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       onToggleRisk: () => setRiskConfirmDraft(value => !value),
       onGrant: () => void grantLocalAccess(),
       onRevoke: () => void revokeLocalAccess(),
-      onOpenLocalSettings: () => setNotice('请在这台 Mac 的 系统设置 › 隐私与安全性 里调整 Studio 的权限'),
+      onOpenLocalSettings: () => setNotice('请在这台 Mac 的 系统设置 › 隐私与安全性 里调整 DSH Host 的权限'),
     },
   });
 
@@ -1929,7 +1929,7 @@ const settingsStyle = {
 /** 设置页里的「个人助理」一节：状态、连接自检、能力与记忆位置。 */
 export function PersonalAssistantSettings({ request, openComputer = null } = {}) {
   const R = clientReact || globalThis.React;
-  if (!R) return '设置页尚未就绪，请重新打开 Studio';
+  if (!R) return '设置页尚未就绪，请重新打开 DSH Host';
   const { createElement: h, useEffect, useState, useCallback } = R;
   const [config, setConfig] = useState(null);
   const [bots, setBots] = useState(null);
@@ -2011,7 +2011,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       setCheckedAt('');
     } catch (reason) {
       const message = String(reason?.message || '');
-      setError(/更新 Studio|云连接服务/iu.test(message) ? '当前 Studio 版本还不支持关闭个人助理，请更新 Studio 后重试。' : (message || '关闭个人助理失败，请稍后重试'));
+      setError(/更新 DSH Host|云连接服务/iu.test(message) ? '当前 DSH Host 版本还不支持关闭个人助理，请更新 DSH Host 后重试。' : (message || '关闭个人助理失败，请稍后重试'));
     } finally { setClosing(false); }
   }, [agentId, canConfirm, request]);
 
@@ -2023,7 +2023,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     setEnvRows(rows => rows.filter((_, at) => at !== index));
     if (row.saved && row.key) setEnvDeletes(keys => keys.includes(row.key) ? keys : [...keys, row.key]);
   };
-  const editable = settings?.recordSource === 'studio';
+  const editable = settings?.recordSource === 'host';
   const saveSettings = useCallback(async () => {
     if (!editable || settingsBusy) return;
     setSettingsBusy(true); setSettingsError(''); setSettingsNotice('');
@@ -2077,10 +2077,10 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
         line('云端配置', h('div', { style: settingsStyle.note },
           settingsBusy ? '读取中…' : (settingsError || '暂时读不到云端配置；请点下方“检查连接”重试')), true));
     }
-    if (settings.recordSource !== 'studio') {
+    if (settings.recordSource !== 'host') {
       return h('div', { style: settingsStyle.card },
         line('云端配置', h('div', { style: settingsStyle.note },
-          '这个个人助理是用旧版 Studio 创建的，本机没有记录它的配置清单，暂时不能在线修改。可以关闭后重新创建；等云端平台提供读取接口后即可直接编辑。'), true));
+          '这个个人助理是用旧版 DSH Host 创建的，本机没有记录它的配置清单，暂时不能在线修改。可以关闭后重新创建；等云端平台提供读取接口后即可直接编辑。'), true));
     }
     const versionControl = versions && versions.catalogAvailable
       ? h('select', { style: settingsStyle.input, value: version, disabled: settingsBusy, 'aria-label': '运行时版本',
@@ -2139,8 +2139,8 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     guidanceCard,
     h('div', { style: settingsStyle.card },
       line('状态', h('span', null, h('span', { style: statusStyle }, status), checkedAt ? h('span', { style: settingsStyle.note }, `　上次检查 ${checkedAt}`) : null), true),
-      line('云端实例', config?.agentId ? h('span', { style: settingsStyle.mono }, config.agentId) : h('span', { style: settingsStyle.note }, configured ? '未返回实例标识' : '开通后由 Studio 绑定')),
-      line('网关', config?.gatewayUrl ? h('span', { style: settingsStyle.mono }, config.gatewayUrl) : h('span', { style: settingsStyle.note }, '由 Studio Host 配置')),
+      line('云端实例', config?.agentId ? h('span', { style: settingsStyle.mono }, config.agentId) : h('span', { style: settingsStyle.note }, configured ? '未返回实例标识' : '开通后由 DSH Host 绑定')),
+      line('网关', config?.gatewayUrl ? h('span', { style: settingsStyle.mono }, config.gatewayUrl) : h('span', { style: settingsStyle.note }, '由 DSH Host Host 配置')),
       line('助理连接', h('span', { style: settingsStyle.note }, bots === null ? '检查中' : bots.length ? '已连接你的助理' : '助理尚未就绪')),
       line('记忆', h('div', null, h('div', { style: settingsStyle.mono }, '/workspace/assistant-state'),
         h('div', { style: settingsStyle.note }, '记忆、会话与定时任务随云电脑持久保存，换设备也在'))),
@@ -2210,10 +2210,10 @@ export function apply(ctx) {
   const request = async (operation, payload = {}) => {
     if (!ctx.connection?.rpc?.call) throw new PersonalAssistantGatewayUnavailableError();
     const result = await ctx.connection.rpc.call('/api', 'personal-assistant', { operation, payload });
-    if (!result?.ok) throw Object.assign(new Error(result?.error?.message || 'Studio Host 请求失败'), { code: result?.error?.code, status: result?.error?.details?.status, closeCode: result?.error?.details?.closeCode });
+    if (!result?.ok) throw Object.assign(new Error(result?.error?.message || 'DSH Host Host 请求失败'), { code: result?.error?.code, status: result?.error?.details?.status, closeCode: result?.error?.details?.closeCode });
     return result.value;
   };
-  // 注册一律走作用域助手：任一条注册失败只降级该入口，绝不让插件激活整体失败（激活失败会导致 Studio 重置 profile）。
+  // 注册一律走作用域助手：任一条注册失败只降级该入口，绝不让插件激活整体失败（激活失败会导致 DSH Host 重置 profile）。
   const scope = (factory, label) => {
     try {
       const run = () => factory();
@@ -2235,7 +2235,7 @@ export function apply(ctx) {
   scope(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PERSONAL_ASSISTANT_PANEL_ID, order: 90, label: '个人助理',
   }, PersonalAssistantPanelIcon)), 'personal-assistant: sidebar row');
-  // Studio 设置页里的「个人助理」一节（原产品页被去重后留下的位置）。
+  // DSH Host 设置页里的「个人助理」一节（原产品页被去重后留下的位置）。
   scope(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section', id: `${PERSONAL_ASSISTANT_PANEL_ID}-settings`, order: 196, label: '个人助理',
     inject: () => ({ request }),

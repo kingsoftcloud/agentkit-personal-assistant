@@ -60,7 +60,7 @@ test('会话列表只暴露个人助理命名空间并白名单字段', async ()
   const controller = fakeSessionController({
     items: [
       { sessionId: 'pa-aaa', updatedAt: 30, projections: { values: { title: '出差计划', inbox: { secret: 'TOOL-SECRET-OUTPUT' } } }, cwd: '/Users/me/private' },
-      { sessionId: 'studio-unrelated', updatedAt: 20, projections: { values: { title: '用户在 Studio 里的其它会话' } } },
+      { sessionId: 'studio-unrelated', updatedAt: 20, projections: { values: { title: '用户在 DSH Host 里的其它会话' } } },
       { sessionId: 'pa-bbb', updatedAt: 10, projections: { values: { title: null } } },
       { sessionId: 'pa-ccc', updatedAt: 5 },
     ],

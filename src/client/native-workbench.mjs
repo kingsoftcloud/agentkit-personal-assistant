@@ -1,7 +1,7 @@
 /** 云电脑只注册原生 DSH 右侧栏内容，不拥有布局、全屏或本地执行会话。 */
 export const ASSISTANT_COMPUTER_KIND = 'personal-assistant-computer';
 export const ASSISTANT_PANEL_ID = 'personal-assistant';
-const unavailableReason = '当前 Studio 的原生侧栏组件需要更新，请安装本次随插件提供的宿主组件包。';
+const unavailableReason = '当前 DSH Host 的原生侧栏组件需要更新，请安装本次随插件提供的宿主组件包。';
 const unavailable = () => Object.assign(new Error(unavailableReason), { code: 'PERSONAL_ASSISTANT_NATIVE_SIDEBAR_REQUIRED' });
 
 function ComputerTab(props) { return props.workbench.render(props); }

@@ -45,7 +45,7 @@ export function renderLocalAccess({
   const busyOn = Boolean(busy);
   const selected = new Set((Array.isArray(selectedScopes) ? selectedScopes : status?.scopes || []).map(value => String(value)));
   const host = status?.host || {};
-  const hostMeta = [host.platform, host.studioVersion ? `Studio ${host.studioVersion}` : ''].filter(Boolean).join(' · ') || '本机 Studio';
+  const hostMeta = [host.platform, host.hostVersion ? `DSH Host ${host.hostVersion}` : ''].filter(Boolean).join(' · ') || '本机 DSH Host';
   const grantedAt = status?.grantedAt || '';
   const toggleScope = id => {
     if (authorized || busyOn || typeof actions.onToggleScope !== 'function') return;
@@ -64,14 +64,14 @@ export function renderLocalAccess({
     h('span', { 'aria-hidden': 'true', style: { flex: 'none', width: 30, height: 30, borderRadius: 8, display: 'grid', placeItems: 'center', background: TOKENS.surface2, border: `1px solid ${TOKENS.skeleton}` } },
       monitorIcon({ h, size: 15, color: TOKENS.inkSoft })),
     h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { style: { fontSize: 13, fontWeight: 600 } }, '本机 Studio'),
+      h('div', { style: { fontSize: 13, fontWeight: 600 } }, '本机 DSH Host'),
       h('div', { style: styles.note }, hostMeta)),
     badge({ h, label: connected ? '已连接' : '未连接', tone: connected ? 'success' : 'warn' })),
   divider({ h }),
   switchControl({
     h, checked: authorized, disabled: busyOn || !connected,
     label: '控制本机',
-    description: '允许助理在本机 Studio 发起新会话、操作本地窗口与文件。',
+    description: '允许助理在本机 DSH Host 发起新会话、操作本地窗口与文件。',
     onChange: next => { if (next) actions.onGrant?.(); else actions.onRevoke?.(); },
   }),
   h('ul', { style: { display: 'flex', flexDirection: 'column', gap: 6, margin: 0, padding: '10px 12px', borderRadius: 10, background: TOKENS.surface3, listStyle: 'none' } },
