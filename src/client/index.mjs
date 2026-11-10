@@ -1687,13 +1687,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     const guidance = binding ? unconfiguredGuidance(binding) : null;
     if (!guidance) return h('div', { role: 'status', style: { flex: '1 1 0px', display: 'grid', placeItems: 'center', padding: 24, color: PANEL_TOKENS.inkSoft } }, '正在读取开通状态…');
     return h('div', { 'data-personal-assistant-onboarding': 'true', style: panelUi.page },
-      h('header', { style: panelUi.header, 'data-window-drag': '' },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 } },
-          h('span', { style: panelUi.title }, '个人助理'),
-          h('span', { style: { borderRadius: 999, padding: '1px 8px', fontSize: 12, lineHeight: 1.7, background: 'color-mix(in srgb, #946200 14%, transparent)', color: PANEL_TOKENS.warn } }, '未开通')),
-        h('div', { style: { flex: 'none', display: 'flex', gap: 8, alignItems: 'center' } },
-          panelButton({ h, label: '设置', variant: 'ghost', 'data-window-drag-recall': '', onClick: openSettings, style: { height: 32 } }),
-          dotNode)),
       h('main', { style: { ...onboardingStyle.page, flex: '1 1 0px', minHeight: 0 } },
         h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
         h('h1', { style: onboardingStyle.title }, guidance.title),
@@ -1718,8 +1711,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
             },
           }, bindingBusy === action.id ? '处理中…' : action.label))),
         error ? h('p', { role: 'alert', style: { ...onboardingStyle.notice, color: PANEL_TOKENS.danger } }, error) : null,
-        notice ? h('p', { role: 'status', style: onboardingStyle.notice }, notice) : null),
-      panelFooter({ h, config, selectedBotId, connection, updatedAt, build: PERSONAL_ASSISTANT_CLIENT_BUILD }));
+        notice ? h('p', { role: 'status', style: onboardingStyle.notice }, notice) : null));
   };
 
   const renderBody = () => {
