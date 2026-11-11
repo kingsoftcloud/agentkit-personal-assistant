@@ -341,16 +341,32 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     return '';
   }
 
+  /** Existing Agent rows expose the same one-time desktop credential through
+   * GetAgent(IncludeApiKey=true). Keep this fallback read-only: some platform
+   * control-plane deployments reject CreateAgentApiKey even though the Agent
+   * already has a valid QuickAccess key. */
+  function quickAccessKey(value) {
+    if (!record(value)) return '';
+    const data = record(value.data) ? value.data : record(value.Data) ? value.Data : value;
+    const quickAccess = data.QuickAccess ?? data.quickAccess;
+    return createdKey(quickAccess) || createdKey(data);
+  }
+
   /** Mint a fresh instance key through the platform. Returns '' when the
    * account cannot rotate credentials (deployment environment gap). */
   async function acquireKey(agentId, signal) {
     if (typeof getClient !== 'function') return '';
     const client = await getClient();
-    let result;
-    try { result = await client.action('CreateAgentApiKey', { AgentId: agentId, Name: 'dsh-host-desktop' }, { signal }); }
-    catch { return ''; }
-    const data = result?.data ?? result;
-    return createdKey(record(data?.Data) ? data.Data : data);
+    try {
+      const result = await client.action('CreateAgentApiKey', { AgentId: agentId, Name: 'dsh-host-desktop' }, { signal });
+      const data = result?.data ?? result;
+      const key = createdKey(record(data?.Data) ? data.Data : data);
+      if (key) return key;
+    } catch { /* fallback to the existing read-only Agent credential below */ }
+    try {
+      const result = await client.action('GetAgent', { AgentId: agentId, IncludeApiKey: true }, { signal });
+      return quickAccessKey(result);
+    } catch { return ''; }
   }
 
   async function bindingUsable(binding, signal) {

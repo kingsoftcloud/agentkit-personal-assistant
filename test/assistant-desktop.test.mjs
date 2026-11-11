@@ -7,7 +7,7 @@ import { createAssistantDesktop } from '../src/assistant-desktop.mjs';
 
 const AGENT = 'ar-20261110220000-catalog';
 const KEY = `ak-${'0123456789abcdef'.repeat(2)}`;
-function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 'pre-online', agentStatus, onStatusRead } = {}) {
+function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 'pre-online', agentStatus, agentApiKey, failCreateKey = false, onStatusRead } = {}) {
   const storeDirPromise = mkdtemp(join(tmpdir(), 'pa-assistant-desktop-'));
   let created = false;
   let request;
@@ -28,9 +28,13 @@ function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 
       assert.equal(payload.AgentId, AGENT);
       onStatusRead?.(name);
       return { data: { Basic: { AgentId: AGENT, Name: '个人助理', Status: agentStatus || 'RUNNING' },
-        Deployment: { Framework: 'personal-assistant' } } };
+        Deployment: { Framework: 'personal-assistant' },
+        ...(agentApiKey ? { QuickAccess: { ApiKey: agentApiKey } } : {}) } };
     }
-    if (name === 'CreateAgentApiKey') return { data: { ApiKey: KEY } };
+    if (name === 'CreateAgentApiKey') {
+      if (failCreateKey) throw Object.assign(new Error('CreateAgentApiKey unavailable'), { status: 500 });
+      return { data: { ApiKey: KEY } };
+    }
     throw new Error(`unexpected action ${name}`);
   } };
   const deployment = {
@@ -103,6 +107,15 @@ test('线上区域自动绑定线上 PA 网关，不再误报未配置', async (
   assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
   const binding = JSON.parse(await readFile(join(storeDir, 'assistant-binding.json'), 'utf8'));
   assert.equal(binding.gatewayUrl, 'https://pa-desktop.agent.kspmas.ksyun.com');
+});
+
+test('新建实例凭证接口失败时复用 GetAgent 的 QuickAccess key', async () => {
+  const harnessValue = harness({ region: 'cn-beijing-6', failCreateKey: true, agentApiKey: KEY });
+  const storeDir = await harnessValue.storeDirPromise;
+  const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
+  assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
+  const binding = JSON.parse(await readFile(join(storeDir, 'assistant-binding.json'), 'utf8'));
+  assert.equal(binding.apiKey, KEY);
 });
 
 test('旧 Studio 绑定格式按可迁移的旧记录处理，不再误报绑定损坏', async () => {
