@@ -7,7 +7,7 @@ import { createAssistantDesktop } from '../src/assistant-desktop.mjs';
 
 const AGENT = 'ar-20261110220000-catalog';
 const KEY = `ak-${'0123456789abcdef'.repeat(2)}`;
-function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 'pre-online', agentStatus, agentApiKey, failCreateKey = false, onStatusRead } = {}) {
+function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 'pre-online', agentStatus, agentApiKey, deploymentApiKey, failCreateKey = false, onStatusRead } = {}) {
   const storeDirPromise = mkdtemp(join(tmpdir(), 'pa-assistant-desktop-'));
   let created = false;
   let request;
@@ -40,6 +40,7 @@ function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 
   const deployment = {
     getBootstrapConfig: async () => ({ Data: { Configs: { 'runtime.catalog': { 'personal-assistant': { versions: catalog } } } } }),
     createAgent: async payload => { request = payload; created = true; return { data: { AgentId: AGENT } }; },
+    ...(deploymentApiKey ? { forAgent: () => ({ get: async () => ({ data: { QuickAccess: { ApiKey: deploymentApiKey } } }) }) } : {}),
   };
   return {
     storeDirPromise,
@@ -111,6 +112,15 @@ test('线上区域自动绑定线上 PA 网关，不再误报未配置', async (
 
 test('新建实例凭证接口失败时复用 GetAgent 的 QuickAccess key', async () => {
   const harnessValue = harness({ region: 'cn-beijing-6', failCreateKey: true, agentApiKey: KEY });
+  const storeDir = await harnessValue.storeDirPromise;
+  const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
+  assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
+  const binding = JSON.parse(await readFile(join(storeDir, 'assistant-binding.json'), 'utf8'));
+  assert.equal(binding.apiKey, KEY);
+});
+
+test('优先通过 deployment client 读取已有 QuickAccess key', async () => {
+  const harnessValue = harness({ region: 'cn-beijing-6', failCreateKey: true, deploymentApiKey: KEY });
   const storeDir = await harnessValue.storeDirPromise;
   const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
   assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });

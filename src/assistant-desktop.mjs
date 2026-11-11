@@ -363,6 +363,17 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
       const key = createdKey(record(data?.Data) ? data.Data : data);
       if (key) return key;
     } catch { /* fallback to the existing read-only Agent credential below */ }
+    if (typeof getDeploymentClient === 'function') {
+      try {
+        const deployment = await getDeploymentClient();
+        const scoped = typeof deployment?.forAgent === 'function' ? deployment.forAgent(agentId) : undefined;
+        if (typeof scoped?.get === 'function') {
+          const result = await scoped.get({ IncludeApiKey: true }, { signal });
+          const key = quickAccessKey(result);
+          if (key) return key;
+        }
+      } catch { /* use the generic read-only action below */ }
+    }
     try {
       const result = await client.action('GetAgent', { AgentId: agentId, IncludeApiKey: true }, { signal });
       return quickAccessKey(result);

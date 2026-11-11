@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.1.22 - 2026-11-11（使用专用 deployment 凭证读取链）
+
+- `CreateAgentApiKey` 失败时优先通过 Host 提供的 deployment client 读取 `QuickAccess.ApiKey`，再回退通用 `GetAgent`。
+- 补充 deployment client 凭证读取回归测试。
+
 ## 0.1.21 - 2026-11-11（复用已有实例凭证）
 
 - `CreateAgentApiKey` 控制面暂时不可用时，改为只读 `GetAgent(IncludeApiKey=true)` 复用已有 `QuickAccess.ApiKey`。
