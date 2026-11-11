@@ -1173,6 +1173,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const previousAuthorizedRef = useRef(undefined);
   const createTimerRef = useRef(null);
   const createStartedAtRef = useRef(0);
+  const createAttemptRef = useRef(0);
+  const createRequestPendingRef = useRef(false);
   const createCollapsedRef = useRef(false);
   createCollapsedRef.current = createCollapsed;
 
@@ -1325,7 +1327,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   };
 
   /** 首次装载：先回显缓存，再解析 scope 与概览；任何一步失败都落回可操作的界面。 */
-  const boot = async () => {
+  const boot = async ({ recoverOpening = true } = {}) => {
     // 1) 首帧已由 state 初值回显缓存；这里兜底「本次渲染之后才写入」的概览缓存（stale-while-revalidate）。
     const cachedOverview = readPanelCache('overview');
     if (cachedOverview?.value) {
@@ -1347,7 +1349,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     setConfig(configValue || null);
     if (!configValue?.configured) {
       // 创建请求可能仍在 Host 内进行：重新挂载页面时先恢复进度，不能把进行中的实例误判成「尚未开通」。
-      const resumedCreate = await recoverCreateProgress();
+      const resumedCreate = recoverOpening && await recoverCreateProgress();
       if (resumedCreate) {
         removePanelCache('shell');
         setBinding(null);
@@ -1585,51 +1587,71 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   /* ---------- 首次创建 ---------- */
 
+  const creationInProgress = panelView === 'create' && createStatus && !['done', 'failed'].includes(createStatus.stage);
+  useEffect(() => {
+    if (!creationInProgress) return;
+    const timer = setInterval(() => {
+      const elapsedMs = Date.now() - createStartedAtRef.current;
+      setCreateStatus(previous => previous && !['done', 'failed'].includes(previous.stage) && elapsedMs > previous.elapsedMs
+        ? { ...previous, elapsedMs } : previous);
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [Boolean(creationInProgress)]);
+
   const pollDesktopReady = async () => {
     try { const value = await rpc('personal-assistant.desktop.status'); return value?.configured === true; } catch { return false; }
   };
 
+  const finishCreate = async () => {
+    const attempt = ++createAttemptRef.current;
+    clearCreateTimer();
+    setCreateNotice('创建完成，正在刷新 Bot 列表…');
+    await boot({ recoverOpening: false });
+    if (!aliveRef.current || createAttemptRef.current !== attempt) return;
+    setPanelView('list');
+    setCreateStatus(null);
+  };
+
   const pollCreateStatus = async () => {
     if (!aliveRef.current) return;
+    const attempt = createAttemptRef.current;
+    const isCurrent = () => aliveRef.current && createAttemptRef.current === attempt;
     try {
       const raw = await rpc('personal-assistant.create.status');
+      if (!isCurrent()) return;
       const status = normalizeCreateStatus(raw);
       if (!status) throw Object.assign(new Error('create.status 格式无效'), { code: 'PERSONAL_ASSISTANT_CREATE_STATUS_INVALID' });
-      // elapsedMs 缺失时用本地起点补齐，进度页的「已用时」仍然在走。
-      if (!status.elapsedMs) status.elapsedMs = Date.now() - createStartedAtRef.current;
-      setCreateStatus(status);
-      setCreateError(status.error || '');
-      if (status.stage === 'done') {
-        setCreateNotice('创建完成，正在刷新 Bot 列表…');
-        await loadConnection();
-        await boot();
-        setPanelView('list'); setCreateStatus(null);
-        return;
+      // The previous attempt can still be the Host's last status when a retry
+      // starts. The current desktop.create response owns its terminal result.
+      if (!createRequestPendingRef.current || !['done', 'failed'].includes(status.stage)) {
+        setCreateStatus(previous => ({ ...status, elapsedMs: Math.max(previous?.elapsedMs || 0, status.elapsedMs) }));
+        setCreateError(status.error || '');
+        if (status.stage === 'done') return finishCreate();
+        if (status.stage === 'failed') return;
       }
-      if (status.stage === 'failed') return;
     } catch (failure) {
+      if (!isCurrent()) return;
       // Host 没实现 create.status：退化为轮询 desktop.status，仍然能等到「已开通」；
       // 这段时间用本地阶段占位，界面不空白。
       if (isUnavailableFailure(failure) || Number(failure?.status) === 404) {
         setCreateStatus(previous => previous && previous.stage !== 'failed' ? { ...previous, stage: previous.stage || 'runtime' } : { stage: 'runtime', stages: [], elapsedMs: Date.now() - createStartedAtRef.current, estimatedRemainingMs: 90_000 });
         if (await pollDesktopReady()) {
-          setCreateNotice('创建完成，正在刷新 Bot 列表…');
-          await loadConnection();
-          await boot();
-          setPanelView('list'); setCreateStatus(null);
+          if (isCurrent()) return finishCreate();
           return;
         }
       } else {
         setCreateError(failure?.message || '读取创建进度失败，仍在后台创建');
       }
     }
-    if (createCollapsedRef.current) return;
+    if (!isCurrent() || createCollapsedRef.current) return;
     clearCreateTimer();
     createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 1000);
   };
 
   const startCreate = async () => {
-    if (bindingBusy) return;
+    if (bindingBusy || createRequestPendingRef.current) return;
+    const attempt = ++createAttemptRef.current;
+    createRequestPendingRef.current = true;
     setBindingBusy('create'); setNotice(''); setError('');
     setCreateStatus({ stage: 'instance', stages: [], elapsedMs: 0, estimatedRemainingMs: 150_000 });
     setCreateCollapsed(false); setCreateDiagnostics(false);
@@ -1638,17 +1660,25 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     createStartedAtRef.current = Date.now();
     // desktop.create 可能持续数分钟；进度轮询必须与创建 RPC 并行启动，不能等 RPC 返回后才开始计时。
     clearCreateTimer();
+    const creating = rpc('personal-assistant.desktop.create');
     void pollCreateStatus();
     try {
-      await rpc('personal-assistant.desktop.create');
+      const result = await creating;
+      if (aliveRef.current && createAttemptRef.current === attempt && result?.configured === true) {
+        await finishCreate();
+      }
     } catch (failure) {
-      clearCreateTimer();
-      setCreateError(failure?.message || '开通请求没有被云端接受');
-      setCreateStatus({ stage: 'failed', stages: [], elapsedMs: 0, estimatedRemainingMs: 0, error: failure?.message || '开通请求没有被云端接受' });
-      setBindingBusy('');
-      return;
+      if (aliveRef.current && createAttemptRef.current === attempt) {
+        createAttemptRef.current += 1;
+        clearCreateTimer();
+        const message = failure?.message || '开通请求没有被云端接受';
+        setCreateError(message);
+        setCreateStatus(previous => ({ stage: 'failed', stages: [], elapsedMs: previous?.elapsedMs || 0, estimatedRemainingMs: 0, error: message }));
+      }
+    } finally {
+      createRequestPendingRef.current = false;
+      if (aliveRef.current) setBindingBusy('');
     }
-    setBindingBusy('');
   };
 
   const toggleCreateCollapsed = () => {
@@ -1664,6 +1694,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   const cancelCreate = () => {
     // 契约没有取消创建的 RPC：创建在云端继续，这里只退出进度页，避免用户以为已取消。
+    createAttemptRef.current += 1;
     clearCreateTimer();
     setCreateNotice('创建会在云端继续；完成后会自动出现在列表里。');
     setPanelView('list');

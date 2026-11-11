@@ -469,6 +469,57 @@ test('重新挂载个人助理页时恢复进行中的创建状态，而不是�
   reopened.unmount();
 });
 
+test('进度读取暂时没有响应时，开通计时仍继续', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  let creating = false;
+  const pending = new Promise(() => {});
+  const request = async operation => {
+    if (operation.endsWith('.configuration')) return { configured: false };
+    if (operation.endsWith('.desktop.status')) return { configured: false, reason: 'needs-create' };
+    if (operation.endsWith('.desktop.create')) { creating = true; return pending; }
+    if (operation.endsWith('.create.status') && creating) return pending;
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  await view.settle(PersonalAssistantShell, { request });
+  buttonsWith(view, '开通个人助理')[0].props.onClick();
+  await view.settle(PersonalAssistantShell, { request });
+  t.mock.timers.tick(3_000);
+  await view.settle(PersonalAssistantShell, { request });
+  assert.match(view.text(), /已用时 00:03/u);
+  view.unmount();
+});
+
+test('重试不会被上次的失败状态打断，当前开通返回成功后退出进度页', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  let configured = false;
+  let resolve;
+  const create = new Promise(done => { resolve = done; });
+  const request = async operation => {
+    if (operation.endsWith('.configuration')) return { configured, agentId: 'ar-current' };
+    if (operation.endsWith('.desktop.create')) return create;
+    if (operation.endsWith('.create.status')) return { stage: 'failed', error: '上次开通失败', elapsedMs: 10_000 };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, bots: [] };
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  await view.settle(PersonalAssistantShell, { request });
+  buttonsWith(view, '重试')[0].props.onClick();
+  await view.settle(PersonalAssistantShell, { request });
+  t.mock.timers.tick(2_000);
+  await view.settle(PersonalAssistantShell, { request });
+  assert.match(view.text(), /已用时 00:02/u, '旧失败不能盖住当前的计时');
+  configured = true;
+  resolve({ configured: true, agentId: 'ar-current' });
+  await view.settle(PersonalAssistantShell, { request });
+  assert.doesNotMatch(view.text(), /创建个人助理失败|正在为你准备个人助理/u);
+  view.unmount();
+});
+
 test('重开面板状态一致：上次概览缓存先回显，网络恢复后换成真实数据', async t => {
   const storage = new Map();
   const previousStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');

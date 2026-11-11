@@ -355,8 +355,8 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
   }
 
   /** Resolve, verify and (when the stored key is gone) re-acquire the binding. */
-  async function refresh(signal) {
-    const agents = await discover(signal).catch(() => []);
+  async function refresh(signal, readyAgent = null) {
+    const agents = readyAgent ? [readyAgent] : await discover(signal).catch(() => []);
     const candidates = agents.map(row => ({ agentId: row.AgentId, name: text(row.Name), status: text(row.Status),
       framework: text(row.Framework), endpoint: text(row.Endpoint), createdAt: text(row.CreatedAt) }));
     const selected = candidates[0] ? agents[0] : null;
@@ -382,6 +382,31 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     if (!await bindingUsable(next, signal)) return { binding: null, candidates, reason: 'credential-unavailable' };
     await writeBinding(next);
     return { binding: next, candidates, reason: '' };
+  }
+
+  async function readOpeningAgent(agentId, signal) {
+    const client = await getClient();
+    let result;
+    try {
+      result = await client.action('GetAgent', { AgentId: agentId }, { signal });
+    } catch (error) {
+      signal?.throwIfAborted?.();
+      // Before the order callback there is no Agent row. Allow a transient
+      // control-plane read failure too; the original order still owns the slot.
+      if ([404, 408, 429, 500, 502, 503, 504].includes(Number(error?.status))
+          || error?.code === 'SERVER_UNAVAILABLE') return null;
+      throw error;
+    }
+    const detail = result?.data ?? result?.Data ?? result;
+    const basic = detail?.Basic ?? detail;
+    if (basic?.AgentId !== agentId || (detail?.Deployment?.Framework ?? basic?.Framework) !== 'personal-assistant') {
+      throw fail('ASSISTANT_CREATE_STATUS_INVALID', '云端返回的个人助理实例与开通请求不一致', 502);
+    }
+    const status = text(basic.Status).toUpperCase();
+    if (['FAILED', 'ERROR', 'CREATE_FAILED', 'TERMINATED', 'DELETED'].includes(status)) {
+      throw fail('ASSISTANT_CREATE_FAILED', `云端开通没有完成，请重试（实例 ${agentId}）`, 409);
+    }
+    return status === 'RUNNING' ? { ...basic, Framework: 'personal-assistant', Status: status } : null;
   }
 
   async function configuration(input = {}, signal) {
@@ -491,22 +516,27 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     }
     const data = created?.data ?? created;
     const agentId = text(data?.AgentId ?? data?.Data?.AgentId ?? data?.Agent?.AgentId);
-    // Wait for the instance to become callable before minting its credential.
+    if (!AGENT_ID.test(agentId)) throw fail('ASSISTANT_CREATE_STATUS_INVALID', '云端未返回开通实例标识', 502);
+    // ListAgents can serve a stale cache without refreshing the runtime.
+    // The order supplies a stable AgentId even before the callback creates it.
     const deadline = Date.now() + 300_000;
     let agent = null;
     while (Date.now() < deadline) {
       signal?.throwIfAborted?.();
-      const rows = await discover(signal).catch(() => []);
-      agent = rows.find(row => (agentId && row.AgentId === agentId) || row.Name === name) || null;
+      agent = await readOpeningAgent(agentId, signal);
       if (agent) break;
       await new Promise(resolve => setTimeout(resolve, 5_000));
     }
     if (!agent) throw fail('ASSISTANT_CREATE_TIMEOUT', '个人助理正在创建中，请稍后重试', 504);
-    const resolved = await refresh(signal);
+    const resolved = await refresh(signal, agent);
     if (!resolved.binding) throw fail('ASSISTANT_CREDENTIAL_UNAVAILABLE', '个人助理已创建，但云端暂时无法获取连接凭证，请稍后重试', 503);
     // Remember the declaration this Host wrote; the platform does not echo it
     // back on GetAgent, and a later settings update must reuse the same name.
-    await writeBinding({ ...resolved.binding, manifest });
+    // A parallel request or a retry can join an existing order. Its generated
+    // name and manifest are not the declaration the order actually accepted.
+    if (agent.Name === name && !data?.AlreadyExists && !data?.PendingOrder) {
+      await writeBinding({ ...resolved.binding, manifest });
+    }
     return { configured: true, agentId: resolved.binding.agentId };
   }
 
