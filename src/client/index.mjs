@@ -70,10 +70,15 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
   });
 }
 
-export const inject = Object.freeze(['slots', 'connection', 'sidebarRight']);
+export const inject = Object.freeze([
+  'slots', 'connection', 'sidebarRight', 'uiWorkspace', 'workspaces', 'sessions', 'uiConversation',
+]);
 export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
 export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false, autoConnect: false });
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
+export const PERSONAL_ASSISTANT_VIEW_ID = 'personal-assistant-session';
+const PERSONAL_ASSISTANT_DSH_SESSION_KEY = 'personal-assistant.dsh-session-id';
+const personalAssistantDshSessions = new Set();
 /** Settings and the main panel are mounted in different DSH slots. */
 export const PERSONAL_ASSISTANT_CONFIGURATION_EVENT = 'personal-assistant:configuration-changed';
 
@@ -89,7 +94,7 @@ import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './
 import { createDesktopControl } from './desktop-control.mjs';
 import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard, clipboardTextOf } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation } from './conversation.mjs';
-import { createAssistantWorkbench, AssistantNativeRightbar } from './native-workbench.mjs';
+import { createSessionAssistantWorkbench } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
 export const PERSONAL_ASSISTANT_CLIENT_BUILD = typeof __PA_CLIENT_BUILD__ === 'string' ? __PA_CLIENT_BUILD__ : '开发模式';
 /** 构建标记按本机时区显示（构建串是 UTC，直接截断会让用户看到 8 小时前的时间）。 */
@@ -877,6 +882,99 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
     style: { flex: '1 1 0px', height: '100%', maxHeight: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', boxSizing: 'border-box', display: 'flex', flexDirection: 'column' },
   }, h(PersonalAssistantConversation, { React: R, request: scopedRequest, scope, markdown: clientMarkdown, onOpenComputer: () => nativeWorkbench.open() }));
 
+}
+
+/**
+ * DSH Session-scoped Personal Assistant view.
+ *
+ * This is the surface mounted by `conversation.view`, so the host keeps its
+ * normal Session chrome and can mount the cloud computer in the native right
+ * sidebar.  The old global `main` panel remains available as an exported
+ * legacy component for consumers that embed it directly, but the plugin entry
+ * no longer uses it as the primary Personal Assistant route.
+ */
+export function PersonalAssistantSessionView({ request, sessionId, sidebarRight } = {}) {
+  const R = clientReact || globalThis.React;
+  if (!R) return '个人助理会话页面尚未就绪，请重新打开';
+  const { createElement: h, useEffect, useRef } = R;
+  const bridgeRef = useRef(null);
+  if (!bridgeRef.current || bridgeRef.current.sessionId !== sessionId) {
+    bridgeRef.current?.workbench?.dispose?.();
+    bridgeRef.current = {
+      sessionId,
+      workbench: createSessionAssistantWorkbench({ sidebarRight, kind: PERSONAL_ASSISTANT_COMPUTER_TAB }),
+    };
+  }
+  const workbench = bridgeRef.current.workbench;
+  useEffect(() => () => workbench.dispose?.(), [workbench]);
+  return h(PersonalAssistantHome, { request, nativeWorkbench: workbench });
+}
+
+/** DSH's resident composer is replaced by the Personal Assistant composer. */
+export function PersonalAssistantComposerPlaceholder() { return null; }
+
+function storedPersonalAssistantSessionId() {
+  try {
+    const id = String(globalThis.localStorage?.getItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY) || '').trim();
+    if (id) personalAssistantDshSessions.add(id);
+    return id;
+  } catch { return ''; }
+}
+
+function rememberPersonalAssistantSessionId(sessionId) {
+  const id = String(sessionId || '').trim();
+  if (!id) return;
+  personalAssistantDshSessions.add(id);
+  try { globalThis.localStorage?.setItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY, id); } catch { /* storage is optional */ }
+}
+
+function forgetPersonalAssistantSessionId(sessionId) {
+  const id = String(sessionId || '').trim();
+  if (id) personalAssistantDshSessions.delete(id);
+  try {
+    if (!sessionId || String(globalThis.localStorage?.getItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY) || '') === id) {
+      globalThis.localStorage?.removeItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY);
+    }
+  } catch { /* storage is optional */ }
+}
+
+function persistPersonalAssistantView(sessionId) {
+  const id = String(sessionId || '').trim();
+  if (!id) return;
+  try {
+    const key = `dsh.conversation.${id}`;
+    let state = {};
+    const raw = globalThis.localStorage?.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') state = parsed;
+    }
+    state.view = PERSONAL_ASSISTANT_VIEW_ID;
+    state.viewRequest = null;
+    globalThis.localStorage?.setItem(key, JSON.stringify(state));
+  } catch { /* storage is optional */ }
+}
+
+/** Small loading surface shown only while the main panel hands navigation to DSH. */
+export function PersonalAssistantSessionLauncher({ openSession } = {}) {
+  const R = clientReact || globalThis.React;
+  if (!R) return '正在打开个人助理会话…';
+  const { createElement: h, useEffect, useRef, useState } = R;
+  const started = useRef(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    if (started.current || typeof openSession !== 'function') return undefined;
+    started.current = true;
+    let alive = true;
+    Promise.resolve().then(() => openSession()).catch(reason => {
+      if (alive) setError(reason?.message || '无法打开个人助理会话');
+    });
+    return () => { alive = false; };
+  }, [openSession]);
+  return h('div', {
+    'data-personal-assistant-session-launcher': 'true', role: error ? 'alert' : 'status',
+    style: { height: '100%', display: 'grid', placeItems: 'center', padding: 24, color: 'var(--dsw-alias-label-secondary, #536174)' },
+  }, error || '正在打开个人助理会话…');
 }
 
 
@@ -2343,14 +2441,136 @@ export function apply(ctx) {
       return undefined;
     }
   };
-  const nativeWorkbench = createAssistantWorkbench({ sidebarRight: ctx.sidebarRight, slots: ctx.slots });
-  if (nativeWorkbench) {
-    nativeWorkbench.render = props => AssistantNativeRightbar({ ...props, React: clientReact || globalThis.React, workbench: nativeWorkbench, Panel: PersonalAssistantPanel });
-    scope(() => () => nativeWorkbench.dispose(), 'personal-assistant: native workbench');
-  }
+
+  const sessions = ctx.sessions || ctx.get?.('sessions');
+  const workspaces = ctx.workspaces || ctx.get?.('workspaces');
+  const uiWorkspace = ctx.uiWorkspace || ctx.get?.('uiWorkspace');
+  const uiConversation = ctx.uiConversation || ctx.get?.('uiConversation');
+  storedPersonalAssistantSessionId();
+  let openingSession;
+  let currentPersonalAssistantSessionId = '';
+  const activatePersonalAssistantSession = sessionId => {
+    const id = String(sessionId || '').trim();
+    if (!id) return;
+    // Session creation and the local Controller projection are asynchronous.
+    // Retry activation briefly while the normal Session binding catches up.
+    let remaining = 40;
+    const selectRenderedViewTab = () => {
+      if (!globalThis.document?.querySelectorAll) return false;
+      const tabs = [...globalThis.document.querySelectorAll('[role="tab"]')];
+      const tab = tabs.find(candidate => String(candidate.textContent || '').trim() === '个人助理');
+      if (!tab) return false;
+      if (tab.getAttribute('aria-selected') !== 'true') tab.click();
+      return true;
+    };
+    const activate = () => {
+      try {
+        const binding = uiConversation?.binding?.(id);
+        if (!binding || typeof binding.activate !== 'function') throw new Error('session binding pending');
+        binding.activate(PERSONAL_ASSISTANT_VIEW_ID);
+        return selectRenderedViewTab();
+      } catch { return false; }
+    };
+    if (activate()) return;
+    const retry = () => {
+      if (activate() || --remaining <= 0) return;
+      globalThis.setTimeout?.(retry, 25);
+    };
+    globalThis.setTimeout?.(retry, 0);
+  };
+  const openAndActivatePersonalAssistantSession = sessionId => {
+    const id = String(sessionId || '').trim();
+    if (!id) return;
+    // Open first so DSH mounts the Session surface, then select the PA view.
+    persistPersonalAssistantView(id);
+    uiWorkspace?.openSession?.(id);
+    activatePersonalAssistantSession(id);
+  };
+  const openPersonalAssistantSession = () => {
+    if (openingSession) return openingSession;
+    openingSession = (async () => {
+      // The global sidebar may have rendered from a cached Session list while
+      // the launcher is already clickable. Refresh once before choosing the
+      // presentation Session so we do not accidentally create a fresh blank
+      // Session when a reusable non-blank Session is already available.
+      const refreshSessions = sessions?.refresh?.();
+      if (refreshSessions && typeof refreshSessions.catch === 'function') await refreshSessions.catch(() => {});
+      const list = sessions?.list?.getSnapshot?.();
+      const stored = currentPersonalAssistantSessionId || storedPersonalAssistantSessionId();
+      const existing = stored && list?.byId?.[stored];
+      // A Session created in this same Host lifetime may not have reached the
+      // list projection yet. Keep reusing it while the projection catches up;
+      // a persisted id from an earlier lifetime still requires list evidence.
+      if (stored && existing?.blank !== true
+        && ((currentPersonalAssistantSessionId && existing?.removed !== true) || existing?.removed !== true && existing)) {
+        currentPersonalAssistantSessionId = stored;
+        personalAssistantDshSessions.add(stored);
+        openAndActivatePersonalAssistantSession(stored);
+        return stored;
+      }
+      if (stored) forgetPersonalAssistantSessionId(stored);
+
+      // A brand-new DSH Session is intentionally blank, and the stock DSH
+      // shell hides `conversation.view` targets until the first durable turn.
+      // Reuse an already active/non-blank Session when one exists so the PA
+      // surface is immediately visible.  The PA conversation itself remains
+      // in its own cloud session; this DSH Session is only the presentation
+      // surface that provides the native split layout.
+      const reusable = Object.values(list?.byId || {}).find(row => row
+        && row.removed !== true && row.blank === false);
+      if (reusable?.id) {
+        currentPersonalAssistantSessionId = String(reusable.id);
+        rememberPersonalAssistantSessionId(currentPersonalAssistantSessionId);
+        openAndActivatePersonalAssistantSession(currentPersonalAssistantSessionId);
+        return currentPersonalAssistantSessionId;
+      }
+
+      const workspaceSnapshot = workspaces?.list?.getSnapshot?.();
+      const items = Array.isArray(workspaceSnapshot?.items) ? workspaceSnapshot.items : [];
+      const current = Object.values(list?.byId || {}).find(row => Number(row?.retainedBy?.mainView || 0) > 0)?.id;
+      const workspace = items.find(item => current && item.sessionIds?.includes(current)) || items[0];
+      if (!workspace?.workspaceId || typeof uiWorkspace?.connectWorkspace !== 'function') {
+        throw new Error('请先在 DSH Host 中创建或打开一个工作区');
+      }
+      if (typeof uiWorkspace.openWorkspace === 'function') {
+        let createdSessionId = '';
+        await uiWorkspace.openWorkspace(workspace.workspaceId, sessionId => {
+          createdSessionId = String(sessionId || '');
+          currentPersonalAssistantSessionId = createdSessionId;
+          rememberPersonalAssistantSessionId(createdSessionId);
+          persistPersonalAssistantView(createdSessionId);
+        });
+        if (createdSessionId) {
+          // DSH restores its preferred view after navigation completes. Apply
+          // the PA view after that restore so Chat cannot overwrite it.
+          activatePersonalAssistantSession(createdSessionId);
+          return createdSessionId;
+        }
+        throw new Error('DSH Host 未返回个人助理会话标识');
+      }
+      const sessionId = await uiWorkspace.connectWorkspace(workspace.workspaceId);
+      currentPersonalAssistantSessionId = String(sessionId || '');
+      rememberPersonalAssistantSessionId(sessionId);
+      openAndActivatePersonalAssistantSession(sessionId);
+      return sessionId;
+    })().finally(() => { openingSession = undefined; });
+    return openingSession;
+  };
+
+  // The PA view is a normal DSH Session target.  Opening the computer from
+  // this view therefore uses the Session-owned right sidebar instead of the
+  // legacy global panel surface.
+  scope(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
+    name: 'conversation.view', id: PERSONAL_ASSISTANT_VIEW_ID, order: -10, label: '个人助理',
+  }, props => PersonalAssistantSessionView({ ...props, request, sidebarRight: ctx.sidebarRight }))), 'personal-assistant: conversation view');
+  scope(() => ctx.slots.inject('conversation.composer', () => ctx.slots.register({
+    name: 'conversation.composer', priority: -20,
+    select: owner => owner?.session?.sessionId && personalAssistantDshSessions.has(owner.session.sessionId)
+      ? { sessionId: owner.session.sessionId } : null,
+  }, PersonalAssistantComposerPlaceholder)), 'personal-assistant: conversation composer');
   scope(() => ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request, nativeWorkbench }),
-  }, PersonalAssistantShell)), 'personal-assistant: main panel');
+    name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ openSession: openPersonalAssistantSession }),
+  }, PersonalAssistantSessionLauncher)), 'personal-assistant: session launcher');
   scope(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PERSONAL_ASSISTANT_PANEL_ID, order: 90, label: '个人助理',
   }, PersonalAssistantPanelIcon)), 'personal-assistant: sidebar row');

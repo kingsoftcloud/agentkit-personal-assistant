@@ -12,6 +12,7 @@ import {
   PERSONAL_ASSISTANT_CLIENT_DEFAULTS,
   PERSONAL_ASSISTANT_COMPUTER_TAB,
   PERSONAL_ASSISTANT_PANEL_ID,
+  PERSONAL_ASSISTANT_VIEW_ID,
   inject as clientInject,
 } from '../src/client/index.mjs';
 import { mapDisplayPoint, nextPollDelay, framePayload, isInputEventWritable, mergeWheel, WHEEL_PIXEL_STEP } from '../src/client/desktop-view.mjs';
@@ -113,7 +114,7 @@ test('client maps durable session and memory operations to the public gateway', 
 });
 
 
-test('public DSH client entry registers a closed main panel and sidebar row', () => {
+test('public DSH client entry registers a Session launcher and sidebar row', () => {
   const entries = [];
   const ctx = {
     sidebarRight: { openTab(kind) { opened.push(kind); } },
@@ -122,7 +123,7 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
     slots: {
       inject(name, factory) {
         entries.push(factory());
-        assert.ok(['main', 'sidebar.panellist', 'settings.section'].includes(name));
+        assert.ok(['conversation.view', 'conversation.composer', 'main', 'sidebar.panellist', 'settings.section'].includes(name));
         return () => {};
       },
       register(definition, component) {
@@ -131,15 +132,52 @@ test('public DSH client entry registers a closed main panel and sidebar row', ()
     },
   };
   applyClient(ctx);
-  assert.deepEqual(clientInject, ['slots', 'connection', 'sidebarRight']);
-  assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist', 'settings.section']);
-  assert.equal(entries[0].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
-  assert.equal(entries[1].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
-  assert.equal(entries[0].component(), '个人助理页面尚未就绪，请重新打开');
-  assert.equal(entries[1].component(), '助');
-  assert.equal(entries[2].definition.id, `${PERSONAL_ASSISTANT_PANEL_ID}-settings`);
-  assert.equal(entries[2].definition.label, '个人助理');
+  assert.deepEqual(clientInject, ['slots', 'connection', 'sidebarRight', 'uiWorkspace', 'workspaces', 'sessions', 'uiConversation']);
+  assert.deepEqual(entries.map(entry => entry.definition.name), ['conversation.view', 'conversation.composer', 'main', 'sidebar.panellist', 'settings.section']);
+  assert.equal(entries[0].definition.id, PERSONAL_ASSISTANT_VIEW_ID);
+  assert.equal(entries[1].component({ session: { sessionId: 'other' } }), null);
+  assert.equal(entries[2].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
+  assert.equal(entries[2].component(), '正在打开个人助理会话…');
+  assert.equal(entries[3].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
+  assert.equal(entries[3].component(), '助');
+  assert.equal(entries[4].definition.id, `${PERSONAL_ASSISTANT_PANEL_ID}-settings`);
+  assert.equal(entries[4].definition.label, '个人助理');
   assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
+});
+
+test('PA main launcher creates or reuses one DSH Session and activates the PA view', async () => {
+  const entries = [];
+  const activations = [];
+  const opened = [];
+  let created = 0;
+  const slots = {
+    inject(_name, factory) { entries.push(factory()); return () => {}; },
+    register(definition, component) { return { definition, component }; },
+  };
+  const ctx = {
+    sidebarRight: { openTab() {} },
+    sessions: { list: { getSnapshot: () => ({ byId: {} }) } },
+    workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId: 'workspace-1', sessionIds: [] }] }) } },
+    uiWorkspace: {
+      async connectWorkspace(id) { assert.equal(id, 'workspace-1'); created += 1; return `dsh-session-${created}`; },
+      openSession(id) { opened.push(id); },
+    },
+    uiConversation: { binding(id) { return { activate(view) { activations.push({ id, view }); } }; } },
+    effect(factory) { return factory(); },
+    get() { return undefined; },
+    slots,
+  };
+  applyClient(ctx);
+  const main = entries.find(entry => entry.definition.name === 'main');
+  const openSession = main.definition.inject().openSession;
+  assert.equal(await openSession(), 'dsh-session-1');
+  assert.deepEqual(activations, [{ id: 'dsh-session-1', view: PERSONAL_ASSISTANT_VIEW_ID }]);
+  assert.deepEqual(opened, ['dsh-session-1']);
+  // The second call joins the stored DSH Session instead of creating another one.
+  ctx.sessions.list.getSnapshot = () => ({ byId: { 'dsh-session-1': { removed: false } } });
+  assert.equal(await openSession(), 'dsh-session-1');
+  assert.equal(created, 1);
+  assert.equal(opened.length, 2);
 });
 
 test('letterboxed desktop keeps ten grid coordinates within two pixels', () => {
@@ -197,14 +235,14 @@ test('右侧栏云电脑标签页与设置页注册在插件作用域内，卸�
   assert.equal(tabTypes[0].guide.length, 1);
   assert.equal(tabTypes[0].guide[0].title(), '云电脑');
   assert.deepEqual(injected.map(entry => entry.definition.name), [
-    'main', 'sidebar.panellist', 'settings.section', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title',
+    'conversation.view', 'conversation.composer', 'main', 'sidebar.panellist', 'settings.section', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title',
   ]);
-  assert.equal(injected[3].definition.key, PERSONAL_ASSISTANT_COMPUTER_TAB);
-  assert.equal(injected[4].component(), '云电脑');
-  // 普通会话标签页仍注册；全局云电脑通过独立原生panel surface挂载。
-  assert.equal(typeof injected[0].definition.inject().request, 'function');
+  assert.equal(injected[5].definition.key, PERSONAL_ASSISTANT_COMPUTER_TAB);
+  assert.equal(injected[6].component(), '云电脑');
+  assert.equal(typeof injected[2].definition.inject().openSession, 'function');
+  assert.equal(injected[0].definition.id, PERSONAL_ASSISTANT_VIEW_ID);
   assert.deepEqual(opened, []);
-  assert.equal(effectDisposers.length, 5);
+  assert.equal(effectDisposers.length, 6);
 });
 
 

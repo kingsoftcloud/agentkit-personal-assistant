@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createAssistantWorkbench, AssistantNativeRightbar } from '../src/client/native-workbench.mjs';
+import { createAssistantWorkbench, createSessionAssistantWorkbench, AssistantNativeRightbar } from '../src/client/native-workbench.mjs';
 
 function fixture() {
   const registrations = [], surfaces = new Set(), opens = [];
@@ -60,4 +60,20 @@ test('旧宿主无原生 root panel 能力时明确要求更新，不退回固�
   assert.match(workbench.unavailableReason, /原生侧栏组件需要更新/u);
   assert.throws(() => workbench.bind({ agentId: 'ar-cloud', botId: 'default' }, () => {}), { code: 'PERSONAL_ASSISTANT_NATIVE_SIDEBAR_REQUIRED' });
   workbench.dispose();
+});
+
+test('DSH 0.2.2 Session bridge opens the native right tab without a root surface or fullscreen call', () => {
+  const opened = [];
+  const bridge = createSessionAssistantWorkbench({
+    sidebarRight: { openTab(kind, options) { opened.push({ kind, options }); } },
+  });
+  assert.equal(bridge.available, true);
+  bridge.bind({ agentId: 'ar-cloud', botId: 'default' }, () => {});
+  bridge.open();
+  assert.deepEqual(opened, [{
+    kind: 'personal-assistant-computer',
+    options: { params: { agentId: 'ar-cloud', botId: 'default' } },
+  }]);
+  bridge.dispose();
+  assert.throws(() => bridge.open(), /已关闭/u);
 });
