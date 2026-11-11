@@ -34,6 +34,8 @@ const MAX_ENV_VARIABLES = 64;
 const MAX_MANIFEST_BYTES = 16 * 1024;
 const DEFAULT_MODEL = 'deepseek-v4.1-flash-1017';
 const DEFAULT_PROMPT = '请用中文完成用户任务。只使用提供的云电脑工具，不得假装已经执行。';
+const PREPROD_GATEWAY = 'https://pa-desktop-pre.agent-pre.kspmas.ksyun.com';
+const ONLINE_GATEWAY = 'https://pa-desktop.agent.kspmas.ksyun.com';
 // Keep a safe fallback for hosts whose platform predates the runtime catalog.
 // Normal creation resolves the newest published catalog entry below, so this
 // value only applies when the catalog cannot be read at all.
@@ -208,6 +210,18 @@ function gatewayOrigin(value) {
   return url.origin;
 }
 
+/** Resolve the fixed PA desktop gateway for a configured cloud environment.
+ * The control-plane region is not itself a gateway URL: pre-online is the
+ * shared preproduction environment, while ordinary KSYUN `cn-*` regions use
+ * the online gateway. Keep the host allowlist in code so a region value can
+ * never turn into an arbitrary outbound URL. */
+function gatewayForRegion(value) {
+  const region = text(value).toLowerCase();
+  if (region === 'pre-online') return PREPROD_GATEWAY;
+  if (region === 'online' || region === 'prod' || region === 'production' || /^cn-[a-z0-9-]+$/u.test(region)) return ONLINE_GATEWAY;
+  return undefined;
+}
+
 export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = process.env, configuration: configurationSource, getClient, getDeploymentClient } = {}) {
   const file = join(storeDir, 'assistant-binding.json');
   let cached, cacheAt = 0;
@@ -301,10 +315,8 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     const source = typeof configurationSource === 'function' ? configurationSource() : configurationSource;
     const { values } = await (await source)?.resolve();
     if (!values) throw fail('ASSISTANT_CLOUD_UNCONFIGURED', '还没有配置云账号，请先在 Host 中完成云账号设置', 409);
-    const region = String(values?.cloudRegion || '').toLowerCase();
-    // 主预发（agentengine）走 pa-desktop-pre；PA 团队 dev 环境是另一套
-    // server/DB，需要时用 AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL 覆盖。
-    if (region === 'pre-online') return 'https://pa-desktop-pre.agent-pre.kspmas.ksyun.com';
+    const gateway = gatewayForRegion(values?.cloudRegion);
+    if (gateway) return gateway;
     throw fail('ASSISTANT_GATEWAY_UNCONFIGURED', '当前环境还没有配置个人助理云网关', 409);
   }
 

@@ -7,9 +7,7 @@ import { createAssistantDesktop } from '../src/assistant-desktop.mjs';
 
 const AGENT = 'ar-20261110220000-catalog';
 const KEY = `ak-${'0123456789abcdef'.repeat(2)}`;
-const configuration = { resolve: async () => ({ values: { cloudRegion: 'pre-online' } }) };
-
-function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, agentStatus, onStatusRead } = {}) {
+function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 'pre-online', agentStatus, onStatusRead } = {}) {
   const storeDirPromise = mkdtemp(join(tmpdir(), 'pa-assistant-desktop-'));
   let created = false;
   let request;
@@ -42,7 +40,7 @@ function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, agentStat
   return {
     storeDirPromise,
     get request() { return request; },
-    options: { env, fetchImpl, configuration, getClient: async () => client, getDeploymentClient: async () => deployment },
+    options: { env, fetchImpl, configuration: { resolve: async () => ({ values: { cloudRegion: region } }) }, getClient: async () => client, getDeploymentClient: async () => deployment },
   };
 }
 
@@ -96,6 +94,15 @@ test('显式运行时版本仍优先于 catalog 自动选择', async () => {
   const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
   assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
   assert.equal(harnessValue.request.ManagedRuntimeConfig.RuntimeVersion, '0.1.42');
+});
+
+test('线上区域自动绑定线上 PA 网关，不再误报未配置', async () => {
+  const harnessValue = harness({ region: 'cn-beijing-6' });
+  const storeDir = await harnessValue.storeDirPromise;
+  const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
+  assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
+  const binding = JSON.parse(await readFile(join(storeDir, 'assistant-binding.json'), 'utf8'));
+  assert.equal(binding.gatewayUrl, 'https://pa-desktop.agent.kspmas.ksyun.com');
 });
 
 test('旧 Studio 绑定格式按可迁移的旧记录处理，不再误报绑定损坏', async () => {
