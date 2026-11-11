@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PersonalAssistantPanel, PersonalAssistantShell, setClientReactRuntime, localBuildLabel } from '../src/client/index.mjs';
+import { PersonalAssistantPanel, PersonalAssistantShell, PERSONAL_ASSISTANT_CONFIGURATION_EVENT, setClientReactRuntime, localBuildLabel } from '../src/client/index.mjs';
 import { PersonalAssistantConversation } from '../src/client/conversation.mjs';
 
 /* ----------------------------- 夹具 ----------------------------- */
@@ -395,6 +395,45 @@ test('外壳视图连续切换 20 轮（列表↔详情↔设置↔本机授权�
   view.unmount();
   assert.equal(timers.activeCount(), 0, '卸载后不能残留定时器');
   assert.equal(errors.length, 0);
+});
+
+test('全局设置连接完成后，已挂载外壳同步配置并绑定云电脑工作面板', async t => {
+  const dom = installPanelDom(t);
+  const errors = spyConsole(t);
+  const storage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true, writable: true,
+    value: { getItem: () => null, setItem: () => {}, removeItem: () => {}, length: 0, key: () => null },
+  });
+  t.after(() => {
+    if (storage) Object.defineProperty(globalThis, 'localStorage', storage);
+    else delete globalThis.localStorage;
+  });
+  let configured = false;
+  const bindings = [];
+  const request = async operation => {
+    if (operation.endsWith('.configuration')) return configured ? { configured: true, agentId: 'ar-settings', botId: 'writer' } : { configured: false };
+    if (operation.endsWith('.desktop.status')) return { configured: false, reason: 'needs-create', candidates: [] };
+    if (operation.endsWith('.local-access.status')) return { connected: true, authorized: false, scopes: [], riskConfirm: true, grantedAt: null };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, primaryBotId: 'writer', bots: [{ botId: 'writer', displayName: '写作助理' }] };
+    if (operation.endsWith('.bots.overview')) return { bots: [{ id: 'writer', name: '写作助理', role: 'primary', status: 'idle', computer: 'connected' }], active: [], recent: [], counts: null };
+    return {};
+  };
+  const nativeWorkbench = { available: true, bind(scope) { bindings.push(scope); }, open() {} };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  await view.settle(PersonalAssistantShell, { request, nativeWorkbench });
+  assert.match(view.text(), /开通个人助理/u);
+
+  configured = true;
+  dom.window.dispatchEvent({ type: PERSONAL_ASSISTANT_CONFIGURATION_EVENT, detail: { configured: true, agentId: 'ar-settings' } });
+  await view.settle(PersonalAssistantShell, { request, nativeWorkbench });
+  assert.match(view.text(), /写作助理/u);
+  assert.deepEqual(bindings.at(-1), { agentId: 'ar-settings', botId: 'writer' });
+  view.unmount();
+  assert.equal(dom.window.listenerCount(PERSONAL_ASSISTANT_CONFIGURATION_EVENT), 0);
+  assert.equal(errors.length, 0, errors.join('\n'));
 });
 
 test('创建请求未返回时也要持续轮询进度并推进已用时', async t => {

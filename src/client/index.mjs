@@ -74,6 +74,17 @@ export const inject = Object.freeze(['slots', 'connection', 'sidebarRight']);
 export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
 export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false, autoConnect: false });
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
+/** Settings and the main panel are mounted in different DSH slots. */
+export const PERSONAL_ASSISTANT_CONFIGURATION_EVENT = 'personal-assistant:configuration-changed';
+
+function emitConfigurationChanged(configuration) {
+  const target = globalThis.window;
+  if (!target || typeof target.dispatchEvent !== 'function') return;
+  const event = typeof globalThis.CustomEvent === 'function'
+    ? new globalThis.CustomEvent(PERSONAL_ASSISTANT_CONFIGURATION_EVENT, { detail: configuration })
+    : { type: PERSONAL_ASSISTANT_CONFIGURATION_EVENT, detail: configuration };
+  try { target.dispatchEvent(event); } catch { /* 宿主卸载过程中忽略通知 */ }
+}
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
 import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard, clipboardTextOf } from './components/desktop-clipboard.mjs';
@@ -1387,9 +1398,18 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   useEffect(() => {
     aliveRef.current = true;
+    const target = globalThis.window;
+    const onConfigurationChanged = () => {
+      if (!aliveRef.current) return;
+      // The Settings slot may finish binding while this shell stays mounted
+      // behind the modal. Re-read the real configuration and scope.
+      void boot();
+    };
+    target?.addEventListener?.(PERSONAL_ASSISTANT_CONFIGURATION_EVENT, onConfigurationChanged);
     void boot();
     return () => {
       aliveRef.current = false;
+      target?.removeEventListener?.(PERSONAL_ASSISTANT_CONFIGURATION_EVENT, onConfigurationChanged);
       clearCreateTimer();
     };
     // request 由宿主注入且生命周期内稳定；挂载一次即可，后续动作都走显式刷新。
@@ -1713,6 +1733,15 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     setPanelView('chat');
   };
 
+  const openCloudComputer = () => {
+    // Prefer the host-owned right sidebar when the DSH host exposes it. Older
+    // hosts keep the page variant as a safe fallback.
+    if (nativeWorkbench?.available && scope?.agentId && scope?.botId) {
+      try { nativeWorkbench.open(); return; } catch { /* fallback below */ }
+    }
+    setPanelView('desktop');
+  };
+
   /* ---------- 渲染 ---------- */
 
   const bots = overview?.bots || [];
@@ -1863,7 +1892,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
             onToggleAllMemory: () => setShowAllMemory(value => !value),
             onDeleteMemory: id => void deleteMemory(id),
             onAddCapability: () => setNotice('添加能力入口暂未接入面板，可在 MCP 服务里配置'),
-            onOpenComputer: () => setPanelView('desktop'),
+            onOpenComputer: openCloudComputer,
             onDeleteStart: () => setDeleteConfirm({ open: true, text: '', busy: false, error: '' }),
             onDeleteCancel: () => setDeleteConfirm({ open: false, text: '', busy: false, error: '' }),
             onDeleteText: value => setDeleteConfirm(previous => ({ ...previous, text: value, error: '' })),
@@ -1878,7 +1907,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           key: `${scope?.botId || 'default'}:${chatSessionId || 'auto'}`,
           React: R, request: scopedRequest, scope, markdown: clientMarkdown,
           initialSessionId: chatSessionId, onBack: () => setPanelView('list'),
-          onOpenComputer: () => setPanelView('desktop'),
+          onOpenComputer: openCloudComputer,
           revokedAt: localRevokedAt,
           connectionDot: dotNode,
         }));
@@ -1904,7 +1933,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           onOpenChat: botId => openChat(botId),
           onOpenDetail: botId => openDetail(botId),
           onOpenMemory: botId => openDetail(botId),
-          onOpenComputer: () => setPanelView('desktop'),
+          onOpenComputer: openCloudComputer,
           onOpenSettings: openSettings,
           onOpenLocalAccess: () => setLocalAccessOpen(true),
           onToggleActivity: () => setShowAllActivity(value => !value),
@@ -2038,6 +2067,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     try {
       const current = await request('personal-assistant.configuration');
       setConfig(current);
+      emitConfigurationChanged(current);
       if (current?.configured) setBinding(null);
       else setBinding(await request('personal-assistant.desktop.status').catch(() => null));
       if (current?.configured) {
@@ -2084,6 +2114,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     setClosing(true); setError('');
     try {
       await request('personal-assistant.desktop.destroy', { confirmAgentId: agentId });
+      emitConfigurationChanged({ configured: false });
       setConfirming(false); setConfirmText('');
       setClosedNotice('个人助理已关闭：云端实例已删除，关联的云资源订单正在释放，本机绑定已清除。');
       setConfig({ configured: false }); setBots([]);
