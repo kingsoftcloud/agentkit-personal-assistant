@@ -359,6 +359,7 @@ test('外壳视图连续切换 20 轮（列表↔详情↔设置↔本机授权�
   const mountShell = () => view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
   await mountShell();
   assert.ok(view.text().includes('写作助理'), '列表视图要有 Bot 名称');
+  assert.equal(view.find(node => node.props?.['data-pa-diagnostics'] === 'true'), undefined, '主面板不应固定占用诊断页脚');
   const viewOf = () => view.find(node => node.props?.['data-panel-view'])?.props['data-panel-view'];
 
   for (let cycle = 1; cycle <= 20; cycle += 1) {

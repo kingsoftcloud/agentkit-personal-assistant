@@ -1186,20 +1186,6 @@ function settingsDraftFrom(inspect) {
 
 const SHELL_KEYFRAMES = '@keyframes pa-skeleton { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }@keyframes pa-spin { to { transform: rotate(360deg) } }';
 
-/** 页脚：诊断 + 构建号（各画板页脚口径）。 */
-function panelFooter({ h, config, selectedBotId, connection, updatedAt, build }) {
-  return h('footer', { style: { flex: 'none', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, padding: '7px 12px', borderTop: `1px solid ${PANEL_TOKENS.border}`, fontSize: 12, color: PANEL_TOKENS.inkSoft } },
-    h('details', { 'data-pa-diagnostics': 'true' },
-      h('summary', { style: { cursor: 'pointer' } }, '诊断'),
-      h('div', { style: { paddingTop: 8, lineHeight: 1.8 } },
-        h('div', null, `云端实例：${config?.agentId || '未开通'}`),
-        h('div', null, `连接标识：${selectedBotId || '未连接'}`),
-        h('div', null, `本机授权：${connection?.authorized ? '已授权' : connection?.connected ? '未授权' : '未连接'}`),
-        h('div', null, `数据刷新：${updatedAt || '—'}`),
-        h('div', null, '历史会话：按需打开，不占主界面'))),
-    h('small', { 'data-personal-assistant-build': build, style: { opacity: 0.75 } }, `构建 ${build}`));
-}
-
 /**
  * 面板外壳组件：注册在 main 槽位。
  * props 与旧 PersonalAssistantHome 对齐，便于宿主无感切换。
@@ -1243,7 +1229,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const [selectedBotId, setSelectedBotId] = useState(String(initialBotId || bootConfig?.botId || ''));
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
-  const [updatedAt, setUpdatedAt] = useState('');
   const [showAllActivity, setShowAllActivity] = useState(false);
   // —— 历史会话 ——
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1379,7 +1364,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       setOverview(normalized);
       setOverviewDegraded(normalized.degraded === true);
       writePanelCache('overview', normalized);
-      setUpdatedAt(stamp());
     } catch (failure) {
       // 降级 1：用目录拼最小概览（可点、可进详情）；降级 2：保留缓存；否则空状态。
       const fallback = fallbackBots.length ? overviewFromDirectory(fallbackBots, primaryId) : null;
@@ -1550,7 +1534,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       const normalized = normalizeDetail(raw, botId, fallback);
       setDetail(normalized); setDetailDegraded(normalized.degraded === true);
       writePanelCache(`bot-detail.${botId}`, normalized);
-      setUpdatedAt(stamp());
     } catch (failure) {
       // 降级：退回列表里的概要（可看模型与状态），记忆/能力显示空状态。
       setDetail(previous => previous || normalizeDetail({}, botId, botSummary(botId)));
@@ -1647,7 +1630,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       applySettingsDraft(raw);
       setSettingsDegraded(false);
       writePanelCache('settings-inspect', raw || {});
-      setUpdatedAt(stamp());
       try {
         const versions = await scopedCall('personal-assistant.settings.versions', { currentVersion: raw?.runtime?.version || '' });
         setSettingsVersions(versions && typeof versions === 'object' ? versions : { catalogAvailable: false, versions: [] });
@@ -2094,8 +2076,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       onClick: () => setLocalAccessOpen(false),
       style: { position: 'absolute', inset: 0, border: 'none', background: 'transparent', cursor: 'default', zIndex: 20 },
     }) : null,
-    popover,
-    panelFooter({ h, config, selectedBotId, connection, updatedAt, build: PERSONAL_ASSISTANT_CLIENT_BUILD }));
+    popover);
 }
 
 /** 可切换的模型目录：Host 侧 bot.model.update 不限制取值，这里只给常见档位。 */
