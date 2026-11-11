@@ -397,6 +397,65 @@ test('外壳视图连续切换 20 轮（列表↔详情↔设置↔本机授权�
   assert.equal(errors.length, 0);
 });
 
+test('从 Bot 详情打开云电脑时把自动连接和嵌入模式传给桌面页', async t => {
+  const dom = installPanelDom(t);
+  const storage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true, writable: true,
+    value: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  });
+  t.after(() => {
+    if (storage) Object.defineProperty(globalThis, 'localStorage', storage);
+    else delete globalThis.localStorage;
+  });
+  const requests = [];
+  const request = async operation => {
+    requests.push(operation);
+    if (operation.endsWith('.configuration')) return { configured: true, agentId: 'ar-detail', botId: 'writer' };
+    if (operation.endsWith('.local-access.status')) return { connected: true, authorized: true, scopes: [], riskConfirm: true, grantedAt: null };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, primaryBotId: 'writer', bots: [{ botId: 'writer', displayName: '写作助理' }] };
+    if (operation.endsWith('.bots.overview')) return { bots: [{ id: 'writer', name: '写作助理', role: 'primary', status: 'running', computer: 'connected' }], active: [], recent: [], counts: null };
+    if (operation.endsWith('.bot.detail')) return { bot: { id: 'writer', name: '写作助理', role: 'primary', status: 'running' }, memory: { count: 0, items: [] }, capabilities: [], computer: { connected: true, resolution: '1280×800' } };
+    if (operation.endsWith('.desktop.ticket')) return { wsUrl: 'wss://gw.example/personal-assistant/desktop/ws', ticket: 'ticket-detail', readOnly: false };
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  t.after(() => view.unmount());
+  const mount = () => view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
+
+  await mount();
+  view.find(node => node.props?.['data-pa-stat'] === '能力').props.onClick({ preventDefault() {} });
+  await mount();
+  assert.ok(buttonsWith(view, '打开云电脑')[0], 'Bot 详情必须提供云电脑入口');
+  buttonsWith(view, '打开云电脑')[0].props.onClick();
+  await mount();
+
+  assert.equal(view.find(node => node.props?.['data-panel-view'])?.props['data-panel-view'], 'desktop');
+  const panel = view.find(node => node.type === PersonalAssistantPanel);
+  assert.equal(panel?.props.connectOnMount, true, '外壳进入桌面页时必须要求自动连接');
+  assert.equal(panel?.props.embedded, true, '外壳进入桌面页时必须隐藏重复 chrome');
+  assert.match(view.text(), /云电脑/u);
+  view.unmount();
+  assert.equal(dom.FakeSocket.instances.length, 0, '假 React 不递归执行子组件 effect，本用例只校验外壳传参');
+});
+
+test('嵌入式云电脑页自动申请 ticket 且只渲染桌面内容', async t => {
+  const dom = installPanelDom(t);
+  const fake = panelRequest();
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  t.after(() => view.unmount());
+
+  await view.settle(PersonalAssistantPanel, { request: fake.request, variant: 'page', connectOnMount: true, embedded: true });
+  assert.equal(fake.ticketCount(), 1, '嵌入式桌面页应在挂载后立即申请 ticket');
+  assert.equal(view.nodes().filter(node => node.type === 'details').length, 0, '嵌入式桌面页不能再渲染诊断页脚');
+  view.unmount();
+  assert.equal(dom.FakeSocket.instances.length, 1);
+});
+
 test('全局设置连接完成后，已挂载外壳同步配置并绑定云电脑工作面板', async t => {
   const dom = installPanelDom(t);
   const errors = spyConsole(t);

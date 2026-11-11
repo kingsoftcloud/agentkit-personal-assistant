@@ -96,7 +96,10 @@ function computerSection({ h, computer, actions }) {
       h('span', { style: { fontSize: 11, color: TOKENS.inkMuted, letterSpacing: '0.04em' } }, '云电脑'),
       h('span', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, fontWeight: 500 } },
         computer?.connected ? '已连接' : '未连接',
-        computer?.resolution ? h('span', { style: { fontWeight: 400, color: TOKENS.inkMuted } }, computer.resolution) : null)),
+        computer?.resolution ? h('span', { style: { fontWeight: 400, color: TOKENS.inkMuted } }, computer.resolution) : null),
+      typeof actions?.onOpenComputer === 'function'
+        ? button({ h, label: '打开云电脑', variant: 'link', style: { alignSelf: 'flex-start', fontSize: 11, padding: '2px 0' }, onClick: () => actions.onOpenComputer?.() })
+        : null),
     h('div', { style: { ...styles.card, padding: 12, display: 'flex', flexDirection: 'column', gap: 3 } },
       h('span', { style: { fontSize: 11, color: TOKENS.inkMuted, letterSpacing: '0.04em' } }, '本周用量'),
       h('span', { style: { fontSize: 12, fontWeight: 500 } }, usage ? `${usage.tokens || '—'} tokens · ${usage.hours || '—'} 小时` : '暂无数据')));
