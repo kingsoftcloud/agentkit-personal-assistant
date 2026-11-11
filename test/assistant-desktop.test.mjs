@@ -9,7 +9,7 @@ const AGENT = 'ar-20261110220000-catalog';
 const KEY = `ak-${'0123456789abcdef'.repeat(2)}`;
 const configuration = { resolve: async () => ({ values: { cloudRegion: 'pre-online' } }) };
 
-function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} } } = {}) {
+function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, agentStatus, onStatusRead } = {}) {
   const storeDirPromise = mkdtemp(join(tmpdir(), 'pa-assistant-desktop-'));
   let created = false;
   let request;
@@ -21,8 +21,17 @@ function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} } } = {}) {
       Protocol: 'agentkit.personal-assistant.desktop.v1', LeaseId: null,
     } });
   };
-  const client = { action: async name => {
-    if (name === 'ListAgents') return { data: { Agents: created ? [{ AgentId: AGENT, Name: '个人助理', Framework: 'personal-assistant', Status: 'RUNNING' }] : [] } };
+  const client = { action: async (name, payload) => {
+    if (name === 'ListAgents') {
+      onStatusRead?.(name);
+      return { data: { Agents: created && !agentStatus ? [{ AgentId: AGENT, Name: '个人助理', Framework: 'personal-assistant', Status: 'RUNNING' }] : [] } };
+    }
+    if (name === 'GetAgent') {
+      assert.equal(payload.AgentId, AGENT);
+      onStatusRead?.(name);
+      return { data: { Basic: { AgentId: AGENT, Name: '个人助理', Status: agentStatus || 'RUNNING' },
+        Deployment: { Framework: 'personal-assistant' } } };
+    }
     if (name === 'CreateAgentApiKey') return { data: { ApiKey: KEY } };
     throw new Error(`unexpected action ${name}`);
   } };
@@ -36,6 +45,41 @@ function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} } } = {}) {
     options: { env, fetchImpl, configuration, getClient: async () => client, getDeploymentClient: async () => deployment },
   };
 }
+
+test('按订单返回的实例查询真实状态，即使列表缓存还没有该实例', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let notify;
+  const read = new Promise(resolve => { notify = resolve; });
+  const abort = new AbortController();
+  const h = harness({ agentStatus: 'RUNNING', onStatusRead: action => { notify(action); } });
+  const service = createAssistantDesktop({ ...h.options, storeDir: await h.storeDirPromise });
+  const creating = service.create({}, abort.signal);
+  const statusAction = await read;
+  if (statusAction !== 'GetAgent') {
+    abort.abort();
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(5_000);
+    await creating.catch(() => {});
+  }
+  assert.equal(statusAction, 'GetAgent');
+  assert.deepEqual(await creating, { configured: true, agentId: AGENT });
+});
+
+test('实例已失败时结束开通等待，不把失败误报成仍在创建', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let notify;
+  const read = new Promise(resolve => { notify = resolve; });
+  const abort = new AbortController();
+  const h = harness({ agentStatus: 'FAILED', onStatusRead: action => { notify(action); } });
+  const service = createAssistantDesktop({ ...h.options, storeDir: await h.storeDirPromise });
+  const result = assert.rejects(service.create({}, abort.signal), { code: 'ASSISTANT_CREATE_FAILED' });
+  if (await read !== 'GetAgent') {
+    abort.abort();
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(5_000);
+  }
+  await result;
+});
 
 test('创建个人助理跟随 catalog 最新版本，而不是使用已下架的旧版本', async () => {
   const harnessValue = harness();

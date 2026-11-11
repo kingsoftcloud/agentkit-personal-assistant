@@ -49,29 +49,17 @@ const stageIcon = ({ h, status }) => {
 function progressCard({ h, stages, elapsedMs, failed }) {
   const done = stages.filter(stage => stage.status === 'done').length;
   const percent = failed ? Math.min(100, Math.round(done / stages.length * 100)) : Math.round(done / stages.length * 100);
+  const current = stages.find(stage => stage.status === 'active') || stages.find(stage => stage.status === 'failed') || stages.find(stage => stage.status === 'pending');
   return card({ h, style: { width: '100%', maxWidth: 460, overflow: 'hidden' } },
     h('div', { 'aria-hidden': 'true', style: { height: 3, background: TOKENS.divider } },
       h('div', { style: { width: `${Math.max(3, percent)}%`, height: '100%', background: failed ? TOKENS.danger : TOKENS.accent, transition: 'width .4s ease' } })),
-    h('ul', { style: { margin: 0, padding: 0, listStyle: 'none' } },
-      stages.map((stage, index) => {
-        const state = stage.status;
-        return h('li', {
-          key: stage.id,
-          style: {
-            display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px',
-            ...(index === 0 ? {} : { borderTop: `1px solid ${TOKENS.divider}` }),
-            ...(state === 'active' ? { background: '#fafbfd' } : {}),
-          },
-        },
-        stageIcon({ h, status: state }),
-        h('div', { style: { flex: 1, minWidth: 0 } },
-          h('div', { style: { fontSize: 13, fontWeight: 500, color: state === 'pending' ? TOKENS.inkSoft : TOKENS.ink } }, stage.label),
-          h('div', { style: { fontSize: 11, color: state === 'pending' ? TOKENS.inkFaint : TOKENS.inkMuted, lineHeight: 1.6 } }, stage.detail)),
-        state === 'active'
-          ? h('span', { style: { flex: 'none', fontSize: 11, color: TOKENS.accent, fontVariantNumeric: 'tabular-nums' } }, `已用时 ${formatDuration(elapsedMs)}`)
-          : h('span', { style: { flex: 'none', fontSize: 11, color: state === 'done' ? TOKENS.success : state === 'failed' ? TOKENS.danger : TOKENS.inkFaint } },
-            state === 'done' ? '已完成' : state === 'failed' ? '失败' : '等待中'));
-      })));
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 10, padding: '14px' } },
+      stageIcon({ h, status: failed ? 'failed' : current?.status || 'active' }),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div', { style: { fontSize: 13, fontWeight: 500, color: TOKENS.ink } }, failed ? '开通没有完成' : current?.label || '正在准备个人助理'),
+        h('div', { style: { fontSize: 11, color: failed ? TOKENS.danger : TOKENS.inkMuted, lineHeight: 1.6 } }, failed ? current?.detail || '请稍后重试' : current?.detail || '云端正在准备资源')),
+      h('span', { style: { flex: 'none', fontSize: 11, color: failed ? TOKENS.danger : TOKENS.accent, fontVariantNumeric: 'tabular-nums' } },
+        failed ? '失败' : `已用时 ${formatDuration(elapsedMs)}`)));
 }
 
 function collapsedCard({ h, stages, elapsedMs, percent, onExpand }) {
@@ -123,10 +111,10 @@ export function renderCreateProgress({
       h('div', null, `预计剩余：${Number.isFinite(remaining) ? formatRemaining(remaining) : '未知'}`),
       h('div', null, `实例：${status?.instanceId || '创建中'}`)) : null,
     h('div', { style: { display: 'flex', alignItems: 'center', gap: 16 } },
-      button({ h, label: diagnosticsOpen ? '收起诊断' : '查看诊断', variant: 'link', style: { fontSize: 12, color: TOKENS.inkSoft }, onClick: () => actions.onDiagnostics?.() }),
+      button({ h, label: diagnosticsOpen ? '收起详情' : '查看详情', variant: 'link', style: { fontSize: 12, color: TOKENS.inkSoft }, onClick: () => actions.onDiagnostics?.() }),
       h('span', { 'aria-hidden': 'true', style: { width: 1, height: 12, background: TOKENS.skeleton } }),
       failed
         ? button({ h, label: '重试', variant: 'link', style: { fontSize: 12, color: TOKENS.danger }, onClick: () => actions.onRetry?.() })
-        : button({ h, label: '取消创建', variant: 'link', style: { fontSize: 12, color: TOKENS.danger }, onClick: () => actions.onCancel?.() })),
+        : button({ h, label: '稍后查看', variant: 'link', style: { fontSize: 12, color: TOKENS.inkSoft }, onClick: () => actions.onCancel?.() })),
   ];
 }

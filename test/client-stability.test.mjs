@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PersonalAssistantPanel, PersonalAssistantShell, setClientReactRuntime, localBuildLabel } from '../src/client/index.mjs';
+import { PersonalAssistantPanel, PersonalAssistantShell, PERSONAL_ASSISTANT_CONFIGURATION_EVENT, setClientReactRuntime, localBuildLabel } from '../src/client/index.mjs';
 import { PersonalAssistantConversation } from '../src/client/conversation.mjs';
 
 /* ----------------------------- 夹具 ----------------------------- */
@@ -395,6 +395,168 @@ test('外壳视图连续切换 20 轮（列表↔详情↔设置↔本机授权�
   view.unmount();
   assert.equal(timers.activeCount(), 0, '卸载后不能残留定时器');
   assert.equal(errors.length, 0);
+});
+
+test('全局设置连接完成后，已挂载外壳同步配置并绑定云电脑工作面板', async t => {
+  const dom = installPanelDom(t);
+  const errors = spyConsole(t);
+  const storage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true, writable: true,
+    value: { getItem: () => null, setItem: () => {}, removeItem: () => {}, length: 0, key: () => null },
+  });
+  t.after(() => {
+    if (storage) Object.defineProperty(globalThis, 'localStorage', storage);
+    else delete globalThis.localStorage;
+  });
+  let configured = false;
+  const bindings = [];
+  const request = async operation => {
+    if (operation.endsWith('.configuration')) return configured ? { configured: true, agentId: 'ar-settings', botId: 'writer' } : { configured: false };
+    if (operation.endsWith('.desktop.status')) return { configured: false, reason: 'needs-create', candidates: [] };
+    if (operation.endsWith('.local-access.status')) return { connected: true, authorized: false, scopes: [], riskConfirm: true, grantedAt: null };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, primaryBotId: 'writer', bots: [{ botId: 'writer', displayName: '写作助理' }] };
+    if (operation.endsWith('.bots.overview')) return { bots: [{ id: 'writer', name: '写作助理', role: 'primary', status: 'idle', computer: 'connected' }], active: [], recent: [], counts: null };
+    return {};
+  };
+  const nativeWorkbench = { available: true, bind(scope) { bindings.push(scope); }, open() {} };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  await view.settle(PersonalAssistantShell, { request, nativeWorkbench });
+  assert.match(view.text(), /开通个人助理/u);
+
+  configured = true;
+  dom.window.dispatchEvent({ type: PERSONAL_ASSISTANT_CONFIGURATION_EVENT, detail: { configured: true, agentId: 'ar-settings' } });
+  await view.settle(PersonalAssistantShell, { request, nativeWorkbench });
+  assert.match(view.text(), /写作助理/u);
+  assert.deepEqual(bindings.at(-1), { agentId: 'ar-settings', botId: 'writer' });
+  view.unmount();
+  assert.equal(dom.window.listenerCount(PERSONAL_ASSISTANT_CONFIGURATION_EVENT), 0);
+  assert.equal(errors.length, 0, errors.join('\n'));
+});
+
+test('创建请求未返回时也要持续轮询进度并推进已用时', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  let creating = false;
+  let resolveCreate;
+  const createPending = new Promise(resolve => { resolveCreate = resolve; });
+  const requests = [];
+  const request = async operation => {
+    requests.push(operation);
+    if (operation.endsWith('.configuration')) return { configured: false };
+    if (operation.endsWith('.local-access.status')) return { connected: false, authorized: false };
+    if (operation.endsWith('.desktop.status')) return { configured: false, reason: 'needs-create', candidates: [] };
+    if (operation.endsWith('.desktop.create')) { creating = true; return createPending; }
+    if (operation.endsWith('.create.status')) return creating
+      ? {
+        stage: 'instance', elapsedMs: 0,
+        stages: [{ id: 'instance', status: 'active', detail: '正在创建云端实例' }],
+        estimatedRemainingMs: 148_000,
+      }
+      : { stage: 'instance', stages: [{ id: 'instance', status: 'pending', detail: '' }], elapsedMs: 0, estimatedRemainingMs: 0 };
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+
+  await view.settle(PersonalAssistantShell, { request });
+  const create = buttonsWith(view, '开通个人助理')[0];
+  assert.ok(create, '未开通页面应提供开通按钮');
+  create.props.onClick();
+  await view.settle(PersonalAssistantShell, { request });
+  assert.match(view.text(), /正在为你准备个人助理/u);
+
+  t.mock.timers.tick(1_000);
+  await view.settle(PersonalAssistantShell, { request });
+  assert.ok(requests.some(operation => operation.endsWith('.create.status')), '创建请求未返回时也要读取 create.status');
+  assert.match(view.text(), /已用时 00:01/u, 'Host 未返回已用时时，进度页也应按本地起点推进计时');
+
+  resolveCreate({ configured: true, agentId: 'ar-created' });
+  await view.settle(PersonalAssistantShell, { request });
+  view.unmount();
+});
+
+test('重新挂载个人助理页时恢复进行中的创建状态，而不是回到开通引导', async t => {
+  let creating = true;
+  const requests = [];
+  const request = async operation => {
+    requests.push(operation);
+    if (operation.endsWith('.configuration')) return { configured: false };
+    if (operation.endsWith('.local-access.status')) return { connected: false, authorized: false };
+    if (operation.endsWith('.desktop.status')) return { configured: false, reason: 'needs-create', candidates: [] };
+    if (operation.endsWith('.create.status')) return creating
+      ? { stage: 'instance', elapsedMs: 4_000, stages: [{ id: 'instance', status: 'active', detail: '正在创建云端实例' }], estimatedRemainingMs: 146_000 }
+      : { stage: 'done', instanceId: 'ar-created', stages: [{ id: 'instance', status: 'done', detail: '已完成' }], elapsedMs: 5_000, estimatedRemainingMs: 0 };
+    if (operation.endsWith('.desktop.create')) return { configured: true, agentId: 'ar-created' };
+    return {};
+  };
+  const first = fakeReact();
+  setClientReactRuntime(first.R);
+  t.after(() => setClientReactRuntime(undefined));
+  await first.settle(PersonalAssistantShell, { request });
+  first.unmount();
+
+  const reopened = fakeReact();
+  setClientReactRuntime(reopened.R);
+  await reopened.settle(PersonalAssistantShell, { request });
+  assert.ok(requests.some(operation => operation.endsWith('.create.status')), '重新挂载时应恢复读取创建状态');
+  assert.match(reopened.text(), /正在为你准备个人助理/u, '进行中创建不能回到开通引导');
+  assert.doesNotMatch(reopened.text(), /开通个人助理.*检查开通状态/u);
+  creating = false;
+  reopened.unmount();
+});
+
+test('进度读取暂时没有响应时，开通计时仍继续', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  let creating = false;
+  const pending = new Promise(() => {});
+  const request = async operation => {
+    if (operation.endsWith('.configuration')) return { configured: false };
+    if (operation.endsWith('.desktop.status')) return { configured: false, reason: 'needs-create' };
+    if (operation.endsWith('.desktop.create')) { creating = true; return pending; }
+    if (operation.endsWith('.create.status') && creating) return pending;
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  await view.settle(PersonalAssistantShell, { request });
+  buttonsWith(view, '开通个人助理')[0].props.onClick();
+  await view.settle(PersonalAssistantShell, { request });
+  t.mock.timers.tick(3_000);
+  await view.settle(PersonalAssistantShell, { request });
+  assert.match(view.text(), /已用时 00:03/u);
+  view.unmount();
+});
+
+test('重试不会被上次的失败状态打断，当前开通返回成功后退出进度页', async t => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'] });
+  let configured = false;
+  let resolve;
+  const create = new Promise(done => { resolve = done; });
+  const request = async operation => {
+    if (operation.endsWith('.configuration')) return { configured, agentId: 'ar-current' };
+    if (operation.endsWith('.desktop.create')) return create;
+    if (operation.endsWith('.create.status')) return { stage: 'failed', error: '上次开通失败', elapsedMs: 10_000 };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, bots: [] };
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+  await view.settle(PersonalAssistantShell, { request });
+  buttonsWith(view, '重试')[0].props.onClick();
+  await view.settle(PersonalAssistantShell, { request });
+  t.mock.timers.tick(2_000);
+  await view.settle(PersonalAssistantShell, { request });
+  assert.match(view.text(), /已用时 00:02/u, '旧失败不能盖住当前的计时');
+  configured = true;
+  resolve({ configured: true, agentId: 'ar-current' });
+  await view.settle(PersonalAssistantShell, { request });
+  assert.doesNotMatch(view.text(), /创建个人助理失败|正在为你准备个人助理/u);
+  view.unmount();
 });
 
 test('重开面板状态一致：上次概览缓存先回显，网络恢复后换成真实数据', async t => {

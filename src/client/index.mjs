@@ -74,6 +74,17 @@ export const inject = Object.freeze(['slots', 'connection', 'sidebarRight']);
 export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
 export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false, autoConnect: false });
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
+/** Settings and the main panel are mounted in different DSH slots. */
+export const PERSONAL_ASSISTANT_CONFIGURATION_EVENT = 'personal-assistant:configuration-changed';
+
+function emitConfigurationChanged(configuration) {
+  const target = globalThis.window;
+  if (!target || typeof target.dispatchEvent !== 'function') return;
+  const event = typeof globalThis.CustomEvent === 'function'
+    ? new globalThis.CustomEvent(PERSONAL_ASSISTANT_CONFIGURATION_EVENT, { detail: configuration })
+    : { type: PERSONAL_ASSISTANT_CONFIGURATION_EVENT, detail: configuration };
+  try { target.dispatchEvent(event); } catch { /* 宿主卸载过程中忽略通知 */ }
+}
 import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './desktop-view.mjs';
 import { createDesktopControl } from './desktop-control.mjs';
 import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard, clipboardTextOf } from './components/desktop-clipboard.mjs';
@@ -120,39 +131,32 @@ export function unconfiguredGuidance(binding) {
   const check = { id: 'check', label: '检查开通状态' };
   if (candidates.length > 0) return {
     tone: 'reuse', title: '发现已开通的个人助理',
-    detail: `账号下已有 ${candidates.length} 个个人助理。一个子账号只需要一个，直接连接即可复用，不会重复创建。`,
+    detail: '你的个人助理已经存在，直接连接即可继续使用。',
     actions: [{ id: 'connect', label: '连接已发现的个人助理', primary: true }, check],
   };
   if (reason === 'needs-create') return {
     tone: 'create', title: '开通个人助理',
-    detail: '一个子账号可开通一个个人助理。开通后会得到一位云端持续运行的助理和一台专属云电脑，关掉 DSH Host 也会继续工作。',
+    detail: '开通后直接聊天；需要看画面或操作文件时，再打开云电脑。',
     actions: [{ id: 'create', label: '开通个人助理', primary: true }, check],
   };
   if (reason === 'credential-unavailable') return {
     tone: 'reuse', title: '正在恢复连接凭证',
-    detail: '个人助理实例已经在账号下，但云端暂时没有返回连接凭证。重新获取即可复用现有实例，不需要重新开通。',
+    detail: '你的个人助理已经存在，正在恢复连接凭证。',
     actions: [{ id: 'connect', label: '重新获取连接凭证', primary: true }, check],
   };
   const detail = typeof binding?.detail === 'string' && binding.detail ? binding.detail : '';
   return {
     tone: 'retry', title: '暂时读不到开通状态',
-    detail: `${detail}请先确认 DSH Host 已登录云端账号，再重新检查一次；确认账号下确实没有个人助理后再开通，避免重复创建。`,
+    detail: `${detail}请先登录 DSH Host 云端账号，再刷新状态。`,
     actions: [check, { id: 'create', label: '确认未开通后开通', primary: false }],
   };
 }
-
-const onboardingSteps = tone => tone === 'reuse'
-  ? ['确认账号下的个人助理实例', '直接连接即可复用，不会重复创建', '需要看画面或动手时，打开「云电脑」接管']
-  : ['登录 DSH Host 云端账号，开通个人助理（约 1–2 分钟）', '连接后即可在「个人助理」页对话，云端 7×24 运行', '需要看画面或动手时，打开「云电脑」接管'];
 
 const onboardingStyle = {
   page: { flex: '1 1 auto', minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14, padding: '32px 20px', textAlign: 'center', boxSizing: 'border-box' },
   eyebrow: { fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--dsw-alias-label-secondary, #536174)' },
   title: { margin: 0, fontSize: 20, fontWeight: 600, letterSpacing: '-0.01em' },
   detail: { margin: 0, maxWidth: 460, lineHeight: 1.75, color: 'var(--dsw-alias-label-secondary, #536174)' },
-  steps: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8, textAlign: 'left', maxWidth: 460 },
-  step: { display: 'flex', gap: 10, alignItems: 'flex-start', lineHeight: 1.7 },
-  stepIndex: { flex: 'none', width: 20, height: 20, borderRadius: 999, display: 'grid', placeItems: 'center', fontSize: 12, background: 'color-mix(in srgb, currentColor 10%, transparent)' },
   actions: { display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', marginTop: 4 },
   primary: { ...ui, borderRadius: 8, padding: '8px 16px', cursor: 'pointer', font: 'inherit', fontSize: 13, fontWeight: 500, border: 'none', background: 'var(--dsw-alias-label-primary, #17202c)', color: 'var(--dsw-alias-bg-layer-1, #fff)' },
   ghost: { ...ui, borderRadius: 8, padding: '8px 14px', cursor: 'pointer', font: 'inherit', fontSize: 13, background: 'transparent' },
@@ -723,9 +727,6 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
       h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
       h('h2', { style: onboardingStyle.title }, guidance.title)),
     h('p', { style: onboardingStyle.detail }, guidance.detail),
-    h('ol', { style: onboardingStyle.steps },
-      onboardingSteps(guidance.tone).map((text, index) => h('li', { key: text, style: onboardingStyle.step },
-        h('span', { style: onboardingStyle.stepIndex }, String(index + 1)), h('span', null, text)))),
     h('div', { style: onboardingStyle.actions },
       guidance.actions.map(action => h('button', {
         key: action.id, disabled: Boolean(busy), style: action.primary ? onboardingStyle.primary : onboardingStyle.ghost,
@@ -861,9 +862,6 @@ export function PersonalAssistantHome({ request, nativeWorkbench } = {}) {
       h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
       h('h2', { style: onboardingStyle.title }, guidance.title)),
     h('p', { style: onboardingStyle.detail }, guidance.detail),
-    h('ol', { style: onboardingStyle.steps },
-      onboardingSteps(guidance.tone).map((text, index) => h('li', { key: text, style: onboardingStyle.step },
-        h('span', { style: onboardingStyle.stepIndex }, String(index + 1)), h('span', null, text)))),
     h('div', { style: onboardingStyle.actions },
       guidance.actions.map(action => h('button', {
         key: action.id, disabled: Boolean(bindingBusy),
@@ -1068,6 +1066,14 @@ function normalizeCreateStatus(raw) {
   };
 }
 
+/** Host create.status 的默认快照也是 instance/pending；只有 active 阶段或剩余时间才代表正在创建。 */
+function isCreateProgressActive(status) {
+  if (!status || !status.stage || status.stage === 'done' || status.stage === 'failed') return false;
+  if (status.stages.some(stage => stage.status === 'active')) return true;
+  if (status.estimatedRemainingMs > 0) return true;
+  return status.stage === 'instance' && status.elapsedMs > 0;
+}
+
 function settingsDraftFrom(inspect) {
   return {
     model: String(inspect?.model ?? ''),
@@ -1178,6 +1184,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const previousAuthorizedRef = useRef(undefined);
   const createTimerRef = useRef(null);
   const createStartedAtRef = useRef(0);
+  const createAttemptRef = useRef(0);
+  const createRequestPendingRef = useRef(false);
   const createCollapsedRef = useRef(false);
   createCollapsedRef.current = createCollapsed;
 
@@ -1303,8 +1311,34 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     } finally { setHistoryLoading(false); }
   };
 
+  /** Re-open an in-flight Host creation after the panel was unmounted and mounted again. */
+  const recoverCreateProgress = async () => {
+    let status;
+    try {
+      const raw = await rpc('personal-assistant.create.status');
+      status = normalizeCreateStatus(raw);
+    } catch (failure) {
+      // Older Hosts do not expose create.status; the normal binding snapshot below remains the fallback.
+      if (!isUnavailableFailure(failure) && Number(failure?.status) !== 404) setCreateError(failure?.message || '读取创建进度失败');
+      return false;
+    }
+    if (!status || (!isCreateProgressActive(status) && status.stage !== 'failed')) return false;
+    setCreateStatus(status);
+    setCreateError(status.error || '');
+    setCreateNotice('');
+    setCreateCollapsed(false);
+    setCreateDiagnostics(false);
+    createStartedAtRef.current = Date.now() - Math.max(0, status.elapsedMs);
+    setPanelView('create');
+    if (isCreateProgressActive(status)) {
+      clearCreateTimer();
+      createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 0);
+    }
+    return true;
+  };
+
   /** 首次装载：先回显缓存，再解析 scope 与概览；任何一步失败都落回可操作的界面。 */
-  const boot = async () => {
+  const boot = async ({ recoverOpening = true } = {}) => {
     // 1) 首帧已由 state 初值回显缓存；这里兜底「本次渲染之后才写入」的概览缓存（stale-while-revalidate）。
     const cachedOverview = readPanelCache('overview');
     if (cachedOverview?.value) {
@@ -1325,6 +1359,14 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     }
     setConfig(configValue || null);
     if (!configValue?.configured) {
+      // 创建请求可能仍在 Host 内进行：重新挂载页面时先恢复进度，不能把进行中的实例误判成「尚未开通」。
+      const resumedCreate = recoverOpening && await recoverCreateProgress();
+      if (resumedCreate) {
+        removePanelCache('shell');
+        setBinding(null);
+        setOverview(null); setOverviewLoading(false);
+        return;
+      }
       // 未开通不是错误：交给开通报板（01）。desktop.status 不抛错，用它区分「没有实例」与「读不到」。
       removePanelCache('shell');
       const snapshot = await rpc('personal-assistant.desktop.status').catch(() => null);
@@ -1356,9 +1398,18 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   useEffect(() => {
     aliveRef.current = true;
+    const target = globalThis.window;
+    const onConfigurationChanged = () => {
+      if (!aliveRef.current) return;
+      // The Settings slot may finish binding while this shell stays mounted
+      // behind the modal. Re-read the real configuration and scope.
+      void boot();
+    };
+    target?.addEventListener?.(PERSONAL_ASSISTANT_CONFIGURATION_EVENT, onConfigurationChanged);
     void boot();
     return () => {
       aliveRef.current = false;
+      target?.removeEventListener?.(PERSONAL_ASSISTANT_CONFIGURATION_EVENT, onConfigurationChanged);
       clearCreateTimer();
     };
     // request 由宿主注入且生命周期内稳定；挂载一次即可，后续动作都走显式刷新。
@@ -1556,68 +1607,98 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   /* ---------- 首次创建 ---------- */
 
+  const creationInProgress = panelView === 'create' && createStatus && !['done', 'failed'].includes(createStatus.stage);
+  useEffect(() => {
+    if (!creationInProgress) return;
+    const timer = setInterval(() => {
+      const elapsedMs = Date.now() - createStartedAtRef.current;
+      setCreateStatus(previous => previous && !['done', 'failed'].includes(previous.stage) && elapsedMs > previous.elapsedMs
+        ? { ...previous, elapsedMs } : previous);
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [Boolean(creationInProgress)]);
+
   const pollDesktopReady = async () => {
     try { const value = await rpc('personal-assistant.desktop.status'); return value?.configured === true; } catch { return false; }
   };
 
+  const finishCreate = async () => {
+    const attempt = ++createAttemptRef.current;
+    clearCreateTimer();
+    setCreateNotice('创建完成，正在刷新 Bot 列表…');
+    await boot({ recoverOpening: false });
+    if (!aliveRef.current || createAttemptRef.current !== attempt) return;
+    setPanelView('list');
+    setCreateStatus(null);
+  };
+
   const pollCreateStatus = async () => {
     if (!aliveRef.current) return;
+    const attempt = createAttemptRef.current;
+    const isCurrent = () => aliveRef.current && createAttemptRef.current === attempt;
     try {
       const raw = await rpc('personal-assistant.create.status');
+      if (!isCurrent()) return;
       const status = normalizeCreateStatus(raw);
       if (!status) throw Object.assign(new Error('create.status 格式无效'), { code: 'PERSONAL_ASSISTANT_CREATE_STATUS_INVALID' });
-      // elapsedMs 缺失时用本地起点补齐，进度页的「已用时」仍然在走。
-      if (!status.elapsedMs) status.elapsedMs = Date.now() - createStartedAtRef.current;
-      setCreateStatus(status);
-      setCreateError(status.error || '');
-      if (status.stage === 'done') {
-        setCreateNotice('创建完成，正在刷新 Bot 列表…');
-        await loadConnection();
-        await boot();
-        setPanelView('list'); setCreateStatus(null);
-        return;
+      // The previous attempt can still be the Host's last status when a retry
+      // starts. The current desktop.create response owns its terminal result.
+      if (!createRequestPendingRef.current || !['done', 'failed'].includes(status.stage)) {
+        setCreateStatus(previous => ({ ...status, elapsedMs: Math.max(previous?.elapsedMs || 0, status.elapsedMs) }));
+        setCreateError(status.error || '');
+        if (status.stage === 'done') return finishCreate();
+        if (status.stage === 'failed') return;
       }
-      if (status.stage === 'failed') return;
     } catch (failure) {
+      if (!isCurrent()) return;
       // Host 没实现 create.status：退化为轮询 desktop.status，仍然能等到「已开通」；
       // 这段时间用本地阶段占位，界面不空白。
       if (isUnavailableFailure(failure) || Number(failure?.status) === 404) {
         setCreateStatus(previous => previous && previous.stage !== 'failed' ? { ...previous, stage: previous.stage || 'runtime' } : { stage: 'runtime', stages: [], elapsedMs: Date.now() - createStartedAtRef.current, estimatedRemainingMs: 90_000 });
         if (await pollDesktopReady()) {
-          setCreateNotice('创建完成，正在刷新 Bot 列表…');
-          await loadConnection();
-          await boot();
-          setPanelView('list'); setCreateStatus(null);
+          if (isCurrent()) return finishCreate();
           return;
         }
       } else {
         setCreateError(failure?.message || '读取创建进度失败，仍在后台创建');
       }
     }
-    if (createCollapsedRef.current) return;
+    if (!isCurrent() || createCollapsedRef.current) return;
     clearCreateTimer();
     createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 1000);
   };
 
   const startCreate = async () => {
-    if (bindingBusy) return;
+    if (bindingBusy || createRequestPendingRef.current) return;
+    const attempt = ++createAttemptRef.current;
+    createRequestPendingRef.current = true;
     setBindingBusy('create'); setNotice(''); setError('');
     setCreateStatus({ stage: 'instance', stages: [], elapsedMs: 0, estimatedRemainingMs: 150_000 });
     setCreateCollapsed(false); setCreateDiagnostics(false);
     setCreateError(''); setCreateNotice('');
     setPanelView('create');
     createStartedAtRef.current = Date.now();
-    try {
-      await rpc('personal-assistant.desktop.create');
-    } catch (failure) {
-      setCreateError(failure?.message || '开通请求没有被云端接受');
-      setCreateStatus({ stage: 'failed', stages: [], elapsedMs: 0, estimatedRemainingMs: 0, error: failure?.message || '开通请求没有被云端接受' });
-      setBindingBusy('');
-      return;
-    }
-    setBindingBusy('');
+    // desktop.create 可能持续数分钟；进度轮询必须与创建 RPC 并行启动，不能等 RPC 返回后才开始计时。
     clearCreateTimer();
-    createTimerRef.current = setTimeout(() => { void pollCreateStatus(); }, 1000);
+    const creating = rpc('personal-assistant.desktop.create');
+    void pollCreateStatus();
+    try {
+      const result = await creating;
+      if (aliveRef.current && createAttemptRef.current === attempt && result?.configured === true) {
+        await finishCreate();
+      }
+    } catch (failure) {
+      if (aliveRef.current && createAttemptRef.current === attempt) {
+        createAttemptRef.current += 1;
+        clearCreateTimer();
+        const message = failure?.message || '开通请求没有被云端接受';
+        setCreateError(message);
+        setCreateStatus(previous => ({ stage: 'failed', stages: [], elapsedMs: previous?.elapsedMs || 0, estimatedRemainingMs: 0, error: message }));
+      }
+    } finally {
+      createRequestPendingRef.current = false;
+      if (aliveRef.current) setBindingBusy('');
+    }
   };
 
   const toggleCreateCollapsed = () => {
@@ -1633,6 +1714,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   const cancelCreate = () => {
     // 契约没有取消创建的 RPC：创建在云端继续，这里只退出进度页，避免用户以为已取消。
+    createAttemptRef.current += 1;
     clearCreateTimer();
     setCreateNotice('创建会在云端继续；完成后会自动出现在列表里。');
     setPanelView('list');
@@ -1649,6 +1731,15 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const openHistorySession = sessionId => {
     setChatSessionId(String(sessionId || ''));
     setPanelView('chat');
+  };
+
+  const openCloudComputer = () => {
+    // Prefer the host-owned right sidebar when the DSH host exposes it. Older
+    // hosts keep the page variant as a safe fallback.
+    if (nativeWorkbench?.available && scope?.agentId && scope?.botId) {
+      try { nativeWorkbench.open(); return; } catch { /* fallback below */ }
+    }
+    setPanelView('desktop');
   };
 
   /* ---------- 渲染 ---------- */
@@ -1719,9 +1810,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
         h('div', { style: onboardingStyle.eyebrow }, '个人助理 · 开通引导'),
         h('h1', { style: onboardingStyle.title }, guidance.title),
         h('p', { style: onboardingStyle.detail }, guidance.detail),
-        h('ol', { style: onboardingStyle.steps },
-          onboardingSteps(guidance.tone).map((text, index) => h('li', { key: text, style: onboardingStyle.step },
-            h('span', { style: onboardingStyle.stepIndex }, String(index + 1)), h('span', null, text)))),
         h('div', { style: onboardingStyle.actions },
           guidance.actions.map(action => h('button', {
             key: action.id, disabled: Boolean(bindingBusy),
@@ -1804,7 +1892,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
             onToggleAllMemory: () => setShowAllMemory(value => !value),
             onDeleteMemory: id => void deleteMemory(id),
             onAddCapability: () => setNotice('添加能力入口暂未接入面板，可在 MCP 服务里配置'),
-            onOpenComputer: () => setPanelView('desktop'),
+            onOpenComputer: openCloudComputer,
             onDeleteStart: () => setDeleteConfirm({ open: true, text: '', busy: false, error: '' }),
             onDeleteCancel: () => setDeleteConfirm({ open: false, text: '', busy: false, error: '' }),
             onDeleteText: value => setDeleteConfirm(previous => ({ ...previous, text: value, error: '' })),
@@ -1819,7 +1907,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           key: `${scope?.botId || 'default'}:${chatSessionId || 'auto'}`,
           React: R, request: scopedRequest, scope, markdown: clientMarkdown,
           initialSessionId: chatSessionId, onBack: () => setPanelView('list'),
-          onOpenComputer: () => setPanelView('desktop'),
+          onOpenComputer: openCloudComputer,
           revokedAt: localRevokedAt,
           connectionDot: dotNode,
         }));
@@ -1845,7 +1933,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           onOpenChat: botId => openChat(botId),
           onOpenDetail: botId => openDetail(botId),
           onOpenMemory: botId => openDetail(botId),
-          onOpenComputer: () => setPanelView('desktop'),
+          onOpenComputer: openCloudComputer,
           onOpenSettings: openSettings,
           onOpenLocalAccess: () => setLocalAccessOpen(true),
           onToggleActivity: () => setShowAllActivity(value => !value),
@@ -1979,6 +2067,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     try {
       const current = await request('personal-assistant.configuration');
       setConfig(current);
+      emitConfigurationChanged(current);
       if (current?.configured) setBinding(null);
       else setBinding(await request('personal-assistant.desktop.status').catch(() => null));
       if (current?.configured) {
@@ -2025,6 +2114,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     setClosing(true); setError('');
     try {
       await request('personal-assistant.desktop.destroy', { confirmAgentId: agentId });
+      emitConfigurationChanged({ configured: false });
       setConfirming(false); setConfirmText('');
       setClosedNotice('个人助理已关闭：云端实例已删除，关联的云资源订单正在释放，本机绑定已清除。');
       setConfig({ configured: false }); setBots([]);
