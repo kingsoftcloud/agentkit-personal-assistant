@@ -2493,9 +2493,14 @@ export function apply(ctx) {
       // PA presentation gets its own DSH Session so switching products cannot
       // replace the PA view with the host's ordinary Chat view.
       let sessionId = '';
-      if (typeof sessions?.create === 'function') sessionId = String(await sessions.create({}) || '');
-      else if (typeof uiWorkspace?.openWorkspace === 'function') {
+      // openWorkspace is the DSH UI-owned creation path: it creates the
+      // independent presentation window and mounts the normal Session chrome
+      // before the plugin activates its view. Calling sessions.create alone
+      // yields a blank Session whose conversation.view slots are not mounted.
+      if (typeof uiWorkspace?.openWorkspace === 'function') {
         await uiWorkspace.openWorkspace(null, created => { sessionId = String(created || ''); });
+      } else if (typeof sessions?.create === 'function') {
+        sessionId = String(await sessions.create({}) || '');
       }
       if (!sessionId) throw new Error('DSH Host 未返回个人助理会话标识');
       currentPersonalAssistantSessionId = sessionId;
@@ -2506,6 +2511,24 @@ export function apply(ctx) {
     })().finally(() => { openingSession = undefined; });
     return openingSession;
   };
+
+  // DSH intentionally hides every `conversation.view` while a Session is
+  // still blank.  PA owns a real, dedicated Session, so the first open is
+  // blank by design; register a tiny activity target for the same view id
+  // and keep it active until the first PA turn arrives.  This uses the
+  // public Conversation registry and lets the normal DSH Session shell mount
+  // the PA view without manufacturing a fake transcript event.
+  if (typeof uiConversation?.views?.register === 'function') {
+    scope(() => uiConversation.views.register({
+      target: PERSONAL_ASSISTANT_VIEW_ID,
+      create: () => ({
+        empty: true,
+        replace: () => true,
+        apply: () => true,
+      }),
+      isActive: () => true,
+    }), 'personal-assistant: blank Session activity');
+  }
 
   // The PA view is a normal DSH Session target.  Opening the computer from
   // this view therefore uses the Session-owned right sidebar instead of the

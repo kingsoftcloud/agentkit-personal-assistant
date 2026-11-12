@@ -150,6 +150,7 @@ test('public DSH client entry registers a Session launcher and sidebar row', () 
 test('PA main launcher creates a dedicated DSH Session and activates the PA view', async () => {
   const entries = [];
   const activations = [];
+  const conversationViews = [];
   const opened = [];
   let created = 0;
   const slots = {
@@ -160,12 +161,16 @@ test('PA main launcher creates a dedicated DSH Session and activates the PA view
     sidebarRight: { openTab() {} },
     sessions: {
       list: { getSnapshot: () => ({ byId: {} }) },
-      async create(payload) { assert.deepEqual(payload, {}); created += 1; return `dsh-session-${created}`; },
+      async create() { assert.fail('PA should prefer the DSH UI workspace creation path'); },
     },
     uiWorkspace: {
+      async openWorkspace(workspace, prepare) { assert.equal(workspace, null); created += 1; prepare(`dsh-session-${created}`); },
       openSession(id) { opened.push(id); },
     },
-    uiConversation: { binding(id) { return { activate(view) { activations.push({ id, view }); } }; } },
+    uiConversation: {
+      views: { register(definition) { conversationViews.push(definition); return () => {}; } },
+      binding(id) { return { activate(view) { activations.push({ id, view }); } }; },
+    },
     effect(factory) { return factory(); },
     get() { return undefined; },
     slots,
@@ -174,6 +179,8 @@ test('PA main launcher creates a dedicated DSH Session and activates the PA view
   const main = entries.find(entry => entry.definition.name === 'main');
   const openSession = main.definition.inject().openSession;
   assert.equal(await openSession(), 'dsh-session-1');
+  assert.deepEqual(conversationViews.map(view => view.target), [PERSONAL_ASSISTANT_VIEW_ID]);
+  assert.equal(conversationViews[0].isActive(true), true);
   assert.deepEqual(activations, [{ id: 'dsh-session-1', view: PERSONAL_ASSISTANT_VIEW_ID }]);
   assert.deepEqual(opened, ['dsh-session-1']);
   // The second call reuses the dedicated PA Session, never an arbitrary active Session.
