@@ -285,6 +285,18 @@ test('原生云电脑自动旁观；首击等待控制确认再注入，点外�
   assert.match(panel.text(), /点画面即可接管/u);
 });
 
+test('右侧云电脑头部固定 38px，与 DSH 会话头部底线对齐', async t => {
+  const panel = panelHarness(t, { variant: 'computer' }); await flush();
+  const root = panel.nodes().find(node => node.props['data-personal-assistant-computer']);
+  const header = panel.nodes().find(node => node.props['data-personal-assistant-computer-header']);
+  assert.ok(root, '云电脑面板根节点存在');
+  assert.ok(header, '云电脑头部存在');
+  assert.equal(header.props.style.height, 38);
+  assert.equal(header.props.style.minHeight, 38);
+  assert.equal(header.props.style.flex, '0 0 38px');
+  assert.equal(header.props.style.boxSizing, 'border-box');
+});
+
 test('面板粘贴先等待 human 控制回执，再写剪贴板和发送 Ctrl+V', async t => {
   const panel = panelHarness(t, { variant: 'native-tab', features: ['desktop-handoff/v1'] }); await flush();
   const socket = panel.sockets.at(-1); socket.open();

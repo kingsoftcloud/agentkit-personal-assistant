@@ -772,7 +772,10 @@ export function PersonalAssistantPanel({ request, initialBotId = '', openInSideb
   const pillStyle = { ...buttonStyle, borderRadius: 999, padding: '7px 16px', border: 'none', fontWeight: 500, background: 'var(--dsw-alias-label-primary, #17202c)', color: 'var(--dsw-alias-bg-layer-1, #fff)' };
   if (computerVariant) {
     return h('section', { 'data-personal-assistant-computer': 'true', style: { ...ui, border: 'none', height: '100%', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--dsw-alias-bg-base, #fff)', color: 'inherit', fontSize: 13 } },
-      variant !== 'native-tab' ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', borderBottom: ui.border } },
+      variant !== 'native-tab' ? h('div', { 'data-personal-assistant-computer-header': 'true', style: {
+        display: 'flex', alignItems: 'center', gap: 8, height: 38, minHeight: 38, flex: '0 0 38px',
+        boxSizing: 'border-box', padding: '8px 12px', borderBottom: ui.border,
+      } },
         h('strong', { style: { fontWeight: 500 } }, '云电脑'),
         h('span', { role: 'status', 'aria-live': 'polite', style: { color: secondaryInk, fontSize: 12 } }, stateText),
         null) : null,
