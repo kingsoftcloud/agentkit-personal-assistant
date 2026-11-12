@@ -55,6 +55,44 @@ export function createAssistantWorkbench({ sidebarRight, slots, panelId = ASSIST
   return api;
 }
 
+/**
+ * Session-scoped bridge for the DSH 0.2.2 sidebar.
+ *
+ * The public `sidebarRight.openTab()` API is deliberately session-owned: it
+ * rejects calls made from a global `main` panel because no Session surface is
+ * mounted there.  Personal Assistant's conversation view creates this small
+ * adapter so the cloud computer remains a native right-side tab beside the
+ * conversation instead of falling back to a full-screen page.
+ */
+export function createSessionAssistantWorkbench({ sidebarRight, kind = ASSISTANT_COMPUTER_KIND } = {}) {
+  const available = typeof sidebarRight?.openTab === 'function';
+  const unavailableReason = '当前 DSH Session 未提供原生云电脑侧栏，请更新 DSH Host 后重试。';
+  let binding;
+  let disposed = false;
+  const requireAvailable = () => {
+    if (!available) throw Object.assign(new Error(unavailableReason), { code: 'PERSONAL_ASSISTANT_NATIVE_SIDEBAR_REQUIRED' });
+    if (disposed) throw new Error('云电脑侧栏已关闭');
+  };
+  return {
+    available,
+    unavailableReason,
+    bind(scope, request) {
+      requireAvailable();
+      if (!scope?.agentId || !scope?.botId || typeof request !== 'function') throw new Error('云端助理尚未连接');
+      binding = Object.freeze({ scope: Object.freeze({ ...scope }), request });
+    },
+    open() {
+      requireAvailable();
+      if (!binding) return;
+      // DSH owns the pane width, expansion state, and full-screen affordance.
+      // The params are advisory metadata for the tab body; the active Session
+      // identity is supplied by DSH's scoped slot runtime.
+      sidebarRight.openTab(kind, { params: { ...binding.scope } });
+    },
+    dispose() { disposed = true; binding = undefined; },
+  };
+}
+
 /** 仅渲染已授权原生 tab 的内容；窗口与全屏均归 DSH 所有。 */
 export function AssistantNativeRightbar({ React: R, workbench, Panel, active = true, fullscreen = false }) {
   const { createElement: h, useSyncExternalStore } = R;

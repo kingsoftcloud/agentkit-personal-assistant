@@ -108,6 +108,8 @@ const QUEUE_RETRY_DELAY_MS = 1500;
  * 的直接原因；也不能按正常间隔继续打云端，避免故障期间放大压力。
  */
 const POLL_INTERVAL_MS = 600;
+// 进行中的回合用更短的间隔，尽快把云端增量画出来；空闲时仍保持较低请求频率。
+const ACTIVE_POLL_INTERVAL_MS = 180;
 const POLL_BACKOFF_BASE_MS = 1200;
 const POLL_BACKOFF_MAX_MS = 15_000;
 /**
@@ -358,7 +360,7 @@ const conversationSkeleton = h => {
   return h('div', { 'data-pa-conversation-skeleton': 'true', 'aria-hidden': 'true', style: { display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 8 } }, rows);
 };
 
-export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', revokedAt = '', connectionDot = null } = {}) {
+export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', revokedAt = '', connectionDot = null, sessionSurface = false } = {}) {
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
   const [phase, setPhase] = useState('loading');
@@ -682,7 +684,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     const stale = () => cancelled || !aliveRef.current
       || generation !== generationRef.current || sessionRef.current !== activeSession;
     const tick = async () => {
-      let delay = POLL_INTERVAL_MS;
+      let delay = awaitingRef.current ? ACTIVE_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
       let stop = false;
       try {
         const page = await call('personal-assistant.session.events', { sessionId: activeSession, cursor: cursorRef.current });
@@ -723,9 +725,9 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
         if (!stop && !stale()) timer = setTimeout(tick, delay);
       }
     };
-    timer = setTimeout(tick, 200);
+    timer = setTimeout(tick, awaiting ? 40 : 200);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [phase, sessionId, call, mergeEvents, openSession, calibrated]);
+  }, [phase, sessionId, call, mergeEvents, openSession, calibrated, awaiting]);
 
   // 增量到达后节流落一次本地快照；写失败静默降级（见 writeSessionSnapshot）。
   // 节流窗口内的最后一条消息不能丢：补一次尾写，避免重开面板时缓存停在中途。
@@ -891,7 +893,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   }, [queue.length]);
 
   // DSH Host(macOS) 的拖拽区靠 data-window-drag 标记：PA 页面没有外壳 tab strip，需要自己的头部行。
-  const header = h('header', { style: { ...styles.header, minHeight: 52, padding: '8px 16px', gap: 8 }, 'data-window-drag': '' },
+  const header = h('header', { style: { ...styles.header, ...(sessionSurface ? { borderBottom: 'none' } : {}), minHeight: 52, padding: '8px 16px', gap: 8 }, 'data-window-drag': '' },
     typeof onBack === 'function' ? h('button', {
       type: 'button', 'aria-label': '返回', title: '返回 Bot 列表', 'data-window-drag-recall': '', onClick: onBack,
       style: { flex: 'none', width: 28, height: 28, display: 'grid', placeItems: 'center', padding: 0, border: 'none', borderRadius: 8, background: 'transparent', color: 'var(--dsw-alias-label-secondary, #536174)', cursor: 'pointer' },

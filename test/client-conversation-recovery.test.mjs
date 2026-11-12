@@ -259,6 +259,20 @@ function conversation(t, host, { scope = SCOPE, initialSessionId = '' } = {}) {
 
 /* ----------------------------- 用例 ----------------------------- */
 
+test('进行中回合使用短轮询，消息增量不必等待空闲轮询间隔', async t => {
+  installStorage(t, {});
+  const host = fakeHost();
+  const view = conversation(t, host);
+  await view.settle();
+  await view.type('立刻同步');
+  await view.send();
+  const before = view.requestsOf('session.events').length;
+  await view.tick(39);
+  assert.equal(view.requestsOf('session.events').length, before, '活动轮询应先等待短间隔');
+  await view.tick(1);
+  assert.ok(view.requestsOf('session.events').length > before, '活动轮询应在 40ms 左右开始拉取增量');
+});
+
 test('快照请求超时：缓存先回显，退避自动重试校准后恢复增量轮询', async t => {
   installStorage(t, {
     [pointerKey(SCOPE)]: 's1',
