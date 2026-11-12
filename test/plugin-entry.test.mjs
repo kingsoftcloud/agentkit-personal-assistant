@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { apply, createRuntime, name } from '../src/index.mjs';
 import { DshSessionControllerUnavailableError } from '../src/dsh-session-bridge.mjs';
 import {
@@ -205,6 +207,16 @@ test('desktop client maps display coordinates and drops oversized/stale frames',
 
 test('client apply rejects a context without the public DSH slots service', () => {
   assert.throws(() => applyClient({}), /public DSH slots service/);
+});
+
+test('Session surface package declares the DSH UI services it injects', async () => {
+  const packageJson = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'));
+  const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../personal-assistant.plugin.json'), 'utf8'));
+  const inject = packageJson.dsh?.client?.inject || [];
+  for (const name of ['@deepseek-ai/dsh-client-ui-session', '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-workspace']) {
+    assert.ok(inject.includes(name), `${name} must be declared for the PA Session surface`);
+  }
+  assert.equal(manifest.version, packageJson.version, 'plugin manifest and npm package versions must match');
 });
 
 test('右侧栏云电脑标签页与设置页注册在插件作用域内，卸载即撤销', () => {

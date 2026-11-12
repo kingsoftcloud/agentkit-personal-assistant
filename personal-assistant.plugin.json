@@ -2,7 +2,7 @@
   "$schema": "./personal-assistant.plugin.schema.json",
   "format": "agentkit-personal-assistant.plugin/v1",
   "pluginId": "@kingsoftcloud/agentkit-personal-assistant",
-  "version": "0.1.14",
+  "version": "0.1.20",
   "compatibility": {
     "requiredDsh": "0.2.2-rc.1",
     "requiredHostApi": "dsh-native/0.2.2-rc.1",
