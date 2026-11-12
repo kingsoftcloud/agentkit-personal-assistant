@@ -36,7 +36,7 @@ function conversation(t, options = {}) {
     if (operation.endsWith('.turn.submit')) return { turnId: 'layout-turn' };
     return {};
   };
-  const render = () => { cursor = 0; dirty = false; tree = PersonalAssistantConversation({ React: R, request }); for (const effect of pendingEffects.splice(0)) effect(); };
+  const render = () => { cursor = 0; dirty = false; tree = PersonalAssistantConversation({ React: R, request, sessionSurface: options.sessionSurface === true }); for (const effect of pendingEffects.splice(0)) effect(); };
   const settle = async () => { for (let i = 0; i < 15; i++) { if (dirty) render(); await new Promise(resolve => setImmediate(resolve)); } return tree; };
   const nodes = node => node && typeof node === 'object' ? [node, ...node.children.flatMap(nodes)] : [];
   t.after(() => { for (const hook of hooks) hook?.cleanup?.(); });
@@ -52,6 +52,12 @@ test('长历史只滚动消息区，不滚动宿主或输入框祖先', async t 
   assert.equal(messages.props.style.minHeight, 0); assert.equal(messages.props.style.overflowY, 'auto');
   assert.equal(composer.props.style.flex, '0 0 auto');
   assert.ok(!messages.children.includes(composer), '输入框不属于消息滚动区');
+});
+
+test('DSH Session surface 不重复绘制与云电脑分栏的横向边界', async t => {
+  const view = conversation(t, { sessionSurface: true }); await view.settle();
+  const header = view.nodes().find(node => node.type === 'header');
+  assert.equal(header?.props.style.borderBottom, 'none');
 });
 
 test('读历史时新事件不抢滚动位置，本人发送后回到消息底部且保留输入入口', async t => {

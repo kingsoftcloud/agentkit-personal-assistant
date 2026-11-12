@@ -145,7 +145,7 @@ test('public DSH client entry registers a Session launcher and sidebar row', () 
   assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
 });
 
-test('PA main launcher creates or reuses one DSH Session and activates the PA view', async () => {
+test('PA main launcher creates a dedicated DSH Session and activates the PA view', async () => {
   const entries = [];
   const activations = [];
   const opened = [];
@@ -156,10 +156,11 @@ test('PA main launcher creates or reuses one DSH Session and activates the PA vi
   };
   const ctx = {
     sidebarRight: { openTab() {} },
-    sessions: { list: { getSnapshot: () => ({ byId: {} }) } },
-    workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId: 'workspace-1', sessionIds: [] }] }) } },
+    sessions: {
+      list: { getSnapshot: () => ({ byId: {} }) },
+      async create(payload) { assert.deepEqual(payload, {}); created += 1; return `dsh-session-${created}`; },
+    },
     uiWorkspace: {
-      async connectWorkspace(id) { assert.equal(id, 'workspace-1'); created += 1; return `dsh-session-${created}`; },
       openSession(id) { opened.push(id); },
     },
     uiConversation: { binding(id) { return { activate(view) { activations.push({ id, view }); } }; } },
@@ -173,7 +174,7 @@ test('PA main launcher creates or reuses one DSH Session and activates the PA vi
   assert.equal(await openSession(), 'dsh-session-1');
   assert.deepEqual(activations, [{ id: 'dsh-session-1', view: PERSONAL_ASSISTANT_VIEW_ID }]);
   assert.deepEqual(opened, ['dsh-session-1']);
-  // The second call joins the stored DSH Session instead of creating another one.
+  // The second call reuses the dedicated PA Session, never an arbitrary active Session.
   ctx.sessions.list.getSnapshot = () => ({ byId: { 'dsh-session-1': { removed: false } } });
   assert.equal(await openSession(), 'dsh-session-1');
   assert.equal(created, 1);
