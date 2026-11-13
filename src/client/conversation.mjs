@@ -34,6 +34,8 @@
  */
 
 import { renderMarkdown } from './markdown.mjs';
+import { cx, icon, themeStyle } from './views/theme.mjs';
+import { button, iconButton } from './views/ui.mjs';
 
 /**
  * 宿主 DSH 的 MarkdownText 需要的 chrome 文案（代码块复制/折行、脚注）。
@@ -63,6 +65,8 @@ export function renderAssistantBody(h, text, styles, markdown) {
 }
 
 const EMPTY_HINT = '有什么可以帮你？';
+/** 空会话的建议语：只是把文字填进输入框，不会直接发送。 */
+export const DEFAULT_SUGGESTIONS = Object.freeze(['整理我这周的待办并排出优先级', '把桌面上的截图归档到按日期命名的文件夹', '查一下明天的日程，有冲突提醒我', '帮我起草一封项目进度邮件']);
 /** 这两类失败是“消息根本没开始跑”的瞬时状态：云端现在会按会话排队重试，
  * 历史会话里残留的记录不再渲染成任务失败，避免对话结束后一直显示红色失败。 */
 const TRANSIENT_TURN_ERRORS = new Set(['DSH_SESSION_BUSY', 'DSH_TURN_TIMEOUT']);
@@ -155,7 +159,7 @@ const styles = {
     border: '1px solid var(--dsw-alias-border-default, #d8dee8)', background: 'transparent',
     color: 'inherit', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', font: 'inherit', fontSize: 12,
   },
-  scroller: { flex: '1 1 0px', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overscrollBehavior: 'contain', boxSizing: 'border-box', padding: '20px 16px 8px' },
+  scroller: { flex: '1 1 0px', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden' },
   thread: { maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 },
   row: { display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' },
   rowUser: { display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' },
@@ -191,7 +195,7 @@ const styles = {
   step: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #536174)', lineHeight: 1.7, overflowWrap: 'anywhere' },
   centered: { flex: 1, display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' },
   centeredInner: { maxWidth: 420, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center' },
-  composer: { flex: '0 0 auto', minWidth: 0, boxSizing: 'border-box', padding: '8px 16px 14px' },
+  composer: { flex: '0 0 auto', minWidth: 0 },
   composerInner: {
     maxWidth: 720, minWidth: 0, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 6,
     border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 16, padding: '10px 10px 8px 12px',
@@ -334,33 +338,22 @@ const sameSnapshotMessages = (before, after) => Array.isArray(before) && before.
   && after.every((row, index) => before[index]?.id === row.id && before[index]?.role === row.role && before[index]?.text === row.text);
 
 /** 与 DSH 原生对话框一致的发送箭头。 */
-const sendGlyph = h => h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true },
-  h('path', { d: 'M12 19V5M5 12l7-7 7 7' }));
-const plusGlyph = h => h('svg', { width: 15, height: 15, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', 'aria-hidden': true },
-  h('path', { d: 'M12 5v14M5 12h14' }));
-const closeGlyph = h => h('svg', { width: 10, height: 10, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2.4, strokeLinecap: 'round', 'aria-hidden': true },
-  h('path', { d: 'M6 6l12 12M18 6L6 18' }));
 
 /**
  * 首屏骨架：与真实气泡同构（用户气泡靠右、助理正文靠左），
  * 数据到后整块替换，避免整页 spinner 或空白闪一下。
  */
 const conversationSkeleton = h => {
-  const bone = (key, width, height, extra = null) => h('span', {
-    key, 'aria-hidden': 'true',
-    style: { display: 'block', width, height, borderRadius: height >= 20 ? 12 : 6, background: '#e5e9f0', animation: 'pa-skeleton 1.4s ease-in-out infinite', ...(extra || {}) },
-  });
+  const bone = (key, width, height) => h('span', { key, 'aria-hidden': 'true', className: 'pa-skeleton', style: { width, height } });
   const rows = [];
   for (let index = 0; index < 3; index += 1) {
-    rows.push(h('div', { key: `user-${index}`, style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 } },
-      bone('who', 34, 10), bone('bubble', index === 0 ? '62%' : '48%', 34, { background: 'color-mix(in srgb, #2f6bff 10%, transparent)', animation: 'none' })));
-    rows.push(h('div', { key: `assistant-${index}`, style: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6 } },
-      bone('who', 28, 10), bone('line-1', `${78 - index * 12}%`, 12), bone('line-2', `${58 - index * 8}%`, 12)));
+    rows.push(h('div', { key: `user-${index}`, className: 'pa-skel-user' }, bone('bubble', index === 0 ? '62%' : '48%', 40)));
+    rows.push(h('div', { key: `assistant-${index}`, className: 'pa-skel-ai' }, bone('line-1', `${78 - index * 12}%`, 12), bone('line-2', `${58 - index * 8}%`, 12)));
   }
-  return h('div', { 'data-pa-conversation-skeleton': 'true', 'aria-hidden': 'true', style: { display: 'flex', flexDirection: 'column', gap: 14, paddingTop: 8 } }, rows);
+  return h('div', { 'data-pa-conversation-skeleton': 'true', 'aria-hidden': 'true', className: 'pa-skel-thread' }, rows);
 };
 
-export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', revokedAt = '', connectionDot = null, sessionSurface = false } = {}) {
+export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', revokedAt = '', connectionDot = null, sessionSurface = false, chrome = true, composerLeading = null, controlsRef = null, suggestions = DEFAULT_SUGGESTIONS } = {}) {
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
   const [phase, setPhase] = useState('loading');
@@ -385,6 +378,8 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   // 撤销本机授权后的系统提示：只在下一次进入面板前留在本次对话流里，
   // 不写本地快照（它描述的是本机状态，不属于云端会话内容）。
   const [systemNotices, setSystemNotices] = useState([]);
+  // 执行步骤分组的展开状态：key 为分组首条 step 的 id。
+  const [openSteps, setOpenSteps] = useState({});
   const cursorRef = useRef(0);
   const outboxRef = useRef(new Map());
   const queueRef = useRef([]);
@@ -892,20 +887,61 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
     return () => window.removeEventListener('beforeunload', warn);
   }, [queue.length]);
 
-  // DSH Host(macOS) 的拖拽区靠 data-window-drag 标记：PA 页面没有外壳 tab strip，需要自己的头部行。
-  const header = h('header', { style: { ...styles.header, ...(sessionSurface ? { borderBottom: 'none' } : {}), minHeight: 52, padding: '8px 16px', gap: 8 }, 'data-window-drag': '' },
-    typeof onBack === 'function' ? h('button', {
-      type: 'button', 'aria-label': '返回', title: '返回 Bot 列表', 'data-window-drag-recall': '', onClick: onBack,
-      style: { flex: 'none', width: 28, height: 28, display: 'grid', placeItems: 'center', padding: 0, border: 'none', borderRadius: 8, background: 'transparent', color: 'var(--dsw-alias-label-secondary, #536174)', cursor: 'pointer' },
-    }, h('svg', { 'aria-hidden': 'true', width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none' }, h('path', { d: 'M9.8 3.4 5.2 8l4.6 4.6', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }))) : null,
-    h('h1', { style: styles.title }, '个人助理'),
-    h('span', { style: styles.status }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
-    h('span', { style: styles.spacer }),
-    connectionDot || null,
-    h('button', { type: 'button', 'data-window-drag-recall': '', disabled: phase === 'loading' || sending || awaiting || queue.length > 0, onClick: () => void createSession(), 'aria-label': '新建会话', title: queue.length > 0 ? '请等待排队消息发送后再新建会话' : '新建云端会话', style: styles.ghost }, '新会话'),
-    onOpenComputer ? h('button', { type: 'button', 'data-window-drag-recall': '', onClick: onOpenComputer, 'aria-label': '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', style: { ...styles.ghost, display: 'inline-flex', alignItems: 'center', gap: 6 } }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true }, h('rect', { x: 3, y: 4, width: 18, height: 13, rx: 2 }), h('path', { d: 'M8 21h8M12 17v4' })), '云电脑') : null);
+  // 页头可由外壳接管（chrome=false）：外壳提供页签、历史、新会话与云电脑入口。
+  const busy = sending || awaiting || queue.length > 0;
+  if (controlsRef && typeof controlsRef === 'object') {
+    controlsRef.current = { createSession: () => void createSession(), openSession: id => void openSession(id), sessionId, sessions, busy, phase };
+  }
+  const header = chrome ? h('header', { className: 'pa-head', style: { ...(sessionSurface ? { borderBottom: 'none' } : {}) }, 'data-window-drag': '' },
+    typeof onBack === 'function' ? iconButton({ h, name: 'chevL', label: '返回', title: '返回', 'data-window-drag-recall': '', onClick: onBack }) : null,
+    h('h1', { className: 'pa-title' }, '个人助理'),
+    h('span', { className: 'pa-cap pa-hide-narrow' }, phase === 'ready' ? '云端常驻，关掉窗口也会继续' : phase === 'loading' ? '正在连接…' : '连接不可用'),
+    h('div', { className: 'pa-head-actions' },
+      connectionDot || null,
+      iconButton({ h, name: 'compose', label: '新建会话', title: queue.length > 0 ? '请等待排队消息发送后再新建会话' : '新建云端会话', 'data-window-drag-recall': '', disabled: phase === 'loading' || busy, onClick: () => void createSession() }),
+      onOpenComputer ? button({ h, label: '云电脑', icon: icon(h, 'monitor', { size: 14 }), 'data-window-drag-recall': '', ariaLabel: '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', onClick: onOpenComputer }) : null)) : null;
 
-  return h('section', { 'data-personal-assistant-conversation': 'true', 'data-agent-id': text(scope?.agentId) || undefined, 'data-bot-id': text(scope?.botId) || undefined, 'data-session-id': sessionId || undefined, 'data-runtime-instance-id': runtimeInstanceId || undefined, style: styles.page, onClick: async event => {
+  // 连续的执行步骤折叠成一组：「已完成 N 步」，点开看明细；全部节点始终渲染，折叠只靠样式。
+  const blocks = [];
+  for (const message of messages) {
+    if (message.role === 'step') {
+      const last = blocks[blocks.length - 1];
+      if (last?.kind === 'steps') last.items.push(message);
+      else blocks.push({ kind: 'steps', id: `steps-${message.id}`, items: [message] });
+    } else blocks.push({ kind: 'message', id: message.id, message });
+  }
+  const lastBlock = blocks[blocks.length - 1];
+  const renderSteps = block => {
+    const live = awaiting && block === lastBlock;
+    const open = openSteps[block.id] ?? live;
+    const failed = block.items.some(item => item.status === 'failed');
+    return h('div', { key: block.id, className: 'pa-steps', 'data-open': open ? 'true' : 'false', 'data-pa-steps': String(block.items.length) },
+      h('button', { type: 'button', className: 'pa-steps-toggle', 'aria-expanded': open ? 'true' : 'false', onClick: () => setOpenSteps(previous => ({ ...previous, [block.id]: !open })) },
+        live ? icon(h, 'spinner', { size: 14, className: 'pa-spin' }) : icon(h, failed ? 'warn' : 'check', { size: 14, color: failed ? 'var(--pa-danger)' : 'var(--pa-ok)' }),
+        h('span', null, live ? `正在执行 · ${block.items.length} 步` : `已完成 ${block.items.length} 步`),
+        icon(h, 'chevR', { size: 14, className: 'pa-chev' })),
+      h('div', { className: 'pa-steps-list' }, block.items.map(item => h('div', { key: item.id, className: cx('pa-step', item.status === 'failed' && 'failed') },
+        h('i', { className: 'pa-dot', style: { marginTop: 7 } }), h('span', null, item.text)))));
+  };
+  const renderMessage = message => {
+    const mine = message.role === 'user';
+    if (mine) {
+      return h('div', { key: message.id, className: 'pa-msg-user' },
+        h('div', { className: 'pa-bubble' }, message.text || '…'),
+        message.status === 'failed' ? h('div', { className: 'pa-msg-meta danger' }, h('span', null, message.failure),
+          h('button', { type: 'button', className: 'pa-link danger underline', onClick: () => void submit(outboxRef.current.get(message.clientTurnId)), disabled: sending }, '重试发送')) : null);
+    }
+    return h('div', { key: message.id, className: 'pa-msg-ai' }, renderAssistantBody(h, message.text, styles, markdown),
+      message.status === 'failed' ? h('div', { className: 'pa-msg-meta danger', style: { justifyContent: 'flex-start' } }, h('span', null, message.failure)) : null);
+  };
+  const emptyThread = messages.length === 0;
+  const hello = emptyThread && phase === 'ready' ? h('div', { className: 'pa-hello', 'data-pa-empty': 'true' },
+    h('span', { className: 'pa-hero-ic', style: { width: 48, height: 48 } }, icon(h, 'spark', { size: 22 })),
+    h('h1', null, EMPTY_HINT),
+    h('p', { className: 'pa-sub' }, '助理常驻云端，关掉窗口任务也会继续；需要操作电脑时会自动使用云电脑。'),
+    suggestions.length ? h('div', { className: 'pa-suggest' }, suggestions.map(item => h('button', { key: item, type: 'button', onClick: () => setDraft(item) }, item))) : null) : null;
+
+  return h('section', { 'data-personal-assistant-conversation': 'true', 'data-agent-id': text(scope?.agentId) || undefined, 'data-bot-id': text(scope?.botId) || undefined, 'data-session-id': sessionId || undefined, 'data-runtime-instance-id': runtimeInstanceId || undefined, className: cx('pa', 'pa-chat'), style: styles.page, onClick: async event => {
     const link = event.target.closest?.('a[href^="cloud-file:"]');
     if (!link) return;
     event.preventDefault();
@@ -916,67 +952,46 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       const download = document.createElement('a'); download.href = url; download.download = value.name; download.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (failure) { setError(failure.message || '云端文件下载失败'); }
-  } }, header,
-    h('style', null, '@keyframes pa-awaiting { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }@keyframes pa-skeleton { 0%, 100% { opacity: 1 } 50% { opacity: 0.45 } }'),
+  } },
+    chrome ? themeStyle(h) : null,
+    header,
     // 有缓存时校准失败只做提示：保留已回显的内容，并可手动触发一次重新校准（后台本来也在自动重试）。
-    error && messages.length > 0 ? h('div', { role: 'alert', style: { padding: '8px 16px', background: '#fff0d6' } },
-      h('span', null, error),
-      !calibrated ? h('button', { type: 'button', style: { ...styles.ghost, marginLeft: 8 }, onClick: () => void bootstrap() }, '重新校准') : null) : null,
-    h('div', { ref: scrollerRef, 'data-personal-assistant-messages': 'true', style: styles.scroller, onScroll: event => {
+    error && messages.length > 0 ? h('div', { role: 'alert', className: 'pa-alert' },
+      icon(h, 'warn', { size: 14 }), h('span', { className: 'pa-grow pa-ellipsis' }, error),
+      !calibrated ? h('button', { type: 'button', className: 'pa-link underline', style: { color: 'inherit' }, onClick: () => void bootstrap() }, '重新校准') : null) : null,
+    h('div', { ref: scrollerRef, 'data-personal-assistant-messages': 'true', className: 'pa-thread-scroll', style: { ...styles.scroller, ...(hello ? { display: 'flex', flexDirection: 'column' } : {}) }, onScroll: event => {
       const element = event.currentTarget;
       followLatestRef.current = element.scrollHeight - element.clientHeight - element.scrollTop < 64;
     } },
-      h('div', { style: styles.thread },
-        messages.length === 0
-          ? (phase === 'error' ? h('div', { style: { ...styles.centeredInner, margin: '0 auto', paddingTop: 40 } },
-            h('strong', null, '暂时连不上个人助理'), h('span', { style: styles.status }, error || '请稍后重试'),
-            h('button', { style: styles.ghost, onClick: () => void bootstrap() }, '重试'))
-            : phase === 'loading' ? conversationSkeleton(h) : h('div', { style: { ...styles.status, paddingTop: 40, textAlign: 'center' } }, EMPTY_HINT))
+      hello,
+      h('div', { className: 'pa-thread', style: hello ? { display: 'none' } : undefined },
+        emptyThread
+          ? (phase === 'error' ? h('div', { className: 'pa-empty', style: { paddingTop: 48 } },
+            h('strong', null, '暂时连不上个人助理'), h('span', { className: 'pa-sub' }, error || '请稍后重试'),
+            button({ h, label: '重试', size: 'sm', onClick: () => void bootstrap() }))
+            : phase === 'loading' ? conversationSkeleton(h) : null)
           : null,
-        messages.map(message => {
-          if (message.role === 'step') return h('div', { key: message.id, style: styles.step }, `· ${message.text}`);
-          const mine = message.role === 'user';
-          return h('div', { key: message.id, style: mine ? styles.rowUser : styles.row },
-            h('span', { style: styles.who }, mine ? '你' : '助理'),
-            h('div', { style: mine ? styles.bubbleUser : styles.bubble },
-              mine ? (message.text || '…') : renderAssistantBody(h, message.text, styles, markdown)),
-            message.status === 'failed' ? h('button', { onClick: () => void submit(outboxRef.current.get(message.clientTurnId)), disabled: sending }, `${message.failure} · 重试发送`) : null);
-        }),
+        blocks.map(block => (block.kind === 'steps' ? renderSteps(block) : renderMessage(block.message))),
         // 本机授权撤销后的系统提示：不属于云端消息，不落快照，只在本次面板会话里保留。
-        systemNotices.map(notice => h('div', {
-          key: notice.id, role: 'status', 'data-pa-system-notice': 'local-access-revoked',
-          style: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 10px', borderRadius: 8, background: '#fff0d6', color: '#946200', fontSize: 12, lineHeight: 1.7 },
-        },
-        h('span', { 'aria-hidden': 'true', style: { flex: 'none', marginTop: 1 } }, '!'),
-        h('span', { style: { flex: 1, minWidth: 0 } },
-          notice.text,
-          h('span', { style: { color: '#76808e' } }, '；本机控制入口已禁用，云电脑与云端会话不受影响。')))),
-        awaiting ? h('div', { key: 'awaiting', style: styles.row },
-          h('span', { style: styles.who }, '助理'),
-          h('div', { style: { ...styles.bubble, color: 'var(--dsw-alias-label-secondary, #536174)' } },
-            h('span', { style: styles.pulse }, progressText || '正在处理…'))) : null,
-        queue.map(item => h('div', { key: `queued-${item.clientTurnId}`, style: styles.rowUser },
-          h('span', { style: styles.who }, '你 · 排队中'),
-          h('div', { style: styles.queueBubble }, `${item.text}${item.uploads?.length ? `（${item.uploads.length} 个附件待发）` : ''}`),
-          h('div', { style: styles.queueRow },
-            h('span', { style: styles.queueHint }, item.attempts ? '云电脑仍在处理上一轮，稍后自动重发' : '已排队，本轮结束后发送'),
-            h('button', {
-              type: 'button', 'aria-label': `撤回排队消息：${item.text.slice(0, 24)}`, title: '撤回这条排队消息',
-              style: styles.queueCancel, onClick: () => cancelQueued(item.clientTurnId),
-            }, closeGlyph(h), '撤回')))))),
-    h('div', { 'data-personal-assistant-composer': 'true', style: styles.composer },
-      queueNotice ? h('div', { role: 'status', style: styles.queueNotice }, queueNotice) : null,
-      h('div', { style: styles.composerInner },
-        attachments.length > 0 ? h('div', { style: styles.attachRow }, attachments.map(item => h('span', { key: item.id, style: styles.attach },
-          item.mimeType.startsWith('image/') ? h('img', { src: item.dataUrl, alt: '', style: styles.attachThumb }) : null,
-          h('span', { style: styles.attachName }, item.name),
-          h('button', {
-            'aria-label': `移除 ${item.name}`,
-            style: { ...styles.iconButton, width: 16, height: 16, border: 'none' },
-            onClick: () => setAttachments(previous => previous.filter(entry => entry.id !== item.id)),
-          }, closeGlyph(h))))) : null,
+        systemNotices.map(notice => h('div', { key: notice.id, role: 'status', 'data-pa-system-notice': 'local-access-revoked', className: 'pa-sys-note' },
+          icon(h, 'warn', { size: 16, style: { marginTop: 2 } }),
+          h('span', { className: 'pa-grow' }, notice.text, h('span', { style: { color: 'var(--pa-ink-3)' } }, '；本机控制入口已禁用，云电脑与云端会话不受影响。')))),
+        awaiting ? h('div', { key: 'awaiting', className: 'pa-working', 'data-pa-awaiting': 'true' },
+          icon(h, 'spinner', { size: 14, className: 'pa-spin' }), h('span', { className: 'pa-txt' }, progressText || '正在处理…')) : null,
+        queue.map(item => h('div', { key: `queued-${item.clientTurnId}`, className: 'pa-msg-user', 'data-pa-queued': 'true' },
+          h('div', { className: 'pa-bubble queued' }, `${item.text}${item.uploads?.length ? `（${item.uploads.length} 个附件待发）` : ''}`),
+          h('div', { className: 'pa-msg-meta' },
+            h('span', null, item.attempts ? '云电脑仍在处理上一轮，稍后自动重发' : '已排队，本轮结束后发送'),
+            h('button', { type: 'button', className: 'pa-link underline', 'aria-label': `撤回排队消息：${item.text.slice(0, 24)}`, title: '撤回这条排队消息', onClick: () => cancelQueued(item.clientTurnId) }, '撤回')))))),
+    h('div', { 'data-personal-assistant-composer': 'true', className: 'pa-composer-wrap', style: styles.composer },
+      queueNotice ? h('div', { role: 'status', className: 'pa-queue-notice' }, queueNotice) : null,
+      h('div', { className: 'pa-composer' },
+        attachments.length > 0 ? h('div', { className: 'pa-attach-row' }, attachments.map(item => h('span', { key: item.id, className: 'pa-attach' },
+          item.mimeType.startsWith('image/') ? h('img', { src: item.dataUrl, alt: '' }) : icon(h, 'file', { size: 14 }),
+          h('span', { className: 'pa-ellipsis' }, item.name),
+          iconButton({ h, name: 'close', size: 'xs', iconSize: 12, label: `移除 ${item.name}`, onClick: () => setAttachments(previous => previous.filter(entry => entry.id !== item.id)) })))) : null,
         h('textarea', {
-          'aria-label': '给个人助理发消息', value: draft, rows: 1, style: styles.textarea,
+          'aria-label': '给个人助理发消息', value: draft, rows: 2,
           placeholder: phase !== 'ready' ? '云端暂未连接，可先写下消息'
             : (sending || awaiting ? '本轮进行中：现在发送会排队，本轮结束后自动发出' : '给个人助理发消息，Enter 发送，Shift+Enter 换行'),
           onChange: event => setDraft(event.target.value),
@@ -984,19 +999,18 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
             if (phase === 'ready' && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent?.isComposing) { event.preventDefault(); void submit(); }
           },
         }),
-        h('div', { style: styles.composerBar },
-          h('button', { 'aria-label': '添加附件', style: styles.iconButton, disabled: phase !== 'ready' || sending, title: '上传到云电脑：最多 4 个文件，每个 512 KiB', onClick: () => fileRef.current?.click() }, plusGlyph(h)),
+        h('div', { className: 'pa-composer-bar' },
+          iconButton({ h, name: 'plus', label: '添加附件', title: '上传到云电脑：最多 4 个文件，每个 512 KiB', disabled: phase !== 'ready' || sending, onClick: () => fileRef.current?.click() }),
           h('input', { ref: fileRef, type: 'file', multiple: true, accept: 'image/*,.txt,.md,.json,.pdf', style: { display: 'none' }, onChange: pickFiles }),
-          h('span', { style: styles.spacer }),
-          queue.length > 0 ? h('span', { role: 'status', style: styles.queueBadge }, `排队中 ${queue.length}`) : null,
+          composerLeading || null,
+          h('span', { className: 'pa-grow' }),
+          queue.length > 0 ? h('span', { role: 'status', className: 'pa-tag warn' }, `排队中 ${queue.length}`) : null,
           h('button', {
             // 排队非空时保持可点，并明确告诉用户"这是在排队"，不能做成禁用到以为点不动的样子。
+            type: 'button', className: cx('pa-send', (sending || awaiting) && phase === 'ready' && (draft.trim() || attachments.length) && 'queued'),
             'aria-label': queue.length > 0 ? `发送消息（排队中 ${queue.length} 条）` : '发送消息',
             title: sending || awaiting ? '本轮进行中：发送后会排队，本轮结束后自动发出' : '发送消息',
             disabled: phase !== 'ready' || (!draft.trim() && attachments.length === 0),
-            style: phase !== 'ready' || (!draft.trim() && attachments.length === 0)
-              ? { ...styles.send, ...styles.sendDisabled }
-              : (sending || awaiting ? styles.sendQueued : styles.send),
             onClick: () => void submit(),
-          }, sendGlyph(h))))));
+          }, icon(h, 'arrowUp', { size: 16 }))))));
 }

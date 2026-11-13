@@ -1,190 +1,148 @@
 /**
- * 「设置」视图（画板 08 Settings.dc.html）。
+ * 「设置」视图（重新设计 DEMO：实例 / 本机授权 / 模型 / 提示词 / 环境变量 / 运行时 / 关闭）。
  *
- * 纯函数：模型、提示词、环境变量的编辑草稿由 index.mjs 持有（draft），
- * 视图只回传 onChange 事件；保存动作在 shell 页头的「保存」按钮上。
+ * 纯函数：草稿 draft 与保存由 index.mjs 持有；这里只渲染与派发 onXxx 回调。
+ * 敏感值不回显：已保存的敏感变量显示掩码，留空表示不修改。
  */
 
-import { TOKENS, badge, button, card, chevronDownIcon, divider, emptyState, infoIcon, listRow, noticeBar, sectionHeader, skeletonBlock, skeletonCard, styles, warningIcon } from './ui.mjs';
+import { badge, button, connectionStateOf, CONNECTION_COPY, emptyState, group, icon, iconButton, link, menu, modelNote, row, section, skeletonRows, switchControl } from './ui.mjs';
 
-const PROMPT_LIMIT = 8000;
-
-const localAccessCopy = local => {
-  const authorized = local?.authorized === true;
-  return {
-    label: authorized ? '已授权' : '未授权',
-    tone: authorized ? 'success' : 'warn',
-    detail: authorized
-      ? '助理可在本机发起新会话、操作本地窗口与文件；高风险操作前会先问你。'
-      : '未授权。授权后助理才能在本机发起会话、操作窗口与文件；连接不等于授权。',
-  };
-};
-
-function instanceSection({ h, instance, inspect, actions }) {
-  const configured = inspect?.configured === true || instance?.configured === true;
-  const parts = [instance?.agentId ? `实例 ${instance.agentId}` : '', instance?.version ? `云端版本 ${instance.version}` : '', inspect?.status || instance?.status || ''].filter(Boolean);
-  return card({ h, style: { padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 } },
-    h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-        h('span', { style: { fontSize: 13, fontWeight: 600 } }, '个人助理'),
-        badge({ h, label: configured ? '已开通' : '未开通', tone: configured ? 'success' : 'warn' })),
-      h('div', { style: { ...styles.note, lineHeight: 1.8, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, parts.join(' · ') || '开通后可在这里管理云端配置')),
-    button({ h, label: '诊断', variant: 'ghost', style: { height: 30, padding: '0 10px' }, onClick: () => actions.onDiagnostics?.() }));
+function instanceSection({ h, instance, inspect }) {
+  const configured = instance?.configured === true;
+  const statusText = String(inspect?.status || instance?.status || (configured ? '运行中' : '未开通'));
+  return section({ h, title: '实例', children: group({ h, children: [
+    row({ h, key: 'id', children: [
+      h('div', { key: 'body', className: 'pa-grow' },
+        h('div', { className: 'pa-row-title' }, '个人助理', badge({ h, label: statusText, tone: /运行|就绪|正常/u.test(statusText) ? 'success' : configured ? 'neutral' : 'warn', dot: true })),
+        h('div', { className: 'pa-cap pa-mono pa-ellipsis', style: { fontSize: 12 } }, configured ? `实例 ${instance?.agentId || '未知'}` : '开通后可在这里管理云端配置')),
+      instance?.version ? h('span', { key: 'version', className: 'pa-cap' }, `云端版本 ${instance.version}`) : null,
+    ] }),
+  ] }) });
 }
 
-function localAccessSection({ h, localAccess, actions }) {
-  const copy = localAccessCopy(localAccess);
-  return card({ h, style: { padding: '12px 14px', display: 'flex', alignItems: 'flex-start', gap: 10 } },
-    h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-        h('span', { style: { fontSize: 12, fontWeight: 600 } }, '控制本机'),
-        badge({ h, label: copy.label, tone: copy.tone })),
-      h('div', { style: { ...styles.note, lineHeight: 1.8, marginTop: 2 } }, copy.detail)),
-    localAccess?.authorized
-      ? button({ h, label: '取消授权', variant: 'danger', style: { height: 30, padding: '0 10px', flex: 'none' }, onClick: () => actions.onRevokeLocal?.() })
-      : button({ h, label: '去授权', variant: 'ghost', style: { height: 30, padding: '0 10px', flex: 'none' }, onClick: () => actions.onOpenLocalAccess?.() }));
+function localSection({ h, localAccess, actions }) {
+  const state = connectionStateOf(localAccess);
+  const authorized = state === 'authorized';
+  return section({ h, title: '本机授权', children: group({ h, children: row({ h, children: [
+    h('div', { key: 'body', className: 'pa-grow' },
+      h('div', { className: 'pa-row-title' }, '允许助理控制本机', badge({ h, label: CONNECTION_COPY[state], tone: authorized ? 'success' : state === 'connected' ? 'warn' : 'neutral', dot: true })),
+      h('div', { className: 'pa-cap' }, '发起新会话、操作本地窗口与文件；高风险操作前先问你')),
+    link({ h, key: 'detail', label: '详情', onClick: () => actions.onOpenLocalAccess?.() }),
+    switchControl({ h, checked: authorized, disabled: state === 'offline', label: '允许助理控制本机', onChange: next => (next ? actions.onOpenLocalAccess?.() : actions.onRevokeLocal?.()) }),
+  ] }) }) });
 }
 
-function modelSection({ h, draft, modelOptions, editable, busy, actions }) {
+function modelSection({ h, draft, modelOptions, editable, menuOpen, actions }) {
   const options = Array.isArray(modelOptions) ? modelOptions.filter(Boolean) : [];
-  return h('section', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-    sectionHeader({ h, title: '模型', meta: '影响新消息，正在运行的任务不受影响' }),
-    h('div', { style: { position: 'relative' } },
-      h('select', {
-        value: draft?.model || '', disabled: !editable || Boolean(busy), 'aria-label': '模型',
-        onChange: event => actions.onModelChange?.(String(event?.target?.value ?? '')),
-        style: {
-          ...styles.mono, width: '100%', height: 44, padding: '0 32px 0 12px', boxSizing: 'border-box',
-          border: `1px solid ${TOKENS.border}`, borderRadius: 10, background: TOKENS.surface, color: TOKENS.ink,
-          fontSize: 12, cursor: editable ? 'pointer' : 'not-allowed', appearance: 'none',
-        },
-      }, options.length
-        ? options.map(option => h('option', { key: option, value: option }, option))
-        : h('option', { value: draft?.model || '' }, draft?.model || '默认模型')),
-      h('span', { 'aria-hidden': 'true', style: { position: 'absolute', right: 12, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' } }, chevronDownIcon({ h, size: 12 }))));
+  const current = draft?.model || options[0] || '';
+  return section({ h, title: '模型', children: group({ h, visible: true, children: h('span', { className: 'pa-anchor block' },
+    h('button', {
+      type: 'button', className: 'pa-row click pa-select', 'aria-label': '模型', 'aria-haspopup': 'listbox', 'aria-expanded': menuOpen ? 'true' : 'false', disabled: !editable || options.length === 0,
+      onClick: () => actions.onToggleModelMenu?.(),
+    },
+    h('span', { className: 'pa-grow' }, h('span', { className: 'pa-mono', style: { display: 'block' } }, current || '默认模型'), h('span', { className: 'pa-cap', style: { display: 'block' } }, modelNote(current))),
+    icon(h, 'chevD', { size: 14, color: 'var(--pa-ink-3)' })),
+    menuOpen ? menu({ h, className: 'full', role: 'listbox', 'aria-label': '选择模型', items: options.map(option => ({ id: option, label: option, mono: true, detail: modelNote(option), checked: option === current, onClick: () => { actions.onModelChange?.(option); actions.onToggleModelMenu?.(false); } })) }) : null) }) });
 }
 
-function promptSection({ h, draft, editable, busy, actions }) {
-  const value = String(draft?.prompt || '');
-  return h('section', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-    h('div', { style: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 } },
-      h('span', { style: styles.sectionTitle }, '提示词'),
-      h('span', { style: { ...styles.meta, fontVariantNumeric: 'tabular-nums' } }, `${value.length} / ${PROMPT_LIMIT}`)),
-    h('textarea', {
-      value, disabled: !editable || Boolean(busy), maxLength: PROMPT_LIMIT, 'aria-label': '系统提示词', rows: 4,
-      onChange: event => actions.onPromptChange?.(String(event?.target?.value ?? '')),
-      style: {
-        width: '100%', boxSizing: 'border-box', padding: '10px 12px', borderRadius: 10, resize: 'vertical', minHeight: 76,
-        border: `1px solid ${TOKENS.border}`, background: TOKENS.surface, color: TOKENS.avatarInk, font: 'inherit', fontSize: 12, lineHeight: 1.8,
-      },
-    }));
+function promptSection({ h, draft, editable, actions }) {
+  return section({ h, title: '系统提示词', right: h('span', { className: 'pa-cap' }, '保存后对所有 Bot 生效'), children: h('textarea', {
+    className: 'pa-textarea', 'aria-label': '系统提示词', rows: 5, value: draft?.prompt || '', disabled: !editable,
+    placeholder: '例如：回答简洁，优先给结论；涉及付费或删除操作先确认。',
+    onChange: event => actions.onPromptChange?.(String(event?.target?.value ?? '')),
+  }) });
 }
 
-function envSection({ h, draft, editable, busy, actions }) {
+function envRow({ h, item, index, editable, actions }) {
+  const saved = item?.saved === true;
+  const sensitive = item?.sensitive === true;
+  const masked = saved && sensitive && !item?.dirty;
+  return row({ h, key: item?.id || index, compact: true, 'data-pa-env-row': String(index), style: { gap: 8 }, children: [
+    h('input', {
+      key: 'key', className: 'pa-input sm pa-mono', 'aria-label': `变量名 ${index + 1}`, placeholder: 'KEY', value: item?.key || '', disabled: !editable || saved,
+      style: { flex: '0 0 38%', minWidth: 0 }, spellCheck: false,
+      onChange: event => actions.onEnvChange?.(index, { key: String(event?.target?.value ?? '').trim() }),
+    }),
+    h('input', {
+      key: 'value', className: 'pa-input sm pa-mono', 'aria-label': `变量值 ${index + 1}`, placeholder: masked ? '•••••••• （留空不修改）' : 'VALUE', value: item?.value || '', disabled: !editable,
+      type: sensitive ? 'password' : 'text', style: { flex: '1 1 0px', minWidth: 0 }, spellCheck: false, autoComplete: 'off',
+      onChange: event => actions.onEnvChange?.(index, { value: String(event?.target?.value ?? '') }),
+    }),
+    h('button', {
+      key: 'sensitive', type: 'button', className: 'pa-tag', 'aria-pressed': sensitive ? 'true' : 'false', title: sensitive ? '敏感值：保存后不回显' : '标记为敏感', disabled: !editable,
+      style: { cursor: 'pointer', ...(sensitive ? { background: 'var(--pa-warn-soft)', color: 'var(--pa-warn)' } : {}) },
+      onClick: () => actions.onEnvChange?.(index, { sensitive: !sensitive }),
+    }, icon(h, 'lock', { size: 11 }), '敏感'),
+    iconButton({ h, key: 'remove', name: 'close', size: 'sm', iconSize: 14, label: `删除变量 ${item?.key || index + 1}`, disabled: !editable, onClick: () => actions.onRemoveEnv?.(index) }),
+  ] });
+}
+
+function envSection({ h, draft, editable, actions }) {
   const rows = Array.isArray(draft?.environmentVariables) ? draft.environmentVariables : [];
-  return h('section', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-    h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 } },
-      h('span', { style: styles.sectionTitle }, '环境变量'),
-      button({ h, label: '添加', variant: 'link', style: { fontSize: 12, color: TOKENS.inkSoft, padding: '2px 4px' }, disabled: !editable || Boolean(busy), onClick: () => actions.onAddEnv?.() })),
-    rows.length === 0
-      ? card({ h, children: emptyState({ h, title: '还没有配置环境变量', detail: '变量会随实例下发；敏感值不回显，留空表示不修改。' }) })
-      : h('div', { style: styles.card },
-        rows.map((row, index) => {
-          const saved = row.saved === true && row.dirty !== true;
-          return listRow({
-            h, first: index === 0,
-            children: [
-              h('span', { key: 'key', style: { flex: 'none', width: 104, ...styles.mono, fontSize: 11, color: TOKENS.inkSoft, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, row.key || 'KEY'),
-              row.saved === true && row.sensitive === true && saved
-                ? h('span', { key: 'masked', style: { flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 } },
-                  h('span', { style: { letterSpacing: '0.12em' } }, '••••••••'),
-                  badge({ h, label: '敏感' }))
-                : h('input', {
-                  key: 'value', value: row.value || '', disabled: !editable || Boolean(busy),
-                  placeholder: saved ? '已保存' : 'VALUE', 'aria-label': `环境变量 ${row.key || index}`,
-                  onChange: event => actions.onEnvChange?.(index, { value: String(event?.target?.value ?? '') }),
-                  style: { flex: 1, minWidth: 0, fontSize: 12, padding: '5px 8px', borderRadius: 8, border: `1px solid ${TOKENS.divider}`, background: TOKENS.surface, color: TOKENS.ink, font: 'inherit' },
-                }),
-              row.saved !== true && row.sensitive !== true
-                ? button({ h, key: 'sensitive', label: '标记敏感', variant: 'link', style: { fontSize: 11, padding: '2px 4px' }, onClick: () => actions.onEnvChange?.(index, { sensitive: true }) })
-                : null,
-              button({ h, key: 'remove', label: '删除', variant: 'link', disabled: !editable || Boolean(busy), style: { fontSize: 11, color: TOKENS.inkMuted, padding: '2px 4px' }, onClick: () => actions.onRemoveEnv?.(index) }),
-            ],
-          });
-        })));
+  return section({ h, title: '环境变量', count: rows.length ? `${rows.length} 个` : null, right: link({ h, label: '添加', icon: icon(h, 'plus', { size: 14 }), disabled: !editable, onClick: () => actions.onAddEnv?.() }), children: group({ h, children: rows.length === 0
+    ? emptyState({ h, title: '还没有配置环境变量', detail: '变量会随实例下发；敏感值保存后不回显' })
+    : rows.map((item, index) => envRow({ h, item, index, editable, actions })) }) });
 }
 
-function runtimeSection({ h, inspect, versions, busy, actions }) {
-  const runtime = inspect?.runtime || {};
-  const detail = [runtime.version || '未知版本', runtime.image ? `镜像 ${runtime.image}` : ''].filter(Boolean).join(' · ');
-  const catalog = versions?.catalogAvailable === true && Array.isArray(versions.versions) && versions.versions.length > 0;
-  return card({ h, style: { padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 } },
-    h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { style: { fontSize: 12, fontWeight: 600 } }, '运行时'),
-      h('div', { style: { ...styles.note, lineHeight: 1.8 } }, detail)),
-    button({ h, label: busy === 'versions' ? '检查中…' : '检查更新', variant: 'ghost', style: { height: 30, padding: '0 10px' }, disabled: !catalog || Boolean(busy), title: catalog ? '云端有可升级的运行时版本' : '云端还没有发布可升级版本', onClick: () => actions.onCheckUpdate?.() }));
+function runtimeSection({ h, instance, versions, busy, actions }) {
+  const list = Array.isArray(versions?.versions) ? versions.versions : [];
+  const upgradable = versions?.catalogAvailable === true && list.length > 0;
+  return section({ h, title: '运行时', children: group({ h, children: row({ h, children: [
+    h('div', { key: 'body', className: 'pa-grow' },
+      h('div', { className: 'pa-row-title' }, instance?.version ? `v${String(instance.version).replace(/^v/u, '')}` : '未知版本', upgradable ? badge({ h, label: '有新版本', tone: 'accent' }) : null),
+      h('div', { className: 'pa-cap' }, upgradable ? '云端有可升级的运行时版本' : '云端还没有发布可升级版本')),
+    button({ h, key: 'check', label: '检查更新', size: 'sm', busy: busy === 'versions', busyLabel: '检查中…', onClick: () => actions.onCheckUpdate?.() }),
+  ] }) }) });
 }
 
-function dangerSection({ h, instance, closeAssistant, actions }) {
-  const canConfirm = Boolean(instance?.agentId) && String(closeAssistant?.text || '').trim() === instance.agentId;
-  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-    closeAssistant?.closedNotice
-      ? noticeBar({ h, text: closeAssistant.closedNotice, tone: 'success' })
-      : null,
-    closeAssistant?.open
-      ? card({ h, style: { padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10, border: '1px solid color-mix(in srgb, #b42318 30%, transparent)', background: 'color-mix(in srgb, #b42318 3%, transparent)' } },
-        h('div', { style: { display: 'flex', gap: 6, alignItems: 'flex-start', fontSize: 12, lineHeight: 1.8, color: TOKENS.danger } },
-          warningIcon({ h, size: 14, color: TOKENS.danger }),
-          h('span', null, '此操作不可撤销。请输入实例标识确认关闭：')),
-        h('input', {
-          value: closeAssistant?.text || '', placeholder: instance?.agentId || 'ar-…', disabled: Boolean(closeAssistant?.busy),
-          'aria-label': '输入云端实例标识以确认关闭', onChange: event => actions.onCloseText?.(String(event?.target?.value ?? '')),
-          style: { ...styles.mono, fontSize: 12, padding: '6px 9px', borderRadius: 8, border: `1px solid ${TOKENS.border}`, width: '100%', maxWidth: 360, boxSizing: 'border-box' },
-        }),
-        closeAssistant?.error ? h('div', { role: 'alert', style: { ...styles.note, color: TOKENS.danger } }, closeAssistant.error) : null,
-        h('div', { style: { display: 'flex', gap: 8 } },
-          button({ h, label: closeAssistant?.busy ? '正在关闭…' : '确认关闭个人助理', variant: 'primary', disabled: !canConfirm || Boolean(closeAssistant?.busy), onClick: () => actions.onCloseConfirm?.(), style: { background: TOKENS.danger } }),
-          button({ h, label: '取消', variant: 'ghost', disabled: Boolean(closeAssistant?.busy), onClick: () => actions.onCloseCancel?.() })))
-      : card({ h, style: { padding: '12px 14px', display: 'flex', alignItems: 'flex-start', gap: 10, border: '1px solid color-mix(in srgb, #b42318 24%, transparent)', background: '#fef7f6' } },
-        h('div', { style: { flex: 1, minWidth: 0 } },
-          h('div', { style: { fontSize: 12, fontWeight: 600, color: TOKENS.danger } }, '关闭个人助理'),
-          h('div', { style: { fontSize: 11, color: '#8a4a45', lineHeight: 1.8, marginTop: 2 } }, '释放云电脑资源。记忆、会话历史与工作区文件保留 7 天，期间重新开通会接上原来的数据。')),
-        button({ h, label: '关闭', variant: 'danger', style: { height: 30, padding: '0 10px', flex: 'none' }, disabled: !instance?.agentId, onClick: () => actions.onCloseStart?.() })),
-    h('div', { style: { fontSize: 11, color: TOKENS.inkMuted, lineHeight: 1.8 } }, '关闭需要再次输入实例标识确认，避免误操作释放付费资源。'));
-}
-
-function settingsSkeleton({ h }) {
-  return h('div', { 'data-pa-settings-skeleton': 'true', style: { display: 'flex', flexDirection: 'column', gap: 10 } },
-    skeletonCard({ h, rows: 2, pad: 14 }),
-    skeletonCard({ h, rows: 2, pad: 14 }),
-    skeletonBlock({ h, width: 48, height: 12 }),
-    skeletonCard({ h, rows: 1, pad: 12 }));
+function closeSection({ h, instance, closeAssistant, actions }) {
+  const expected = String(instance?.agentId || '').trim();
+  const canConfirm = expected && String(closeAssistant?.text || '').trim() === expected;
+  if (closeAssistant?.closedNotice) {
+    return section({ h, children: group({ h, children: row({ h, children: h('span', { className: 'pa-sub' }, closeAssistant.closedNotice) }) }) });
+  }
+  return section({ h, children: group({ h, danger: true, children: closeAssistant?.open
+    ? h('div', { className: 'pa-confirm' },
+      h('div', { className: 'pa-confirm-text' }, icon(h, 'warn', { size: 16, style: { marginTop: 3 } }), h('span', null, '此操作不可撤销，会释放云端实例与云电脑。输入实例标识确认关闭：')),
+      h('input', {
+        className: 'pa-input pa-mono', value: closeAssistant?.text || '', placeholder: expected, 'aria-label': '输入云端实例标识以确认关闭', style: { maxWidth: 360 },
+        disabled: Boolean(closeAssistant?.busy), onChange: event => actions.onCloseText?.(String(event?.target?.value ?? '')),
+      }),
+      closeAssistant?.error ? h('div', { role: 'alert', className: 'pa-cap', style: { color: 'var(--pa-danger)' } }, closeAssistant.error) : null,
+      h('div', { style: { display: 'flex', gap: 8 } },
+        button({ h, label: closeAssistant?.busy ? '正在关闭…' : '确认关闭个人助理', variant: 'dangerFill', size: 'sm', disabled: !canConfirm || Boolean(closeAssistant?.busy), onClick: () => actions.onCloseConfirm?.() }),
+        button({ h, label: '取消', variant: 'ghost', size: 'sm', disabled: Boolean(closeAssistant?.busy), onClick: () => actions.onCloseCancel?.() })))
+    : row({ h, children: [
+      h('div', { key: 'body', className: 'pa-grow' }, h('div', { className: 'pa-strong' }, '关闭个人助理'), h('div', { className: 'pa-cap' }, '释放云端实例与云电脑，Bot 与记忆一并删除')),
+      button({ h, key: 'action', label: '关闭', variant: 'danger', size: 'sm', disabled: !instance?.configured, onClick: () => actions.onCloseStart?.() }),
+    ] }) }) });
 }
 
 export function renderSettings({
   h, loading = false, degraded = false, notice = '', error = '', busy = '',
   inspect = null, instance = null, localAccess = null, draft = null, modelOptions = [], versions = null,
+  modelMenuOpen = false,
   closeAssistant = { open: false, text: '', busy: false, error: '', closedNotice: '' },
   actions = {},
 } = {}) {
-  if (loading && !inspect) return settingsSkeleton({ h });
-  const editable = inspect?.recordSource !== 'host' ? false : true;
-  return [
-    noticeBar({ h, text: error || notice, tone: error ? 'danger' : 'neutral' }),
-    noticeBar({ h, text: degraded ? '部分数据暂不可用：云端配置没有返回，编辑可能无法保存。' : '', tone: 'warn' }),
-    inspect?.recordSource && inspect.recordSource !== 'host'
-      ? noticeBar({ h, text: '这个个人助理是用旧版 DSH Host 创建的，本机没有配置清单，暂时不能在线修改。', tone: 'warn' })
-      : null,
-    instanceSection({ h, instance, inspect, actions }),
-    localAccessSection({ h, localAccess, actions }),
-    modelSection({ h, draft: draft || {}, modelOptions, editable, busy, actions }),
-    promptSection({ h, draft: draft || {}, editable, busy, actions }),
-    envSection({ h, draft: draft || {}, editable, busy, actions }),
-    runtimeSection({ h, inspect, versions, busy, actions }),
-    h('div', { style: { flex: '1 1 auto', minHeight: 8 } }),
-    dangerSection({ h, instance, closeAssistant, actions }),
-    h('div', { style: { display: 'flex', gap: 6, alignItems: 'flex-start', fontSize: 11, color: TOKENS.inkMuted, lineHeight: 1.7 } },
-      infoIcon({ h, size: 12 }),
-      h('span', null, '保存会提交一次云端更新，由云端滚动应用到实例；期间云电脑可能短暂重连。')),
-  ];
+  if (loading && !inspect) {
+    return h('div', { className: 'pa-page' }, h('div', { 'data-pa-settings-skeleton': 'true', className: 'pa-page-inner' },
+      section({ h, key: 'instance', title: '实例', children: group({ h, children: skeletonRows({ h, rows: 1 }) }) }),
+      section({ h, key: 'model', title: '模型', children: group({ h, children: skeletonRows({ h, rows: 1 }) }) }),
+      section({ h, key: 'env', title: '环境变量', children: group({ h, children: skeletonRows({ h, rows: 2 }) }) })));
+  }
+  const editable = instance?.editable !== false && instance?.configured === true && Boolean(inspect);
+  const legacy = instance?.configured === true && !inspect && !loading;
+  return h('div', { className: 'pa-page', 'data-pa-scroll': 'settings' }, h('div', { className: 'pa-page-inner' },
+    error ? h('div', { role: 'alert', className: 'pa-note danger' }, icon(h, 'warn', { size: 16, style: { marginTop: 2 } }), h('span', null, error)) : null,
+    legacy ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '这个个人助理是用旧版 DSH Host 创建的，本机没有配置清单，暂时不能在线修改模型、提示词与环境变量。')) : null,
+    degraded && !legacy ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '云端设置暂不可用，下面显示的是本地缓存')) : null,
+    instanceSection({ h, instance, inspect }),
+    localSection({ h, localAccess, actions }),
+    modelSection({ h, draft, modelOptions, editable, menuOpen: modelMenuOpen, actions }),
+    promptSection({ h, draft, editable, actions }),
+    envSection({ h, draft, editable, actions }),
+    runtimeSection({ h, instance, versions, busy, actions }),
+    closeSection({ h, instance, closeAssistant, actions }),
+  ));
 }
