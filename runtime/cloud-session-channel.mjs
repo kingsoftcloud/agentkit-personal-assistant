@@ -13,6 +13,15 @@ export function createCloudSessionChannel({ assistantId, computerId, runtimeInst
     const scope = { agentId: assistantId, botId, computerId, executionTarget: 'cloud', ...(runtimeInstanceId ? { runtimeInstanceId, stateStorage: 'state-path' } : {}) };
     if (operation === 'personal-assistant.sessions.list') return { ...scope, sessions: (await stateStore.sessions(botId)).map(row => ({ sessionId: row.sessionId, title: row.title, updatedAt: Date.parse(row.updatedAt) || 0 })).sort((a, b) => b.updatedAt - a.updatedAt) };
     if (operation === 'personal-assistant.session.create') return { ...scope, ...await sessionCreate({ botId, title: String(payload.title || '').slice(0, 200) }) };
+    if (operation === 'personal-assistant.file.list') {
+      // sessionId 可选：不传就汇总这个 Bot 下所有会话上传过的附件。
+      // 自己负责会话校验，必须排在下面那条统一 `await session(...)` 之前。
+      if (typeof cloudFiles?.list !== 'function') throw fail('CLOUD_SESSION_OPERATION_UNSUPPORTED', '云端版本不支持列出附件', 404);
+      const requested = payload.sessionId === undefined || payload.sessionId === null || payload.sessionId === '' ? '' : String(payload.sessionId);
+      const sessionIds = requested ? [await session(botId, requested)] : (await stateStore.sessions(botId)).map(row => row.sessionId);
+      const groups = await Promise.all(sessionIds.map(sessionId => cloudFiles.list({ botId, sessionId })));
+      return { ...scope, ...(requested ? { sessionId: requested } : {}), files: groups.flatMap(group => group.files || []) };
+    }
     await session(botId, payload.sessionId);
     if (operation === 'personal-assistant.file.upload') return { ...scope, ...await cloudFiles.upload({ ...payload, botId }) };
     if (operation === 'personal-assistant.file.download') return { ...scope, ...await cloudFiles.download(payload.path) };

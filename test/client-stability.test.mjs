@@ -914,3 +914,42 @@ test('⌘ + 字母翻译成一次原子 ctrl+X（Linux 只认 Ctrl），不把 S
   assert.equal(fx.errors.length, 0, fx.errors.join('\n'));
   fx.view.unmount();
 });
+
+test('云端附件菜单按会话列出附件，点击项触发下载 RPC', async t => {
+  const requests = [];
+  const request = async (operation, payload) => {
+    requests.push({ operation, payload });
+    if (operation.endsWith('.configuration')) return { configured: true, agentId: 'ar-files', botId: 'writer' };
+    if (operation.endsWith('.local-access.status')) return { connected: true, authorized: false, scopes: [], riskConfirm: true, grantedAt: null };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, primaryBotId: 'writer', bots: [{ botId: 'writer', displayName: '写作助理' }] };
+    if (operation.endsWith('.bots.overview')) return { bots: [{ id: 'writer', name: '写作助理', role: 'primary', status: 'idle' }], active: [], recent: [], counts: null };
+    if (operation.endsWith('.sessions.list')) return { sessions: [] };
+    if (operation.endsWith('.file.list')) return { files: [{ path: 'uploads/hash/report.txt', name: 'report.txt', bytes: 2048 }] };
+    if (operation.endsWith('.file.download')) return { path: 'uploads/hash/report.txt', name: 'report.txt', bytes: 2, data: 'aGk=' };
+    return {};
+  };
+  const view = fakeReact();
+  setClientReactRuntime(view.R);
+  t.after(() => setClientReactRuntime(undefined));
+
+  await view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
+  const trigger = view.find(node => node.props?.['data-pa-attachment-menu'] !== undefined);
+  assert.ok(trigger, '对话页页头必须有「云端附件」入口');
+  assert.equal(trigger.props['data-pa-attachment-menu'], 'closed');
+
+  trigger.props.onClick();
+  await view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
+  assert.ok(requests.some(item => item.operation.endsWith('.file.list')), '打开菜单要拉一次附件列表');
+  assert.match(view.text(), /report\.txt/u, '菜单里要显示附件名');
+  assert.match(view.text(), /2\.0 KB/u, '菜单里要显示附件大小');
+
+  const item = view.find(node => node.props?.role === 'menuitem' && String(node.props?.key || '').includes('report.txt'));
+  assert.ok(item, '附件项要渲染成 menuitem');
+  item.props.onClick();
+  await view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
+  const download = requests.filter(entry => entry.operation.endsWith('.file.download'));
+  assert.equal(download.length, 1, '点击附件要发一次下载请求');
+  assert.equal(download[0].payload.path, 'uploads/hash/report.txt');
+
+  view.unmount();
+});

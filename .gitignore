@@ -10,3 +10,9 @@ dist/
 
 # 本地构建/验收输出
 output/
+
+# 本地 worktree 检出目录（`git worktree add .worktrees/<name>` 的落地位置）
+.worktrees/
+
+# 仓库根目录的打包/构建产物（`npm pack` / 客户端打包生成，绝不入库）
+/index.js

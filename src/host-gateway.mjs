@@ -39,6 +39,7 @@ const SESSION_OPERATIONS = Object.freeze([
   'personal-assistant.schedule.create',
   'personal-assistant.file.upload',
   'personal-assistant.file.download',
+  'personal-assistant.file.list',
 ]);
 const BINDING_OPERATIONS = Object.freeze([
   // The host owns the cloud account, instance selection and credential.

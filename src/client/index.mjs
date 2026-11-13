@@ -1271,6 +1271,11 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     }
   }, [nativeWorkbench]);
   const [showAllActivity, setShowAllActivity] = useState(false);
+  // —— 云端附件 ——
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [attachments, setAttachments] = useState(null);
+  const [attachmentsLoading, setAttachmentsLoading] = useState(false);
+  const [attachmentsError, setAttachmentsError] = useState('');
   // —— 历史会话 ——
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -1883,8 +1888,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const dotNode = connectionDot({ h, connection, onOpen: onDotOpen });
   const configured = config?.configured === true;
 
-  const anyMenuOpen = historyMenuOpen || botMenuOpen || modelMenuOpen || settingsModelMenuOpen;
-  const closeMenus = () => { setHistoryMenuOpen(false); setBotMenuOpen(false); setModelMenuOpen(false); setSettingsModelMenuOpen(false); };
+  const anyMenuOpen = historyMenuOpen || botMenuOpen || modelMenuOpen || settingsModelMenuOpen || attachmentMenuOpen;
+  const closeMenus = () => { setHistoryMenuOpen(false); setBotMenuOpen(false); setModelMenuOpen(false); setSettingsModelMenuOpen(false); setAttachmentMenuOpen(false); };
   const goTab = tab => {
     closeMenus();
     if (tab === 'settings') { openSettings(); return; }
@@ -1894,6 +1899,53 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const activeTab = panelView === 'settings' ? 'settings' : (panelView === 'list' || panelView === 'detail') ? 'home' : 'chat';
   const conversationBusy = conversationState.busy === true;
   const currentSessionId = conversationState.sessionId || chatSessionId;
+  // —— 云端附件：列出当前会话（或整个 Bot）上传过的文件，点击即下载 ——
+  const loadAttachments = async () => {
+    setAttachmentsLoading(true); setAttachmentsError('');
+    try {
+      const value = await scopedCall('personal-assistant.file.list', currentSessionId ? { sessionId: currentSessionId } : {});
+      const rows = Array.isArray(value?.files) ? value.files.filter(row => row && row.path) : [];
+      setAttachments(rows.map(row => ({ path: String(row.path), name: String(row.name || row.path), bytes: Number(row.bytes) || 0 })));
+    } catch (failure) {
+      setAttachmentsError(isUnavailableFailure(failure) ? '当前云端版本还不支持列出附件' : (failure?.message || '附件列表暂时读不到'));
+    } finally { setAttachmentsLoading(false); }
+  };
+  const toggleAttachmentMenu = () => {
+    const next = !attachmentMenuOpen;
+    closeMenus(); setAttachmentMenuOpen(next);
+    if (next) void loadAttachments();
+  };
+  const downloadAttachment = async file => {
+    setAttachmentMenuOpen(false);
+    try {
+      const value = await scopedCall('personal-assistant.file.download', { path: file.path, ...(currentSessionId ? { sessionId: currentSessionId } : {}) });
+      const name = String(value?.name || file.name);
+      // 测试环境没有 DOM：只在下拉项被真实点击（浏览器）时才走到这里。
+      if (typeof document === 'undefined' || typeof URL?.createObjectURL !== 'function') return;
+      const binary = globalThis.atob(String(value?.data || ''));
+      const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+      const anchor = document.createElement('a');
+      anchor.href = url; anchor.download = name; anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setNotice(`已开始下载 ${name}`);
+    } catch (failure) {
+      setNotice(failure?.message || '云端文件下载失败');
+    }
+  };
+  const attachmentMenu = attachmentMenuOpen ? menu({
+    h, className: 'attachments', label: '云端附件', 'aria-label': '云端附件',
+    items: attachmentsLoading && !attachments
+      ? [{ id: 'loading', label: '正在读取…', onClick: () => {} }]
+      : attachmentsError ? [{ id: 'error', label: attachmentsError, detail: '点击重试', onClick: () => void loadAttachments() }]
+        : !attachments || attachments.length === 0 ? [{ id: 'empty', label: '还没有上传过附件', detail: '在对话里用回形针上传文件', onClick: () => setAttachmentMenuOpen(false) }]
+          : attachments.slice(0, 12).map(file => ({
+            id: file.path, label: file.name, detail: formatBytes(file.bytes),
+            leading: icon(h, 'file', { size: 14 }), onClick: () => void downloadAttachment(file),
+          })),
+    footer: [menuSeparator({ h, key: 'sep' }), h('button', { key: 'refresh', type: 'button', className: 'pa-menu-item', onClick: () => void loadAttachments() }, icon(h, 'refresh', { size: 14 }), '刷新附件列表')],
+  }) : null;
+
   const toggleHistoryMenu = () => {
     const next = !historyMenuOpen;
     closeMenus(); setHistoryMenuOpen(next);
@@ -1929,6 +1981,9 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       panelView === 'chat' && configured ? h('span', { className: 'pa-anchor' },
         iconButton({ h, name: 'clock', label: '历史会话', pressed: historyMenuOpen, 'data-window-drag-recall': '', 'data-pa-history-menu': historyMenuOpen ? 'open' : 'closed', onClick: toggleHistoryMenu }),
         historyMenu) : null,
+      panelView === 'chat' && configured ? h('span', { className: 'pa-anchor' },
+        iconButton({ h, name: 'file', label: '云端附件', pressed: attachmentMenuOpen, 'data-window-drag-recall': '', 'data-pa-attachment-menu': attachmentMenuOpen ? 'open' : 'closed', onClick: toggleAttachmentMenu }),
+        attachmentMenu) : null,
       panelView === 'chat' && configured ? iconButton({ h, name: 'compose', label: '新建会话', title: conversationBusy ? '请等待本轮结束后再新建会话' : '新建云端会话', 'data-window-drag-recall': '', disabled: conversationBusy, onClick: () => conversationControlsRef.current?.createSession?.() }) : null,
       panelView === 'chat' && configured ? panelButton({ h, label: '云电脑', variant: 'secondary', 'data-window-drag-recall': '', ariaLabel: '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', icon: icon(h, 'monitor', { size: 14 }), className: 'pa-hide-narrow', onClick: openCloudComputer }) : null,
       panelView === 'list' && configured ? panelButton({ h, label: '新建 Bot', variant: 'primary', 'data-window-drag-recall': '', icon: icon(h, 'plus', { size: 14 }), onClick: () => setCreateBot({ open: true, name: '', busy: false, error: '' }) }) : null,
@@ -2145,6 +2200,14 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
 /** 可切换的模型目录：Host 侧 bot.model.update 不限制取值，这里只给常见档位。 */
 const MODEL_OPTIONS = Object.freeze(['deepseek-v4.1-flash-1017', 'deepseek-v4.1-pro']);
+
+/** 附件大小：给「云端附件」下拉项用的短标签。 */
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
 
 const settingsStyle = {
   page: { padding: '2px 2px 28px', display: 'flex', flexDirection: 'column', gap: 18, maxWidth: 700, fontSize: 13, color: 'var(--dsw-alias-label-primary, #17202c)' },

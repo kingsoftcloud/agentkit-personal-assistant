@@ -165,6 +165,11 @@ const styles = {
   },
   quote: { margin: 0, paddingLeft: 10, borderLeft: '3px solid var(--dsw-alias-border-default, #d8dee8)', color: 'var(--dsw-alias-label-secondary, #536174)' },
   rule: { border: 'none', borderTop: '1px solid var(--dsw-alias-border-default, #d8dee8)', margin: '2px 0', width: '100%' },
+  // markdown.mjs 用 `...(styles.tableCell || {})` 展开，缺这三个键时表格只是没有
+  // 边框（不会崩），但视觉上会跟正文糊在一起，所以补上。
+  table: { borderCollapse: 'collapse', width: '100%', fontSize: 12.5, lineHeight: 1.7 },
+  tableWrap: { overflowX: 'auto', margin: '2px 0' },
+  tableCell: { border: '1px solid var(--dsw-alias-border-default, #d8dee8)', padding: '6px 8px', verticalAlign: 'top' },
   link: { color: '#2f6bff', textDecoration: 'none' },
   composer: { flex: '0 0 auto', minWidth: 0 },
 };

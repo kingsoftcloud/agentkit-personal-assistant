@@ -23,7 +23,12 @@ function fixture() {
     sessionCreate: async ({ botId, title }) => ({ sessionId: `${botId}-new`, title }),
     turnWrite: async () => ({ turnId: 'turn-1', sessionId: 'writer-session' }),
     scheduleWrite: async value => value,
-    cloudFiles: { upload: async () => ({}), download: async () => ({}), attachment: async () => Buffer.from('') },
+    cloudFiles: {
+      upload: async () => ({}), download: async () => ({}), attachment: async () => Buffer.from(''),
+      list: async ({ sessionId }) => ({ files: sessionId === 'writer-session'
+        ? [{ path: 'uploads/hash/写作会话-1.txt', name: '写作会话-1.txt', bytes: 12 }]
+        : [] }),
+    },
   });
   return { channel };
 }
@@ -51,4 +56,34 @@ test('cloud session channel returns stable runtime diagnostics and isolates Bot 
 test('cloud session channel rejects unknown Bot instead of crossing session scope', async () => {
   const { channel } = fixture();
   await assert.rejects(channel({ agentId: 'ar-test', botId: 'ghost', operation: 'personal-assistant.sessions.list' }), { code: 'BOT_NOT_FOUND', status: 404 });
+});
+
+test('file.list 默认汇总 Bot 下所有会话的附件，指定 sessionId 时只列该会话', async () => {
+  const { channel } = fixture();
+  const all = await channel({ agentId: 'ar-test', botId: 'writer', operation: 'personal-assistant.file.list', payload: {} });
+  assert.deepEqual(all.files.map(file => file.name), ['写作会话-1.txt']);
+  assert.equal(all.sessionId, undefined, '不传 sessionId 时不应回显会话标识');
+
+  const scoped = await channel({ agentId: 'ar-test', botId: 'writer', operation: 'personal-assistant.file.list', payload: { sessionId: 'writer-session' } });
+  assert.equal(scoped.sessionId, 'writer-session');
+  assert.deepEqual(scoped.files.map(file => file.name), ['写作会话-1.txt']);
+
+  // 跨会话读取必须被拒绝：research-session 属于 researcher，不属于 writer。
+  await assert.rejects(
+    channel({ agentId: 'ar-test', botId: 'writer', operation: 'personal-assistant.file.list', payload: { sessionId: 'research-session' } }),
+    { code: 'SESSION_NOT_FOUND', status: 404 },
+  );
+});
+
+test('file.list 在云端版本不支持时给出明确的 404 而不是崩在 undefined 上', async () => {
+  const registry = new BotRegistry({ profileId: 'ar-test', bots: [{ botId: 'writer', displayName: '写作助理', systemPromptRevision: 'writer-1' }] });
+  const channel = createCloudSessionChannel({
+    assistantId: 'ar-test', computerId: 'computer-1', stateStore: { sessions: async () => [] }, registry,
+    sessionCreate: async () => ({}), turnWrite: async () => ({}), scheduleWrite: async value => value,
+    cloudFiles: { upload: async () => ({}), download: async () => ({}), attachment: async () => Buffer.from('') },
+  });
+  await assert.rejects(
+    channel({ agentId: 'ar-test', botId: 'writer', operation: 'personal-assistant.file.list', payload: {} }),
+    { code: 'CLOUD_SESSION_OPERATION_UNSUPPORTED', status: 404 },
+  );
 });
