@@ -131,10 +131,14 @@ export function renderSettings({
       section({ h, key: 'model', title: '模型', children: group({ h, children: skeletonRows({ h, rows: 1 }) }) }),
       section({ h, key: 'env', title: '环境变量', children: group({ h, children: skeletonRows({ h, rows: 2 }) }) })));
   }
-  const editable = instance?.editable !== false && instance?.configured === true && Boolean(inspect);
-  const legacy = instance?.configured === true && !inspect && !loading;
+  // 只有 Host 自己写下的配置清单（recordSource === 'host'）才允许在线编辑；
+  // 旧版 Host 创建的实例没有清单，服务端也拿不到模型/提示词，必须保持只读。
+  const recordSource = inspect?.recordSource;
+  const editable = instance?.configured === true && recordSource === 'host';
+  const legacy = Boolean(recordSource) && recordSource !== 'host';
   return h('div', { className: 'pa-page', 'data-pa-scroll': 'settings' }, h('div', { className: 'pa-page-inner' },
     error ? h('div', { role: 'alert', className: 'pa-note danger' }, icon(h, 'warn', { size: 16, style: { marginTop: 2 } }), h('span', null, error)) : null,
+    notice ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, notice)) : null,
     legacy ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '这个个人助理是用旧版 DSH Host 创建的，本机没有配置清单，暂时不能在线修改模型、提示词与环境变量。')) : null,
     degraded && !legacy ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '云端设置暂不可用，下面显示的是本地缓存')) : null,
     instanceSection({ h, instance, inspect }),
