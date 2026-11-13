@@ -1,16 +1,12 @@
 /**
- * 「本机授权」弹层（画板 07 LocalAccess.dc.html）。
+ * 本机授权弹层（重新设计 DEMO：页头 chip 下拉的 340px 面板）。
  *
- * 纯函数：授权状态、作用域草稿、高风险确认草稿都由 index.mjs 持有；
- * 视图只渲染并回传选择，不直接调用 local-access.* RPC。
- *
- * 口径（契约第 2、3.2 章）：连接不等于授权；connected 决定是否可以授权，
- * authorized 决定是否已授权；未授权时任何本地控制入口必须禁用。
+ * 三态：authorized（已授权）/ connected（已连接未授权）/ offline（未连接）。
+ * 连接不等于授权：只有 connected 且 authorized 才算可控制本机。
  */
 
-import { TOKENS, badge, button, checkIcon, divider, infoIcon, monitorIcon, styles, switchControl } from './ui.mjs';
+import { CONNECTION_COPY, button, checkGlyph, connectionStateOf, cx, icon, iconButton, link, switchControl } from './ui.mjs';
 
-/** 可授权的作用域：与 Host local-access.grant 接受的子集一一对应。 */
 export const LOCAL_ACCESS_SCOPES = Object.freeze([
   { id: 'session.create', label: '发起新会话' },
   { id: 'window.input', label: '操作本地窗口（点击、输入、快捷键）' },
@@ -21,18 +17,9 @@ const RISK_LABEL = '高风险操作前先问我';
 
 function scopeRow({ h, checked, disabled, label, onToggle }) {
   return h('button', {
-    type: 'button', role: 'checkbox', 'aria-checked': checked ? 'true' : 'false', disabled,
+    type: 'button', role: 'checkbox', 'aria-checked': checked ? 'true' : 'false', disabled, className: 'pa-scope',
     onClick: disabled || typeof onToggle !== 'function' ? undefined : onToggle,
-    style: {
-      display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: 0, border: 'none', background: 'transparent',
-      color: checked ? TOKENS.avatarInk : TOKENS.inkFaint, font: 'inherit', fontSize: 11, lineHeight: 1.7, textAlign: 'left',
-      cursor: disabled ? 'default' : 'pointer', opacity: disabled ? 0.75 : 1,
-    },
-  },
-  checked
-    ? checkIcon({ h, size: 11, color: TOKENS.success })
-    : h('span', { 'aria-hidden': 'true', style: { flex: 'none', width: 11, height: 11, borderRadius: 999, border: `1.5px solid ${TOKENS.skeletonStrong}` } }),
-  label);
+  }, checkGlyph({ h, checked }), h('span', { className: cx('pa-grow', !checked && disabled && 'pa-cap') }, label));
 }
 
 export function renderLocalAccess({
@@ -40,58 +27,45 @@ export function renderLocalAccess({
   busy = '', error = '', notice = '', actions = {},
 } = {}) {
   if (!open) return null;
-  const connected = status?.connected === true || connection?.connected === true;
-  const authorized = status?.authorized === true || connection?.authorized === true;
-  const busyOn = Boolean(busy);
-  const selected = new Set((Array.isArray(selectedScopes) ? selectedScopes : status?.scopes || []).map(value => String(value)));
-  const host = status?.host || {};
-  const hostMeta = [host.platform, host.hostVersion ? `DSH Host ${host.hostVersion}` : ''].filter(Boolean).join(' · ') || '本机 DSH Host';
-  const grantedAt = status?.grantedAt || '';
-  const toggleScope = id => {
-    if (authorized || busyOn || typeof actions.onToggleScope !== 'function') return;
-    actions.onToggleScope(id);
-  };
-  return h('div', {
-    role: 'dialog', 'aria-label': '本机授权', 'data-local-access-popover': open ? 'open' : 'closed',
-    style: {
-      position: 'absolute', top: 58, right: 12, zIndex: 30, width: 344, boxSizing: 'border-box',
-      background: TOKENS.surface, border: `1px solid ${TOKENS.border}`, borderRadius: 12, padding: 14,
-      display: 'flex', flexDirection: 'column', gap: 12,
-      boxShadow: '0 18px 40px rgba(23,32,44,0.16), 0 2px 8px rgba(23,32,44,0.06)',
-    },
-  },
-  h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
-    h('span', { 'aria-hidden': 'true', style: { flex: 'none', width: 30, height: 30, borderRadius: 8, display: 'grid', placeItems: 'center', background: TOKENS.surface2, border: `1px solid ${TOKENS.skeleton}` } },
-      monitorIcon({ h, size: 15, color: TOKENS.inkSoft })),
-    h('div', { style: { flex: 1, minWidth: 0 } },
-      h('div', { style: { fontSize: 13, fontWeight: 600 } }, '本机 DSH Host'),
-      h('div', { style: styles.note }, hostMeta)),
-    badge({ h, label: connected ? '已连接' : '未连接', tone: connected ? 'success' : 'warn' })),
-  divider({ h }),
-  switchControl({
-    h, checked: authorized, disabled: busyOn || !connected,
-    label: '控制本机',
-    description: '允许助理在本机 DSH Host 发起新会话、操作本地窗口与文件。',
-    onChange: next => { if (next) actions.onGrant?.(); else actions.onRevoke?.(); },
-  }),
-  h('ul', { style: { display: 'flex', flexDirection: 'column', gap: 6, margin: 0, padding: '10px 12px', borderRadius: 10, background: TOKENS.surface3, listStyle: 'none' } },
-    LOCAL_ACCESS_SCOPES.map(scope => h('li', { key: scope.id, style: { margin: 0 } },
-      scopeRow({ h, checked: authorized ? selected.has(scope.id) : selected.has(scope.id), disabled: authorized || busyOn, label: scope.label, onToggle: () => toggleScope(scope.id) }))),
-    h('li', { key: 'risk', style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 11, lineHeight: 1.7, color: riskConfirm ? TOKENS.avatarInk : TOKENS.inkFaint } },
-      h('button', {
-        type: 'button', role: 'checkbox', 'aria-checked': riskConfirm ? 'true' : 'false', 'aria-label': RISK_LABEL,
-        disabled: busyOn, onClick: busyOn ? undefined : () => actions.onToggleRisk?.(),
-        style: { display: 'flex', alignItems: 'center', gap: 8, border: 'none', background: 'transparent', padding: 0, color: 'inherit', font: 'inherit', fontSize: 11, cursor: busyOn ? 'default' : 'pointer' },
-      }, riskConfirm ? checkIcon({ h, size: 11 }) : h('span', { 'aria-hidden': 'true', style: { width: 11, height: 11, borderRadius: 999, border: `1.5px solid ${TOKENS.skeletonStrong}` } }), RISK_LABEL))),
-  authorized
-    ? button({ h, label: busy === 'revoke' ? '正在取消…' : '取消授权', variant: 'danger', disabled: busyOn, onClick: () => actions.onRevoke?.(), style: { width: '100%', height: 34, fontWeight: 500 } })
-    : button({ h, label: busy === 'grant' ? '正在授权…' : '授权本机控制', variant: 'primary', disabled: busyOn || !connected, title: connected ? '' : '本机尚未连接，无法授权', onClick: () => actions.onGrant?.(), style: { width: '100%', height: 34, fontWeight: 500 } }),
-  h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 6 } },
-    infoIcon({ h, size: 12 }),
-    h('div', { style: { flex: 1, minWidth: 0, fontSize: 11, color: TOKENS.inkMuted, lineHeight: 1.7 } }, '取消后，正在运行的本机任务会立即中止；云端会话与记忆不受影响。')),
-  error ? h('div', { role: 'alert', style: { ...styles.note, color: TOKENS.danger } }, error) : null,
-  notice ? h('div', { role: 'status', style: { ...styles.note, color: TOKENS.success } }, notice) : null,
-  h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingTop: 10, borderTop: `1px solid ${TOKENS.divider}` } },
-    h('span', { style: { fontSize: 11, color: TOKENS.inkMuted } }, grantedAt ? `授权于 ${grantedAt}` : '尚未授权'),
-    button({ h, label: '打开本机设置', variant: 'link', style: { fontSize: 11 }, onClick: () => actions.onOpenLocalSettings?.() })));
+  const state = connectionStateOf(connection);
+  const authorized = state === 'authorized';
+  const offline = state === 'offline';
+  const scopes = authorized ? (Array.isArray(status?.scopes) && status.scopes.length ? status.scopes : selectedScopes) : selectedScopes;
+  const grantedAt = status?.grantedAt ? new Date(status.grantedAt) : null;
+  const grantedText = grantedAt && !Number.isNaN(grantedAt.getTime()) ? `${grantedAt.getMonth() + 1}月${grantedAt.getDate()}日 ${String(grantedAt.getHours()).padStart(2, '0')}:${String(grantedAt.getMinutes()).padStart(2, '0')}` : '';
+  const hostName = status?.host?.name || status?.host?.hostname || '';
+  const canGrant = !offline && !authorized && scopes.length > 0 && busy !== 'grant';
+  const subtitle = offline
+    ? '没有检测到这台电脑上的 DSH Host。'
+    : authorized
+      ? [hostName ? `已连接到 ${hostName}` : '已连接', grantedText ? `${grantedText} 授权` : ''].filter(Boolean).join(' · ')
+      : `${hostName ? `已连接到 ${hostName}` : '已连接到这台电脑'} · 尚未授权`;
+
+  return h('div', { role: 'dialog', 'aria-label': '本机授权', 'data-local-access-popover': 'open', 'data-pop-body': 'true', className: 'pa-pop pa-local-pop' },
+    h('div', { className: 'pa-local-head' },
+      h('span', { className: 'pa-local-ic' }, icon(h, 'laptop', { size: 18 })),
+      h('div', { className: 'pa-grow' },
+        h('div', { className: 'pa-strong' }, CONNECTION_COPY[state]),
+        h('div', { className: 'pa-cap pa-ellipsis' }, subtitle)),
+      iconButton({ h, name: 'close', size: 'sm', label: '关闭本机授权弹层', onClick: () => actions.onClose?.() })),
+    offline
+      ? h('p', { className: 'pa-sub' }, '安装并打开 DSH Host 后，助理才能在这台电脑上发起会话、操作窗口与文件。')
+      : [
+        h('div', { key: 'switch', className: 'pa-switch-row' },
+          h('div', { className: 'pa-grow' },
+            h('div', { className: 'pa-strong' }, '允许助理控制本机'),
+            h('div', { className: 'pa-cap' }, authorized ? '关闭即撤销授权，进行中的本机操作会停止' : '勾选范围后开启，随时可以关闭')),
+          switchControl({ h, checked: authorized, disabled: busy === 'grant' || busy === 'revoke' || (!authorized && !canGrant), label: '允许助理控制本机', onChange: next => (next ? actions.onGrant?.() : actions.onRevoke?.()) })),
+        h('div', { key: 'scopes', className: 'pa-scope-list' },
+          LOCAL_ACCESS_SCOPES.map(scope => scopeRow({ h, key: scope.id, checked: scopes.includes(scope.id), disabled: authorized || Boolean(busy), label: scope.label, onToggle: () => actions.onToggleScope?.(scope.id) })),
+          h('div', { className: 'pa-menu-sep' }),
+          scopeRow({ h, checked: riskConfirm !== false, disabled: authorized || Boolean(busy), label: RISK_LABEL, onToggle: () => actions.onToggleRisk?.() })),
+      ],
+    error ? h('div', { role: 'alert', className: 'pa-note danger' }, icon(h, 'warn', { size: 16, style: { marginTop: 2 } }), h('span', null, error)) : null,
+    notice ? h('div', { role: 'status', className: cx('pa-note', /已连接|已授权|成功/u.test(notice) && 'ok') }, icon(h, /已连接|已授权|成功/u.test(notice) ? 'check' : 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, notice)) : null,
+    h('div', { className: 'pa-between' },
+      link({ h, label: offline ? '重新检查' : '查看本机设置', onClick: () => (offline ? actions.onRefresh?.() : actions.onOpenLocalSettings?.()) }),
+      authorized
+        ? button({ h, label: '取消授权', variant: 'danger', size: 'sm', busy: busy === 'revoke', busyLabel: '取消中…', onClick: () => actions.onRevoke?.() })
+        : offline ? null : button({ h, label: '授权', variant: 'primary', size: 'sm', disabled: !canGrant, busy: busy === 'grant', busyLabel: '授权中…', onClick: () => actions.onGrant?.() })));
 }
