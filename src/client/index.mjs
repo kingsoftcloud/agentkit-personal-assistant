@@ -7,7 +7,7 @@ import { renderBotDetail } from './views/bot-detail.mjs';
 import { renderSettings } from './views/settings.mjs';
 import { renderLocalAccess, LOCAL_ACCESS_SCOPES } from './views/local-access.mjs';
 import { renderCreateProgress } from './views/create-progress.mjs';
-import { avatar, button as panelButton, connectionDot, connectionStateOf, iconButton, menu, menuSeparator, toast as toastView, TOKENS as PANEL_TOKENS } from './views/ui.mjs';
+import { avatar, button as panelButton, connectionDot, connectionStateOf, iconButton, menu, menuSeparator, toast as toastView } from './views/ui.mjs';
 import { cx, icon, themeStyle } from './views/theme.mjs';
 
 export class PersonalAssistantGatewayUnavailableError extends Error {
