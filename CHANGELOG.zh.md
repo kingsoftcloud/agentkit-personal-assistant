@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.1.22 - 2026-11-13（线上区域云网关与凭证兜底）
+
+- 修复线上账号（`cn-*` 等区域）创建个人助理后刷新绑定报「当前环境还没有配置个人助理云网关」的问题：区域到网关地址改为内置白名单映射，`pre-online` 走预发网关，`cn-*`/`online` 走线上网关；未知区域仍然明确报错，不会把区域值拼成 URL。`AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL` 覆盖能力保持不变。
+- 修复 `CreateAgentApiKey` 不可用时拿不到桌面凭证的问题：依次回退到 deployment client 的 `IncludeApiKey` 读取与 `GetAgent` 的 QuickAccess key，只在都失败时才报「无法获取连接凭证」。
+- 移除 Studio 内置个人助理的 `agentkit.studio-assistant-binding/v1` 旧绑定格式兼容，Host 只接受 standalone 绑定格式。
+- 修复设置页丢失「保存成功」提示的问题，并恢复「旧版 Host 创建的实例只读」保护：只有 Host 写下配置清单（`recordSource: 'host'`）时才能在线修改模型、提示词与环境变量。
+
 ## 0.1.21 - 2026-11-12（DSH 会话视图与云电脑栏线对齐）
 
 - 修复首次打开个人助理时因 DSH 空 Session 不渲染会话视图而出现白板的问题；保持独立 Session，并通过公开 Conversation activity target 挂载个人助理。
