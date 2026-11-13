@@ -148,28 +148,7 @@ const styles = {
     overflow: 'hidden', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', fontSize: 13,
     color: 'var(--dsw-alias-label-primary, #17202c)', background: 'var(--dsw-alias-bg-layer-1, #fff)',
   },
-  header: {
-    display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: '10px 16px',
-    borderBottom: '1px solid var(--dsw-alias-border-default, #d8dee8)', flex: 'none',
-  },
-  title: { margin: 0, fontSize: 14, fontWeight: 600 },
-  status: { color: 'var(--dsw-alias-label-secondary, #536174)', fontSize: 12 },
-  spacer: { marginLeft: 'auto' },
-  ghost: {
-    border: '1px solid var(--dsw-alias-border-default, #d8dee8)', background: 'transparent',
-    color: 'inherit', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', font: 'inherit', fontSize: 12,
-  },
   scroller: { flex: '1 1 0px', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden' },
-  thread: { maxWidth: 720, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 14 },
-  row: { display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-start' },
-  rowUser: { display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'flex-end' },
-  who: { fontSize: 11, color: 'var(--dsw-alias-label-secondary, #536174)' },
-  bubble: {
-    maxWidth: '86%', padding: '9px 12px', borderRadius: 12, lineHeight: 1.7,
-    overflowWrap: 'anywhere', display: 'flex', flexDirection: 'column', gap: 8,
-    // 主题 token 在浅色下都是纯白，用 currentColor 混色才能在明暗主题里都有轮廓。
-    background: 'color-mix(in srgb, currentColor 5%, transparent)',
-  },
   paragraph: { margin: 0, whiteSpace: 'pre-wrap' },
   heading: { fontWeight: 600, fontSize: 13.5 },
   headingStrong: { fontSize: 15 },
@@ -187,66 +166,7 @@ const styles = {
   quote: { margin: 0, paddingLeft: 10, borderLeft: '3px solid var(--dsw-alias-border-default, #d8dee8)', color: 'var(--dsw-alias-label-secondary, #536174)' },
   rule: { border: 'none', borderTop: '1px solid var(--dsw-alias-border-default, #d8dee8)', margin: '2px 0', width: '100%' },
   link: { color: '#2f6bff', textDecoration: 'none' },
-  bubbleUser: {
-    maxWidth: '86%', padding: '9px 12px', borderRadius: 12, lineHeight: 1.7, whiteSpace: 'pre-wrap',
-    overflowWrap: 'anywhere', background: 'color-mix(in srgb, #2f6bff 12%, transparent)',
-  },
-  pulse: { animation: 'pa-awaiting 1.2s ease-in-out infinite' },
-  step: { fontSize: 12, color: 'var(--dsw-alias-label-secondary, #536174)', lineHeight: 1.7, overflowWrap: 'anywhere' },
-  centered: { flex: 1, display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' },
-  centeredInner: { maxWidth: 420, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center' },
   composer: { flex: '0 0 auto', minWidth: 0 },
-  composerInner: {
-    maxWidth: 720, minWidth: 0, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 6,
-    border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 16, padding: '10px 10px 8px 12px',
-    background: 'var(--dsw-alias-bg-layer-1, #fff)',
-  },
-  textarea: {
-    flex: 1, width: '100%', minWidth: 0, boxSizing: 'border-box', minHeight: 24, maxHeight: 200, resize: 'none', border: 'none', outline: 'none',
-    background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, lineHeight: 1.7,
-  },
-  composerBar: { display: 'flex', alignItems: 'center', gap: 8 },
-  iconButton: {
-    flex: 'none', width: 28, height: 28, display: 'grid', placeItems: 'center', cursor: 'pointer',
-    border: '1px solid var(--dsw-alias-border-default, #d8dee8)', borderRadius: 999,
-    background: 'transparent', color: 'var(--dsw-alias-label-secondary, #536174)', padding: 0,
-  },
-  send: {
-    flex: 'none', width: 28, height: 28, display: 'grid', placeItems: 'center', border: 'none', borderRadius: 999,
-    cursor: 'pointer', padding: 0, background: 'var(--dsw-alias-label-primary, #17202c)',
-    color: 'var(--dsw-alias-bg-layer-1, #fff)',
-  },
-  sendDisabled: { background: 'var(--dsw-alias-border-default, #d8dee8)', color: 'var(--dsw-alias-label-secondary, #536174)', cursor: 'default' },
-  // 排队中的快捷入口：不是禁用态，而是"可继续排队"的强调态，避免看起来点不动。
-  sendQueued: {
-    flex: 'none', width: 28, height: 28, display: 'grid', placeItems: 'center', borderRadius: 999, cursor: 'pointer', padding: 0,
-    border: '1px dashed var(--dsw-alias-label-primary, #17202c)', background: 'transparent',
-    color: 'var(--dsw-alias-label-primary, #17202c)',
-  },
-  queueBadge: {
-    flex: 'none', borderRadius: 999, padding: '1px 8px', fontSize: 11, lineHeight: '18px',
-    background: 'color-mix(in srgb, #946200 14%, transparent)', color: '#946200',
-  },
-  queueBubble: {
-    maxWidth: '86%', padding: '9px 12px', borderRadius: 12, lineHeight: 1.7, whiteSpace: 'pre-wrap',
-    overflowWrap: 'anywhere', border: '1px dashed color-mix(in srgb, currentColor 35%, transparent)',
-    background: 'color-mix(in srgb, currentColor 4%, transparent)',
-    color: 'var(--dsw-alias-label-secondary, #536174)',
-  },
-  queueRow: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' },
-  queueHint: { fontSize: 11, color: 'var(--dsw-alias-label-secondary, #536174)' },
-  queueCancel: {
-    border: 'none', background: 'transparent', cursor: 'pointer', padding: '2px 4px', borderRadius: 6,
-    color: 'var(--dsw-alias-label-secondary, #536174)', display: 'inline-flex', alignItems: 'center', gap: 3, font: 'inherit', fontSize: 11,
-  },
-  queueNotice: { maxWidth: 720, margin: '0 auto 6px', fontSize: 12, color: '#946200', lineHeight: 1.6 },
-  attach: {
-    flex: 'none', display: 'flex', alignItems: 'center', gap: 6, padding: '3px 8px 3px 4px', borderRadius: 8,
-    background: 'var(--dsw-alias-bg-layer-2, #f4f6fa)', fontSize: 11, maxWidth: 180,
-  },
-  attachName: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  attachThumb: { width: 20, height: 20, borderRadius: 4, objectFit: 'cover', flex: 'none' },
-  attachRow: { display: 'flex', flexWrap: 'wrap', gap: 6 },
 };
 
 const text = value => (typeof value === 'string' ? value : '');
@@ -353,7 +273,7 @@ const conversationSkeleton = h => {
   return h('div', { 'data-pa-conversation-skeleton': 'true', 'aria-hidden': 'true', className: 'pa-skel-thread' }, rows);
 };
 
-export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', revokedAt = '', connectionDot = null, sessionSurface = false, chrome = true, composerLeading = null, controlsRef = null, suggestions = DEFAULT_SUGGESTIONS } = {}) {
+export function PersonalAssistantConversation({ React: R, request, scope, markdown = undefined, onOpenComputer = null, onBack = null, initialSessionId = '', revokedAt = '', connectionDot = null, sessionSurface = false, chrome = true, composerLeading = null, controlsRef = null, onStateChange = null, suggestions = DEFAULT_SUGGESTIONS } = {}) {
   if (!R) return '个人助理对话尚未就绪，请重新打开';
   const { createElement: h, useCallback, useEffect, useRef, useState } = R;
   const [phase, setPhase] = useState('loading');
@@ -892,6 +812,11 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   if (controlsRef && typeof controlsRef === 'object') {
     controlsRef.current = { createSession: () => void createSession(), openSession: id => void openSession(id), sessionId, sessions, busy, phase };
   }
+  // 外壳在父组件渲染期读 ref 只能拿到上一次的值（React 先父后子），页头「新建会话」
+  // 的 disabled/title 会慢一拍。这里在提交阶段把真实状态上报给外壳的 state。
+  useEffect(() => {
+    if (typeof onStateChange === 'function') onStateChange({ busy, sessionId, phase });
+  }, [onStateChange, busy, sessionId, phase]);
   const header = chrome ? h('header', { className: 'pa-head', style: { ...(sessionSurface ? { borderBottom: 'none' } : {}) }, 'data-window-drag': '' },
     typeof onBack === 'function' ? iconButton({ h, name: 'chevL', label: '返回', title: '返回', 'data-window-drag-recall': '', onClick: onBack }) : null,
     h('h1', { className: 'pa-title' }, '个人助理'),
@@ -914,13 +839,12 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   const renderSteps = block => {
     const live = awaiting && block === lastBlock;
     const open = openSteps[block.id] ?? live;
-    const failed = block.items.some(item => item.status === 'failed');
     return h('div', { key: block.id, className: 'pa-steps', 'data-open': open ? 'true' : 'false', 'data-pa-steps': String(block.items.length) },
       h('button', { type: 'button', className: 'pa-steps-toggle', 'aria-expanded': open ? 'true' : 'false', onClick: () => setOpenSteps(previous => ({ ...previous, [block.id]: !open })) },
-        live ? icon(h, 'spinner', { size: 14, className: 'pa-spin' }) : icon(h, failed ? 'warn' : 'check', { size: 14, color: failed ? 'var(--pa-danger)' : 'var(--pa-ok)' }),
+        live ? icon(h, 'spinner', { size: 14, className: 'pa-spin' }) : icon(h, 'check', { size: 14, color: 'var(--pa-ok)' }),
         h('span', null, live ? `正在执行 · ${block.items.length} 步` : `已完成 ${block.items.length} 步`),
         icon(h, 'chevR', { size: 14, className: 'pa-chev' })),
-      h('div', { className: 'pa-steps-list' }, block.items.map(item => h('div', { key: item.id, className: cx('pa-step', item.status === 'failed' && 'failed') },
+      h('div', { className: 'pa-steps-list' }, block.items.map(item => h('div', { key: item.id, className: 'pa-step' },
         h('i', { className: 'pa-dot', style: { marginTop: 7 } }), h('span', null, item.text)))));
   };
   const renderMessage = message => {

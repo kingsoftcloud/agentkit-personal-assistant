@@ -78,7 +78,7 @@ function resourceSection({ h, computer, actions }) {
       h('span', { className: 'pa-kv-value' },
         computer?.connected ? '已连接' : '未连接',
         computer?.resolution ? h('span', { className: 'pa-cap' }, computer.resolution) : null,
-        typeof actions?.onOpenComputer === 'function' ? link({ h, label: '打开云电脑', tone: 'accent', className: 'pa-auto-left', style: { marginLeft: 'auto', fontWeight: 400 }, onClick: () => actions.onOpenComputer?.() }) : null)),
+        typeof actions?.onOpenComputer === 'function' ? link({ h, label: '打开云电脑', tone: 'accent', style: { marginLeft: 'auto', fontWeight: 400 }, onClick: () => actions.onOpenComputer?.() }) : null)),
     h('div', null,
       h('span', { className: 'pa-cap' }, '本周用量'),
       h('span', { className: 'pa-kv-value' }, usage ? `${usage.tokens || '—'} tokens · ${usage.hours || '—'} 小时` : '暂无数据'))) }) });
@@ -111,7 +111,7 @@ function detailSkeleton({ h }) {
 }
 
 export function renderBotDetail({
-  h, loading = false, degraded = false, notice = '', bot = null,
+  h, loading = false, degraded = false, bot = null,
   memory = null, capabilities = [], computer = null, modelOptions = [],
   manageMemory = false, showAllMemory = false, modelBusy = '', modelMenuOpen = false,
   deleteConfirm = { open: false, text: '', busy: false, error: '' },

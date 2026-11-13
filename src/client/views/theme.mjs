@@ -144,7 +144,7 @@ const base = `
 .pa-switch[aria-checked='true']::after{transform:translateX(16px)}
 .pa-switch:disabled{opacity:.5}
 .pa-check{flex:none;width:16px;height:16px;border-radius:5px;box-shadow:inset 0 0 0 1.5px var(--pa-ink-4);display:grid;place-items:center;color:transparent}
-.pa-check[aria-checked='true']{background:var(--pa-ink);box-shadow:none;color:var(--pa-on-ink)}
+.pa-check[data-checked='true']{background:var(--pa-ink);box-shadow:none;color:var(--pa-on-ink)}
 .pa-page{flex:1 1 0px;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-gutter:stable}
 .pa-page-inner{max-width:760px;margin:0 auto;padding:28px clamp(20px,4cqw,40px) 56px;display:flex;flex-direction:column;gap:32px}
 .pa-sec{display:flex;flex-direction:column;gap:10px}
@@ -224,7 +224,6 @@ button.pa-row:hover,a.pa-row:hover,.pa-row.click:hover{background:var(--pa-hover
 .pa-progress i{display:block;height:100%;background:var(--pa-accent);transition:width .4s var(--pa-ease)}
 .pa-progress.failed i{background:var(--pa-danger)}
 .pa-actions{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;align-items:center}
-.pa-links{display:flex;align-items:center;gap:16px}
 .pa-banner{flex:none;display:flex;align-items:center;gap:10px;margin:16px auto 0;width:calc(100% - 48px);max-width:760px;padding:10px 12px 10px 16px;border:1px solid var(--pa-line);border-radius:var(--pa-r-md)}
 .pa-note{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:20px;color:var(--pa-ink-2)}
 .pa-note.danger{color:var(--pa-danger)}
@@ -269,7 +268,6 @@ const chat = `
 .pa-steps-list{display:flex;flex-direction:column;padding:0 12px 8px}
 .pa-steps[data-open='false'] .pa-steps-list{display:none}
 .pa-step{display:flex;align-items:flex-start;gap:8px;min-height:28px;padding:4px 0;font-size:13px;line-height:20px;color:var(--pa-ink-2);overflow-wrap:anywhere}
-.pa-step.failed{color:var(--pa-danger)}
 .pa-working{display:flex;align-items:center;gap:8px;font-size:13px;line-height:20px;color:var(--pa-ink-2)}
 .pa-working .pa-txt{animation:pa-awaiting 1.2s ease-in-out infinite}
 .pa-sys-note{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;border-radius:var(--pa-r-md);background:var(--pa-warn-soft);color:var(--pa-warn);font-size:13px;line-height:20px}
@@ -292,9 +290,6 @@ const chat = `
 .pa-suggest{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%;max-width:560px;margin-top:20px}
 .pa-suggest button{padding:12px 14px;border:1px solid var(--pa-line);border-radius:var(--pa-r-md);text-align:left;font-size:13px;line-height:20px;color:var(--pa-ink-2);transition:background .15s var(--pa-ease)}
 .pa-suggest button:hover{background:var(--pa-hover);color:var(--pa-ink)}
-.pa-session-row{display:flex;align-items:center;gap:10px;width:100%;min-height:40px;padding:6px 10px;border-radius:var(--pa-r-sm);text-align:left}
-.pa-session-row:hover{background:var(--pa-hover)}
-.pa-session-row.on{background:var(--pa-fill-1)}
 .pa-skel-thread{display:flex;flex-direction:column;gap:14px;padding-top:8px}
 .pa-skel-thread .pa-skel-user{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
 .pa-skel-thread .pa-skel-ai{display:flex;flex-direction:column;align-items:flex-start;gap:6px}
@@ -310,9 +305,6 @@ const chat = `
 .pa-stage-cover p{max-width:380px;font-size:13px;line-height:20px;color:var(--pa-ink-2)}
 .pa-capsule{flex:none;display:inline-flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:10px;min-height:40px;max-width:100%;padding:4px 6px 4px 14px;border-radius:20px;background:var(--pa-bg-pop);box-shadow:inset 0 0 0 1px var(--pa-line),0 2px 8px rgba(15,17,21,.05);font-size:13px;line-height:20px;color:var(--pa-ink-2)}
 .pa-capsule.plain{padding-right:14px}
-.pa-cc-diag{right:8px;top:44px;width:260px;padding:12px 14px;display:flex;flex-direction:column;gap:4px}
-.pa-cc-diag div{display:flex;justify-content:space-between;gap:12px;font-size:12px;line-height:20px;color:var(--pa-ink-2)}
-.pa-cc-diag div span:last-child{color:var(--pa-ink);font-family:var(--pa-mono);font-size:11px;overflow-wrap:anywhere;text-align:right}
 .pa-cc-alert{flex:none;padding:8px 16px;font-size:13px;line-height:20px;background:var(--pa-warn-soft);color:var(--pa-warn)}
 .pa-page-panel{display:flex;flex-direction:column;flex:1 1 0px;min-height:0}
 .pa-page-panel .pa-cc-stage-wrap{padding:16px}
@@ -324,7 +316,7 @@ const chat = `
 
 export const THEME_CSS = `${tokens}${base}${chat}`;
 
-/** 挂载样式节点；视图树里放一次即可（React 会按 key 去重）。 */
+/** 挂载样式节点；视图树里放一次即可（重复挂载 <style> 无副作用，不依赖 key 去重）。 */
 export function themeStyle(h) {
   return h('style', { key: THEME_STYLE_ID, 'data-pa-theme': 'true' }, THEME_CSS);
 }

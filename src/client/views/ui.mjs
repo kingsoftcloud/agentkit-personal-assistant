@@ -134,7 +134,7 @@ export function switchControl({ h, checked = false, disabled = false, onChange =
 }
 
 export function checkGlyph({ h, checked }) {
-  return h('span', { className: 'pa-check', 'aria-checked': checked ? 'true' : 'false' }, icon(h, 'check', { size: 12 }));
+  return h('span', { className: 'pa-check', 'data-checked': checked ? 'true' : 'false' }, icon(h, 'check', { size: 12 }));
 }
 
 /** 下拉菜单项（勾选态）。 */

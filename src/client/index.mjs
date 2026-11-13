@@ -1233,6 +1233,9 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [settingsModelMenuOpen, setSettingsModelMenuOpen] = useState(false);
   const conversationControlsRef = useRef(null);
+  // ref 只用于命令式调用（createSession/openSession）；页头要跟着变的 busy/sessionId
+  // 必须走 state，否则父组件渲染期读 ref 永远拿到上一次的值。
+  const [conversationState, setConversationState] = useState({ busy: false, sessionId: '', phase: 'loading' });
   // —— 本机连接/授权（三态圆点口径）——
   const [connection, setConnection] = useState({ connected: false, authorized: false, scopes: [], riskConfirm: true, grantedAt: null, host: null, loading: true, unavailable: false });
   const [localAccessOpen, setLocalAccessOpen] = useState(false);
@@ -1260,6 +1263,13 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     const timer = setTimeout(() => setNotice(''), 3200);
     return () => clearTimeout(timer);
   }, [notice]);
+  // 宿主没有原生侧栏时不能静默降级：云电脑会自动退回页面内视图，但用户得知道
+  // 为什么「侧栏入口」不见了（旧 DSH Host 需要升级）。
+  useEffect(() => {
+    if (nativeWorkbench && nativeWorkbench.available === false) {
+      setNotice(nativeWorkbench.unavailableReason || '当前宿主尚未提供原生云电脑侧栏，请更新 DSH Host 后重新打开。');
+    }
+  }, [nativeWorkbench]);
   const [showAllActivity, setShowAllActivity] = useState(false);
   // —— 历史会话 ——
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -1833,8 +1843,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   /* ---------- 历史会话 ---------- */
 
-  const toggleHistory = () => {
-    const next = !historyOpen;
+  // 接受可选入参：任何 `onToggleHistory?.(true)` 的调用点都不会再误解成「切换」。
+  const toggleHistory = (next = !historyOpen) => {
     setHistoryOpen(next);
     if (next) void loadSessions();
   };
@@ -1856,7 +1866,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   /* ---------- 渲染 ---------- */
 
   const bots = overview?.bots || [];
-  const runningCount = bots.filter(bot => bot.status === 'running').length;
   const degraded = overviewDegraded || detailDegraded || settingsDegraded;
   // 圆点三态点击口径（契约第 2 章）：authorized/connected 打开授权弹层；offline 是重连。
   const onDotOpen = () => {
@@ -1883,8 +1892,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     setPanelView('chat');
   };
   const activeTab = panelView === 'settings' ? 'settings' : (panelView === 'list' || panelView === 'detail') ? 'home' : 'chat';
-  const conversationBusy = conversationControlsRef.current?.busy === true;
-  const currentSessionId = conversationControlsRef.current?.sessionId || chatSessionId;
+  const conversationBusy = conversationState.busy === true;
+  const currentSessionId = conversationState.sessionId || chatSessionId;
   const toggleHistoryMenu = () => {
     const next = !historyMenuOpen;
     closeMenus(); setHistoryMenuOpen(next);
@@ -1892,7 +1901,9 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   };
   const sessionLabel = item => String(item?.title || item?.preview || item?.id || '').trim() || '未命名会话';
   const tab = (id, label) => h('button', {
-    type: 'button', role: 'tab', 'data-pa-tab': id, 'aria-selected': activeTab === id ? 'true' : 'false', className: 'pa-tab', 'data-window-drag-recall': '', onClick: () => goTab(id),
+    type: 'button', role: 'tab', id: `pa-tab-${id}`, 'data-pa-tab': id,
+    'aria-controls': `pa-panel-${id}`, 'aria-selected': activeTab === id ? 'true' : 'false',
+    className: 'pa-tab', 'data-window-drag-recall': '', onClick: () => goTab(id),
   }, label);
   const historyMenu = historyMenuOpen ? menu({
     h, className: 'history', label: '历史会话', 'aria-label': '历史会话',
@@ -1906,7 +1917,12 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   const renderHeader = () => h('header', { className: 'pa-head', 'data-window-drag': '' },
     h('span', { className: 'pa-title' }, panelView === 'desktop' ? '云电脑' : '个人助理'),
-    (configured || Boolean(overview)) && panelView !== 'create' && panelView !== 'desktop' ? h('nav', { role: 'tablist', 'aria-label': '个人助理页面', className: 'pa-tabs', style: { marginLeft: 8 } }, tab('chat', '对话'), tab('home', '总览'), tab('settings', '设置')) : null,
+    // 页签在「未开通 / 配置读取失败」时也必须可见：否则用户停在开通引导页，
+    // 既进不了设置页（模型、提示词、本机授权），也没有任何恢复入口。
+    ((configured || Boolean(overview)) && panelView !== 'create' && panelView !== 'desktop') || panelView === 'chat'
+      ? h('nav', { role: 'tablist', 'aria-label': '个人助理页面', className: 'pa-tabs', style: { marginLeft: 8 } },
+        [['chat', '对话'], ['home', '总览'], ['settings', '设置']].map(([id, label]) => tab(id, label)))
+      : null,
     panelView === 'create' ? h('span', { className: 'pa-tag warn' }, '正在开通') : null,
     h('div', { className: 'pa-head-actions' },
       panelView === 'desktop' ? panelButton({ h, label: '返回对话', variant: 'ghost', size: 'sm', ariaLabel: '返回对话', 'data-window-drag-recall': '', icon: icon(h, 'chevL', { size: 14 }), onClick: () => setPanelView('chat') }) : null,
@@ -2000,7 +2016,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     if (panelView === 'detail') {
       return h('main', { className: 'pa-body' },
         renderBotDetail({
-          h, loading: detailLoading, degraded: detailDegraded, notice,
+          h, loading: detailLoading, degraded: detailDegraded,
           bot: detail?.bot || (selectedBotId ? botSummary(selectedBotId) : null),
           memory: detail?.memory || null,
           capabilities: detail?.capabilities || [],
@@ -2045,6 +2061,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           initialSessionId: chatSessionId, onBack: null, chrome: false,
           composerLeading: bots.length > 0 ? botSwitcher : null,
           controlsRef: conversationControlsRef,
+          onStateChange: setConversationState,
           suggestions: DEFAULT_SUGGESTIONS,
           onOpenComputer: openCloudComputer,
           revokedAt: localRevokedAt,
@@ -2062,26 +2079,22 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     if (!configured && !(overview?.bots?.length > 0)) return renderOnboarding();
     return h('main', { className: 'pa-body' },
       renderBotsList({
-        h, connection, loading: overviewLoading, degraded: overviewDegraded, notice,
+        h, loading: overviewLoading, degraded: overviewDegraded,
         bots, active: overview?.active || [], recent: overview?.recent || [], counts: overview?.counts || null,
         showAllActivity, historyOpen, historyLoading, historyError, sessions,
         createBot,
         actions: {
           onEnter: botId => openChat(botId),
-          onOpenBot: botId => openDetail(botId),
           onOpenChat: botId => openChat(botId),
           onOpenDetail: botId => openDetail(botId),
-          onOpenMemory: botId => openDetail(botId),
-          onOpenComputer: openCloudComputer,
-          onOpenSettings: openSettings,
-          onOpenLocalAccess: () => setLocalAccessOpen(true),
           onToggleActivity: () => setShowAllActivity(value => !value),
           onToggleHistory: toggleHistory,
+          // 历史区「重试」是重载，不是开关：不能复用 onToggleHistory。
+          onRetryHistory: () => void loadSessions(),
           onOpenSession: sessionId => openHistorySession(sessionId),
           onOpenShortcut: kind => setNotice(kind === 'memories' ? '记忆入口请在 Bot 详情里管理' : '该入口暂未接入面板，后续版本提供'),
           onApprove: approvalId => setNotice(approvalId ? '审批入口暂未接入面板，请在 DSH Host 的待办里处理' : '暂时没有待确认的操作'),
           onCreateBot: () => setCreateBot({ open: true, name: '', busy: false, error: '' }),
-          onOpenHistoryItem: sessionId => openHistorySession(sessionId),
         },
       }),
       createBot.open ? h('div', { role: 'dialog', 'aria-label': '新建 Bot', className: 'pa-mask' },
@@ -2119,7 +2132,11 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   return h('section', { 'data-personal-assistant-shell': 'true', 'data-panel-view': panelView, className: 'pa' },
     themeStyle(h),
     renderHeader(),
-    h('div', { 'data-pa-body': 'true', className: 'pa-body', 'data-dim': localAccessOpen ? 'true' : 'false' }, renderBody()),
+    h('div', {
+      'data-pa-body': 'true', className: 'pa-body', 'data-dim': localAccessOpen ? 'true' : 'false',
+      // 页签与面板成对标注；Create / 云电脑视图没有页签，不挂 tabpanel 角色。
+      ...(['create', 'desktop'].includes(panelView) ? {} : { role: 'tabpanel', id: `pa-panel-${activeTab}`, 'aria-labelledby': `pa-tab-${activeTab}` }),
+    }, renderBody()),
     anyMenuOpen ? h('button', { type: 'button', 'aria-label': '关闭菜单', tabIndex: -1, className: 'pa-scrim', style: { zIndex: 25 }, onClick: closeMenus }) : null,
     localAccessOpen ? h('button', { type: 'button', 'aria-label': '关闭本机授权弹层', tabIndex: -1, className: 'pa-scrim', onClick: () => setLocalAccessOpen(false) }) : null,
     popover,

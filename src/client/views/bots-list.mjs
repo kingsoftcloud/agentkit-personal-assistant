@@ -79,7 +79,7 @@ function historySection({ h, open, loading, error, sessions, actions }) {
       ],
     }),
     open && loading ? skeletonRows({ h, rows: 3 }) : null,
-    open && !loading && error ? row({ h, key: 'error', compact: true, children: [h('span', { className: 'pa-grow pa-sub', style: { color: 'var(--pa-danger)' } }, error), button({ h, label: '重试', size: 'sm', onClick: () => actions.onToggleHistory?.(true) })] }) : null,
+    open && !loading && error ? row({ h, key: 'error', compact: true, children: [h('span', { className: 'pa-grow pa-sub', style: { color: 'var(--pa-danger)' } }, error), button({ h, label: '重试', size: 'sm', onClick: () => actions.onRetryHistory?.() })] }) : null,
     open && !loading && !error && sessions.length === 0 ? row({ h, key: 'empty', compact: true, children: h('span', { className: 'pa-sub' }, '还没有历史会话') }) : null,
     open && !loading && !error ? sessions.map(item => row({
       h, key: item.id, as: 'button', compact: true, onClick: () => actions.onOpenSession?.(item.id),
@@ -95,7 +95,7 @@ function listSkeleton({ h }) {
 }
 
 export function renderBotsList({
-  h, loading = false, degraded = false, notice = '',
+  h, loading = false, degraded = false,
   bots = [], active = [], recent = [], counts = null, showAllActivity = false,
   historyOpen = false, historyLoading = false, historyError = '', sessions = [],
   actions = {},
