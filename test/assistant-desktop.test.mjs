@@ -1,15 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantDesktop } from '../src/assistant-desktop.mjs';
 
 const AGENT = 'ar-20261110220000-catalog';
 const KEY = `ak-${'0123456789abcdef'.repeat(2)}`;
-const configuration = { resolve: async () => ({ values: { cloudRegion: 'pre-online' } }) };
-
-function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, agentStatus, onStatusRead } = {}) {
+function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 'pre-online', agentStatus, agentApiKey, deploymentApiKey, failCreateKey = false, onStatusRead } = {}) {
   const storeDirPromise = mkdtemp(join(tmpdir(), 'pa-assistant-desktop-'));
   let created = false;
   let request;
@@ -30,19 +28,24 @@ function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, agentStat
       assert.equal(payload.AgentId, AGENT);
       onStatusRead?.(name);
       return { data: { Basic: { AgentId: AGENT, Name: '个人助理', Status: agentStatus || 'RUNNING' },
-        Deployment: { Framework: 'personal-assistant' } } };
+        Deployment: { Framework: 'personal-assistant' },
+        ...(agentApiKey ? { QuickAccess: { ApiKey: agentApiKey } } : {}) } };
     }
-    if (name === 'CreateAgentApiKey') return { data: { ApiKey: KEY } };
+    if (name === 'CreateAgentApiKey') {
+      if (failCreateKey) throw Object.assign(new Error('CreateAgentApiKey unavailable'), { status: 500 });
+      return { data: { ApiKey: KEY } };
+    }
     throw new Error(`unexpected action ${name}`);
   } };
   const deployment = {
     getBootstrapConfig: async () => ({ Data: { Configs: { 'runtime.catalog': { 'personal-assistant': { versions: catalog } } } } }),
     createAgent: async payload => { request = payload; created = true; return { data: { AgentId: AGENT } }; },
+    ...(deploymentApiKey ? { forAgent: () => ({ get: async () => ({ data: { QuickAccess: { ApiKey: deploymentApiKey } } }) }) } : {}),
   };
   return {
     storeDirPromise,
     get request() { return request; },
-    options: { env, fetchImpl, configuration, getClient: async () => client, getDeploymentClient: async () => deployment },
+    options: { env, fetchImpl, configuration: { resolve: async () => ({ values: { cloudRegion: region } }) }, getClient: async () => client, getDeploymentClient: async () => deployment },
   };
 }
 
@@ -98,3 +101,29 @@ test('显式运行时版本仍优先于 catalog 自动选择', async () => {
   assert.equal(harnessValue.request.ManagedRuntimeConfig.RuntimeVersion, '0.1.42');
 });
 
+test('线上区域自动绑定线上 PA 网关，不再误报未配置', async () => {
+  const harnessValue = harness({ region: 'cn-beijing-6' });
+  const storeDir = await harnessValue.storeDirPromise;
+  const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
+  assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
+  const binding = JSON.parse(await readFile(join(storeDir, 'assistant-binding.json'), 'utf8'));
+  assert.equal(binding.gatewayUrl, 'https://pa-desktop.agent.kspmas.ksyun.com');
+});
+
+test('新建实例凭证接口失败时复用 GetAgent 的 QuickAccess key', async () => {
+  const harnessValue = harness({ region: 'cn-beijing-6', failCreateKey: true, agentApiKey: KEY });
+  const storeDir = await harnessValue.storeDirPromise;
+  const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
+  assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
+  const binding = JSON.parse(await readFile(join(storeDir, 'assistant-binding.json'), 'utf8'));
+  assert.equal(binding.apiKey, KEY);
+});
+
+test('优先通过 deployment client 读取已有 QuickAccess key', async () => {
+  const harnessValue = harness({ region: 'cn-beijing-6', failCreateKey: true, deploymentApiKey: KEY });
+  const storeDir = await harnessValue.storeDirPromise;
+  const service = createAssistantDesktop({ ...harnessValue.options, storeDir });
+  assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
+  const binding = JSON.parse(await readFile(join(storeDir, 'assistant-binding.json'), 'utf8'));
+  assert.equal(binding.apiKey, KEY);
+});
