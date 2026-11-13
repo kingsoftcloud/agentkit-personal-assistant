@@ -357,24 +357,28 @@ test('外壳视图连续切换 20 轮（列表↔详情↔设置↔本机授权�
   setClientReactRuntime(view.R);
   t.after(() => setClientReactRuntime(undefined));
   const mountShell = () => view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
+  const tabOf = id => view.find(node => node.props?.['data-pa-tab'] === id);
   await mountShell();
-  assert.ok(view.text().includes('写作助理'), '列表视图要有 Bot 名称');
+  // 默认进对话页；总览页签才是 Bot 列表
+  tabOf('home').props.onClick();
+  await mountShell();
+  assert.ok(view.text().includes('写作助理'), '总览视图要有 Bot 名称');
   assert.equal(view.find(node => node.props?.['data-pa-diagnostics'] === 'true'), undefined, '主面板不应固定占用诊断页脚');
   const viewOf = () => view.find(node => node.props?.['data-panel-view'])?.props['data-panel-view'];
 
   for (let cycle = 1; cycle <= 20; cycle += 1) {
-    // 列表 → 设置 → 列表
-    buttonsWith(view, '设置')[0].props.onClick();
+    // 总览 → 设置 → 总览（顶部页签）
+    tabOf('settings').props.onClick();
     await mountShell();
     assert.equal(viewOf(), 'settings', `第 ${cycle} 轮设置页`);
     assert.ok(view.nodes().length > 3);
 
-    view.find(node => node.props?.['aria-label'] === '返回').props.onClick();
+    tabOf('home').props.onClick();
     await mountShell();
-    assert.equal(viewOf(), 'list', `第 ${cycle} 轮返回列表`);
+    assert.equal(viewOf(), 'list', `第 ${cycle} 轮返回总览`);
 
-    // 列表 → 详情 → 列表：单 Bot 时列表是主卡片，点「能力」进入详情
-    view.find(node => node.props?.['data-pa-stat'] === '能力').props.onClick({ preventDefault() {} });
+    // 总览 → 详情 → 总览：点 Bot 行进入详情
+    view.find(node => node.props?.['data-pa-bot-row'] === 'writer').props.onClick({ preventDefault() {} });
     await mountShell();
     assert.equal(viewOf(), 'detail', `第 ${cycle} 轮详情页`);
     assert.ok(view.nodes().length > 3);
@@ -427,7 +431,9 @@ test('从 Bot 详情打开云电脑时把自动连接和嵌入模式传给桌面
   const mount = () => view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
 
   await mount();
-  view.find(node => node.props?.['data-pa-stat'] === '能力').props.onClick({ preventDefault() {} });
+  view.find(node => node.props?.['data-pa-tab'] === 'home').props.onClick();
+  await mount();
+  view.find(node => node.props?.['data-pa-bot-row'] === 'writer').props.onClick({ preventDefault() {} });
   await mount();
   assert.ok(buttonsWith(view, '打开云电脑')[0], 'Bot 详情必须提供云电脑入口');
   buttonsWith(view, '打开云电脑')[0].props.onClick();
@@ -488,6 +494,8 @@ test('全局设置连接完成后，已挂载外壳同步配置并绑定云电�
 
   configured = true;
   dom.window.dispatchEvent({ type: PERSONAL_ASSISTANT_CONFIGURATION_EVENT, detail: { configured: true, agentId: 'ar-settings' } });
+  await view.settle(PersonalAssistantShell, { request, nativeWorkbench });
+  view.find(node => node.props?.['data-pa-tab'] === 'home').props.onClick();
   await view.settle(PersonalAssistantShell, { request, nativeWorkbench });
   assert.match(view.text(), /写作助理/u);
   assert.deepEqual(bindings.at(-1), { agentId: 'ar-settings', botId: 'writer' });
@@ -649,6 +657,8 @@ test('重开面板状态一致：上次概览缓存先回显，网络恢复后�
   t.after(() => setClientReactRuntime(undefined));
   const hangRequest = () => new Promise(() => {});
   await hanging.settle(PersonalAssistantShell, { request: hangRequest, initialBotId: 'writer' }, 4);
+  hanging.find(node => node.props?.['data-pa-tab'] === 'home').props.onClick();
+  await hanging.settle(PersonalAssistantShell, { request: hangRequest, initialBotId: 'writer' }, 4);
   assert.ok(hanging.nodes().length > 3, '网络挂起时也不能白屏');
   assert.match(hanging.text(), /个人助理/u);
   assert.match(hanging.text(), /1 个 Bot/u, '缓存里的概览计数要先回显');
@@ -666,6 +676,8 @@ test('重开面板状态一致：上次概览缓存先回显，网络恢复后�
   };
   const view = fakeReact();
   setClientReactRuntime(view.R);
+  await view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
+  view.find(node => node.props?.['data-pa-tab'] === 'home').props.onClick();
   await view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
   assert.ok(view.text().includes('真实写作助理'), '网络恢复后显示真实数据');
   assert.ok(requests.some(operation => operation.endsWith('.bots.overview')), '缓存只是回显，仍要重新拉取概览');
