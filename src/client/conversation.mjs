@@ -75,6 +75,7 @@ const TURN_ERROR_TEXT = {
   DSH_SESSION_CONTROLLER_UNAVAILABLE: '云端连接暂时不可用，请稍后重试',
   DSH_TURN_NOT_ACCEPTED: '云端没有接受这一轮对话，请重新发送',
   DSH_SESSION_NOT_FOUND: '会话不存在或已被删除',
+  UNKNOWN_MODEL: '当前模型已不可用，请在个人助理设置中重新选择',
 };
 /** 云端 turn.error 既可能是字符串，也可能是 { code, message } 对象。
  * 直接 String(object) 会渲染成「[object Object]」——用户就完全看不到失败原因了。 */
