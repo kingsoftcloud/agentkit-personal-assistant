@@ -34,6 +34,7 @@ test('directory grant survives Host restart, revocation is durable and blocks ol
   const granted = await access.grant({ scopes: ['file.read'], roots: [root], target });
   const command = { action: 'file.read', path: 'note.txt', rootId: granted.roots[0].id, grantId: access.record.grantId };
   assert.equal((await access.execute(command)).text, 'local-only');
+  await assert.rejects(access.execute({ ...command, action: 'file.write', text: 'modified' }), { code: 'LOCAL_WRITE_DENIED' });
   access.dispose();
   const restarted = create(); await restarted.load();
   assert.equal((await restarted.status()).authorized, true);

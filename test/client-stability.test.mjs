@@ -402,7 +402,7 @@ test('外壳视图连续切换 20 轮（列表↔详情↔设置↔本机授权�
   assert.equal(errors.length, 0);
 });
 
-test('从 Bot 详情打开云电脑时把自动连接和嵌入模式传给桌面页', async t => {
+test('从 Bot 详情打开云电脑使用 DSH 原生侧栏，详情页保持可用', async t => {
   const dom = installPanelDom(t);
   const storage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', {
@@ -428,7 +428,9 @@ test('从 Bot 详情打开云电脑时把自动连接和嵌入模式传给桌面
   setClientReactRuntime(view.R);
   t.after(() => setClientReactRuntime(undefined));
   t.after(() => view.unmount());
-  const mount = () => view.settle(PersonalAssistantShell, { request, initialBotId: 'writer' });
+  const calls = [];
+  const nativeWorkbench = { available: true, bind(scope) { calls.push(scope); }, open() { calls.push('open'); } };
+  const mount = () => view.settle(PersonalAssistantShell, { request, nativeWorkbench, initialBotId: 'writer' });
 
   await mount();
   view.find(node => node.props?.['data-pa-tab'] === 'home').props.onClick();
@@ -439,11 +441,9 @@ test('从 Bot 详情打开云电脑时把自动连接和嵌入模式传给桌面
   buttonsWith(view, '打开云电脑')[0].props.onClick();
   await mount();
 
-  assert.equal(view.find(node => node.props?.['data-panel-view'])?.props['data-panel-view'], 'desktop');
-  const panel = view.find(node => node.type === PersonalAssistantPanel);
-  assert.equal(panel?.props.connectOnMount, true, '外壳进入桌面页时必须要求自动连接');
-  assert.equal(panel?.props.embedded, true, '外壳进入桌面页时必须隐藏重复 chrome');
-  assert.match(view.text(), /云电脑/u);
+  assert.equal(view.find(node => node.props?.['data-panel-view'])?.props['data-panel-view'], 'detail');
+  assert.equal(view.find(node => node.type === PersonalAssistantPanel), undefined);
+  assert.deepEqual(calls.slice(-2), [{ agentId: 'ar-detail', botId: 'writer' }, 'open']);
   view.unmount();
   assert.equal(dom.FakeSocket.instances.length, 0, '假 React 不递归执行子组件 effect，本用例只校验外壳传参');
 });
@@ -461,6 +461,50 @@ test('嵌入式云电脑页自动申请 ticket 且只渲染桌面内容', async 
   assert.equal(view.nodes().filter(node => node.type === 'details').length, 0, '嵌入式桌面页不能再渲染诊断页脚');
   view.unmount();
   assert.equal(dom.FakeSocket.instances.length, 1);
+});
+
+test('目录授权由系统选择结果形成草稿，取消和选择目录都不会自动授权', async t => {
+  installPanelDom(t);
+  const view = fakeReact();
+  const picked = [null, '/Projects/Notes'];
+  const grants = [];
+  const request = async (operation, payload) => {
+    if (operation.endsWith('.configuration')) return { configured: true, agentId: 'ar-pick', botId: 'default' };
+    if (operation.endsWith('.bots.list')) return { directoryAvailable: true, bots: [{ botId: 'default', displayName: '默认助理' }] };
+    if (operation.endsWith('.local-access.status')) return { available: true, authorized: false };
+    if (operation.endsWith('.local-access.capabilities')) return { fileWrite: true };
+    if (operation.endsWith('.local-access.grant')) grants.push(payload);
+    return {};
+  };
+  const pickDirectory = async () => picked.shift();
+  setClientReactRuntime(view.R);
+  t.after(() => { view.unmount(); setClientReactRuntime(undefined); });
+  const mount = () => view.settle(PersonalAssistantShell, { request, pickDirectory });
+  await mount();
+  const conversation = () => view.find(node => typeof node.props?.onStateChange === 'function' && node.props?.scope?.agentId === 'ar-pick');
+  const chatRequest = conversation().props.request;
+  conversation().props.onStateChange({ busy: false, phase: 'ready', sessionId: 'current' });
+  await mount();
+  assert.equal(conversation().props.request, chatRequest, 'toolbar updates must not restart the conversation loader');
+  view.find(node => node.props?.['data-connection-dot']).props.onClick();
+  await mount();
+  const choose = () => buttonsWith(view, '选择文件夹…')[0].props.onClick();
+  choose();
+  await mount();
+  assert.equal(grants.length, 0);
+  assert.equal(buttonsWith(view, '保存授权')[0].props.disabled, true);
+  assert.equal(view.find(node => node.type === 'textarea'), undefined);
+  assert.equal(conversation().props.request, chatRequest, 'opening local authorization must not reload the chat');
+  choose();
+  await mount();
+  assert.equal(grants.length, 0);
+  const mode = view.find(node => node.type === 'select' && node.props['aria-label'] === 'Notes 的权限');
+  assert.equal(mode.props.value, 'read');
+  mode.props.onChange({ target: { value: 'write' } });
+  await mount();
+  buttonsWith(view, '保存授权')[0].props.onClick();
+  await mount();
+  assert.deepEqual(grants, [{ scopes: ['file.read'], roots: [{ path: '/Projects/Notes', writable: true }], agentId: 'ar-pick', botId: 'default' }]);
 });
 
 test('全局设置连接完成后，已挂载外壳同步配置并绑定云电脑工作面板', async t => {

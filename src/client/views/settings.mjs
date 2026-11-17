@@ -5,7 +5,7 @@
  * 敏感值不回显：已保存的敏感变量显示掩码，留空表示不修改。
  */
 
-import { badge, button, connectionStateOf, CONNECTION_COPY, emptyState, group, icon, iconButton, link, menu, modelNote, row, section, skeletonRows, switchControl } from './ui.mjs';
+import { badge, button, connectionStateOf, CONNECTION_COPY, emptyState, group, icon, iconButton, link, menu, modelNote, row, section, skeletonRows } from './ui.mjs';
 
 function instanceSection({ h, instance, inspect }) {
   const configured = instance?.configured === true;
@@ -25,10 +25,9 @@ function localSection({ h, localAccess, actions }) {
   const authorized = state === 'authorized';
   return section({ h, title: '本机授权', children: group({ h, children: row({ h, children: [
     h('div', { key: 'body', className: 'pa-grow' },
-      h('div', { className: 'pa-row-title' }, '读取授权目录', badge({ h, label: CONNECTION_COPY[state], tone: authorized ? 'success' : state === 'connected' ? 'warn' : 'neutral', dot: true })),
-      h('div', { className: 'pa-cap' }, '只读访问你选择的本机目录，可随时撤销')),
-    link({ h, key: 'detail', label: '详情', onClick: () => actions.onOpenLocalAccess?.() }),
-    switchControl({ h, checked: localAccess?.authorized === true, disabled: state === 'offline' && !localAccess?.authorized, label: '允许助理读取授权目录', onChange: next => (next ? actions.onOpenLocalAccess?.() : actions.onRevokeLocal?.()) }),
+      h('div', { className: 'pa-row-title' }, '本机文件访问', badge({ h, label: CONNECTION_COPY[state], tone: authorized ? 'success' : state === 'offline' ? 'neutral' : 'warn', dot: true })),
+      h('div', { className: 'pa-cap' }, localAccess?.authorized && !localAccess.foreign ? `已选择 ${localAccess.roots?.length || 0} 个文件夹` : '只访问你选择的文件夹')),
+    button({ h, key: 'manage', label: '管理授权', size: 'sm', onClick: () => actions.onOpenLocalAccess?.() }),
   ] }) }) });
 }
 

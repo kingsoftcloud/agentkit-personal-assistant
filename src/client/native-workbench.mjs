@@ -1,12 +1,12 @@
 /** 云电脑只注册原生 DSH 右侧栏内容，不拥有布局、全屏或本地执行会话。 */
 export const ASSISTANT_COMPUTER_KIND = 'personal-assistant-computer';
 export const ASSISTANT_PANEL_ID = 'personal-assistant';
-const unavailableReason = '当前 DSH Host 的原生侧栏组件需要更新，请安装本次随插件提供的宿主组件包。';
+const unavailableReason = '当前 Studio 尚不支持独立工作区的原生侧栏，请更新 Studio 后打开云电脑。';
 const unavailable = () => Object.assign(new Error(unavailableReason), { code: 'PERSONAL_ASSISTANT_NATIVE_SIDEBAR_REQUIRED' });
 
 function ComputerTab(props) { return props.workbench.render(props); }
 
-export function createAssistantWorkbench({ sidebarRight, slots, panelId = ASSISTANT_PANEL_ID } = {}) {
+export function createAssistantWorkbench({ sidebarRight, slots, render, panelId = ASSISTANT_PANEL_ID } = {}) {
   const available = typeof sidebarRight?.registerPanelSurface === 'function'
     && typeof sidebarRight?.openPanelTab === 'function' && typeof sidebarRight?.setPanelExpanded === 'function'
     && typeof slots?.inject === 'function' && typeof slots?.register === 'function';
@@ -19,18 +19,16 @@ export function createAssistantWorkbench({ sidebarRight, slots, panelId = ASSIST
     if (disposed) throw new Error('云电脑工作面板已关闭');
   };
   let releaseSurface, releaseTab;
-  const reveal = () => sidebarRight.openPanelTab(panelId, ASSISTANT_COMPUTER_KIND);
+  const reveal = () => sidebarRight.openPanelTab(panelId, ASSISTANT_COMPUTER_KIND, '云电脑');
   const api = {
     available, unavailableReason: available ? null : unavailableReason,
     subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); },
     getSnapshot: () => snapshot,
+    render: props => render?.({ ...props, workbench: api }) ?? null,
     bind(scope, request) {
       requireAvailable();
       if (!scope?.agentId || !scope?.botId || typeof request !== 'function') throw new Error('云端助理尚未连接');
-      const changed = binding && (binding.scope.agentId !== scope.agentId || binding.scope.botId !== scope.botId);
-      if (changed) { releaseSurface(); releaseSurface = sidebarRight.registerPanelSurface(panelId); }
       binding = Object.freeze({ scope: Object.freeze({ ...scope }), request }); emit();
-      reveal();
     },
     open() {
       requireAvailable();
@@ -40,6 +38,7 @@ export function createAssistantWorkbench({ sidebarRight, slots, panelId = ASSIST
       // 之前这里调 setPanelExpanded(panelId, true) 强制展开，导致每次打开云电脑都变成
       // 全屏外观——插件越权控制了布局，和本文件开头「不拥有布局、全屏」的约定相反。
     },
+    unbind() { if (binding) { binding = undefined; emit(); sidebarRight.setPanelExpanded(panelId, false); } },
     collapse() { requireAvailable(); sidebarRight.setPanelExpanded(panelId, false); },
     dispose() {
       if (disposed) return;

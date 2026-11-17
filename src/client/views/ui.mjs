@@ -19,22 +19,25 @@ export const TOKENS = Object.freeze({
   skeleton: 'var(--pa-fill-2)', skeletonStrong: 'var(--pa-ink-4)', avatarSoft: 'var(--pa-accent-soft)', avatarInk: 'var(--pa-accent)',
 });
 
-/** 三态圆点的唯一判定口径：连接不等于授权。 */
 export function connectionStateOf(connection) {
+  if (connection?.foreign) return 'foreign';
   const connected = connection?.connected === true;
   const authorized = connection?.authorized === true;
+  if (authorized && !connected) return 'pending';
   if (!connected && connection?.available === true && !authorized) return 'connected';
   if (!connected) return 'offline';
   return authorized ? 'authorized' : 'connected';
 }
 
-export const CONNECTION_COPY = Object.freeze({ authorized: '本机已授权', connected: '本机未授权', offline: '本机未连接' });
+export const CONNECTION_COPY = Object.freeze({ authorized: '本机已授权', connected: '本机未授权', offline: '本机未连接', pending: '本机已授权 · 离线', foreign: '当前助理未授权' });
 const CONNECTION_TITLE = Object.freeze({
   authorized: '本机已授权，点击查看授权范围或取消授权',
   connected: '本机可连接，点击选择授权目录',
   offline: '本机未连接，点击重新检查连接',
+  pending: '授权已保存，等待本机连接',
+  foreign: '现有目录授权属于其他助理',
 });
-const CONNECTION_TONE = Object.freeze({ authorized: 'ok', connected: 'warn', offline: '' });
+const CONNECTION_TONE = Object.freeze({ authorized: 'ok', connected: 'warn', offline: '', pending: 'warn', foreign: 'warn' });
 
 export function dotGlyph({ h, tone = '', pulse = false }) {
   const cls = tone === 'success' ? 'ok' : tone === 'muted' || tone === 'neutral' ? '' : tone;

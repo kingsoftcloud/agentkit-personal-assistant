@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,symlink,rm} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,symlink,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createPersonalAssistantStateStore} from '../src/persistent-state.mjs';
@@ -8,6 +8,7 @@ import {createLocalAccess} from '../src/local-access.mjs';
 import {createLocalDeviceService} from '../runtime/local-device-channel.mjs';
 import {createCloudSessionChannel} from '../runtime/cloud-session-channel.mjs';
 import {BotRegistry} from '../src/bot-registry.mjs';
+import {registerLocalDeviceTools} from '../src/local-device-tools.mjs';
 
 async function setup(t) {
  const root=await mkdtemp(join(tmpdir(),'pa-local-device-'));
@@ -49,4 +50,32 @@ test('old placeholder grants do not authorize the real local executor',async t=>
  assert.equal((await access.status()).authorized,false);
  await assert.rejects(access.grant({scopes:['window.input'],roots:[]}),{code:'PERSONAL_ASSISTANT_LOCAL_ACCESS_SCOPE_INVALID'});
  access.dispose();
+});
+
+test('the cloud tool may create and update only an explicitly writable directory',async t=>{
+ const {access,devices,root,directory,target,cloud}=await setup(t);
+ const readOnly=join(root,'reference'),outside=join(root,'outside');
+ await mkdir(readOnly);await mkdir(outside);await symlink(outside,join(directory,'escape'));
+ const grant=await access.grant({scopes:['file.read'],roots:[{path:directory,writable:true},readOnly],target});
+ const [device]=(await devices.execute('default',{action:'devices'})).devices;
+ assert.deepEqual(device.roots.map(root=>root.writable),[true,false]);
+ const tools=new Map();registerLocalDeviceTools({botId:'default',service:()=>devices,agent:{ctx:{get:()=>({register:tool=>tools.set(tool.name,tool)})}}});
+ const write=input=>tools.get('assistant_local_write').execute(input);
+ const dest={deviceId:device.deviceId,rootId:device.roots[0].id,path:'note.txt'};
+ const first=JSON.parse((await write({...dest,text:'第一版'})).result);
+ assert.equal(await readFile(join(directory,'note.txt'),'utf8'),'第一版');
+ await assert.rejects(write({...dest,text:'implicit overwrite'}),{code:'LOCAL_FILE_EXISTS'});
+ await assert.rejects(write({...dest,text:'elsewhere',rootId:device.roots[1].id}),{code:'LOCAL_WRITE_DENIED'});
+ await assert.rejects(write({...dest,text:'elsewhere',path:'escape/note.txt'}),{code:'LOCAL_PATH_DENIED'});
+ const read=await devices.execute('default',{...dest,action:'file.read'});
+ assert.equal(read.sha256,first.sha256);
+ const second=JSON.parse((await write({...dest,text:'第二版',expectedSha256:read.sha256})).result);
+ assert.equal(await readFile(join(directory,'note.txt'),'utf8'),'第二版');
+ assert.equal((await cloud.read('local-operations')).find(row=>row.requestId===second.requestId)?.status,'completed');
+ await assert.rejects(write({...dest,text:'stale update',expectedSha256:read.sha256}),{code:'LOCAL_FILE_CHANGED'});
+ await assert.rejects(devices.execute('other',{...dest,action:'file.write',text:'wrong bot'}),{code:'LOCAL_DEVICE_OFFLINE'});
+ await access.revoke();
+ assert.deepEqual((await devices.execute('default',{action:'devices'})).devices,[]);
+ await assert.rejects(access.execute({...dest,grantId:grant.grantId,action:'file.write',text:'revoked'}),{code:'PERSONAL_ASSISTANT_LOCAL_NOT_AUTHORIZED'});
+ assert.equal(await readFile(join(directory,'note.txt'),'utf8'),'第二版');
 });

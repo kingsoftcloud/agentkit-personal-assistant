@@ -5,9 +5,10 @@
 import { renderBotsList } from './views/bots-list.mjs';
 import { renderBotDetail } from './views/bot-detail.mjs';
 import { renderSettings } from './views/settings.mjs';
-import { renderLocalAccess, LOCAL_ACCESS_SCOPES } from './views/local-access.mjs';
+import { renderLocalAccess } from './views/local-access.mjs';
+import { AssistantNativeRightbar, createAssistantWorkbench } from './native-workbench.mjs';
 import { renderCreateProgress } from './views/create-progress.mjs';
-import { avatar, button as panelButton, connectionDot, connectionStateOf, iconButton, menu, menuSeparator, toast as toastView } from './views/ui.mjs';
+import { avatar, button as panelButton, connectionDot, iconButton, menu, menuSeparator, toast as toastView } from './views/ui.mjs';
 import { cx, icon, themeStyle } from './views/theme.mjs';
 
 export class PersonalAssistantGatewayUnavailableError extends Error {
@@ -897,38 +898,17 @@ export function PersonalAssistantHome({ request, nativeWorkbench, sessionSurface
 }
 
 /** PA owns a main surface; ordinary DSH conversations keep their own chrome and input. */
-export function PersonalAssistantWorkspace({ request } = {}) {
+export function PersonalAssistantWorkspace({ request, workbenchSource, pickDirectory } = {}) {
   const R = clientReact || globalThis.React;
   if (!R) return '个人助理页面尚未就绪';
-  const { createElement: h, useRef, useState } = R;
-  const [binding, setBinding] = useState(null);
-  const [computerOpen, setComputerOpen] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  const bridge = useRef(null);
-  if (!bridge.current) bridge.current = {
-    available: true,
-    bind(scope, scopedRequest) {
-      setBinding(previous => previous?.scope.agentId === scope.agentId && previous?.scope.botId === scope.botId
-        && previous?.request === scopedRequest ? previous : { scope: { ...scope }, request: scopedRequest });
-    },
-    open() { setComputerOpen(true); },
-  };
-  const visible = computerOpen && binding;
-  return h('section', { className: 'pa-workspace', 'data-personal-assistant-workspace': true,
-    'data-computer-open': Boolean(visible), 'data-computer-expanded': Boolean(visible && expanded) },
-    themeStyle(h),
-    h('div', { className: 'pa-workspace-assistant', hidden: Boolean(visible && expanded) },
-      h(PersonalAssistantShell, { request, nativeWorkbench: bridge.current })),
-    visible ? h('aside', { className: 'pa-workspace-computer', 'aria-label': '云电脑' },
-      h('div', { className: 'pa-workspace-computer-bar' }, h('strong', null, '云电脑'),
-        h('button', { type: 'button', onClick: () => setExpanded(value => !value), 'aria-label': expanded ? '还原云电脑' : '展开云电脑' }, expanded ? '还原' : '展开'),
-        h('button', { type: 'button', onClick: () => { setComputerOpen(false); setExpanded(false); }, 'aria-label': '关闭云电脑' }, '关闭')),
-      h(PersonalAssistantPanel, { key: `${binding.scope.agentId}:${binding.scope.botId}`, request: binding.request,
-        initialBotId: binding.scope.botId, variant: 'native-tab', nativeFullscreen: expanded })) : null);
+  const { createElement: h, useSyncExternalStore } = R;
+  const workbench = useSyncExternalStore(workbenchSource.subscribe, workbenchSource.getSnapshot, workbenchSource.getSnapshot);
+  return h('section', { className: 'pa-workspace', 'data-personal-assistant-workspace': true },
+    h(PersonalAssistantShell, { request, nativeWorkbench: workbench, pickDirectory }));
 }
 
 /* ------------------------------------------------------------------ *
- * 面板外壳：panelView 状态机（list|detail|settings|create|chat|desktop）。
+ * 面板外壳：panelView 状态机（list|detail|settings|create|chat）。
  *
  * 职责边界（契约第 1、4 章）：
  * - 视图是纯函数，只接收数据与回调；本文件负责所有 personal-assistant.* RPC。
@@ -1138,10 +1118,10 @@ function settingsDraftFrom(inspect) {
  * 面板外壳组件：注册在 main 槽位。
  * props 与旧 PersonalAssistantHome 对齐，便于宿主无感切换。
  */
-export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId = '' } = {}) {
+export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory, initialBotId = '' } = {}) {
   const R = clientReact || globalThis.React;
   if (!R) return '个人助理页面尚未就绪，请重新打开';
-  const { createElement: h, useEffect, useRef, useState } = R;
+  const { createElement: h, useCallback, useEffect, useMemo, useRef, useState } = R;
 
   // G3.5：把「已开通 + 云实例/Bot 身份」与概览一起放进 SWR 缓存。重开面板时首帧直接按
   // 上次的 Bot 列表渲染，configuration 仍在后台真实校准（失败只提示，不退回开通报板）。
@@ -1168,12 +1148,10 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   // —— 本机连接/授权（三态圆点口径）——
   const [connection, setConnection] = useState({ connected: false, authorized: false, scopes: [], riskConfirm: true, grantedAt: null, host: null, loading: true, unavailable: false });
   const [localAccessOpen, setLocalAccessOpen] = useState(false);
-  const [localScopes, setLocalScopes] = useState(LOCAL_ACCESS_SCOPES.map(scope => scope.id));
-  const [localRootsDraft, setLocalRootsDraft] = useState('');
-  const [riskConfirmDraft, setRiskConfirmDraft] = useState(true);
+  const [localDraft, setLocalDraft] = useState(null);
+  const [localWriteSupport, setLocalWriteSupport] = useState(null);
   const [localBusy, setLocalBusy] = useState('');
   const [localError, setLocalError] = useState('');
-  const [localNotice, setLocalNotice] = useState('');
   // 撤销时间戳：对话页未挂载时也要能补系统提示（契约第 4 章第 4 条）。
   const [localRevokedAt, setLocalRevokedAt] = useState('');
   // —— 列表概览（首帧用缓存，避免在 configuration 返回前停在「正在读取开通状态…」）——
@@ -1193,13 +1171,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     const timer = setTimeout(() => setNotice(''), 3200);
     return () => clearTimeout(timer);
   }, [notice]);
-  // 宿主没有原生侧栏时不能静默降级：云电脑会自动退回页面内视图，但用户得知道
-  // 为什么「侧栏入口」不见了（旧 DSH Host 需要升级）。
-  useEffect(() => {
-    if (nativeWorkbench && nativeWorkbench.available === false) {
-      setNotice(nativeWorkbench.unavailableReason || '当前宿主尚未提供原生云电脑侧栏，请更新 DSH Host 后重新打开。');
-    }
-  }, [nativeWorkbench]);
   const [showAllActivity, setShowAllActivity] = useState(false);
   // —— 云端附件 ——
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
@@ -1261,18 +1232,23 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     return rpc(operation, { ...payload, ...extra });
   };
   /** 给指定 scope 造一个绑定请求：切换 Bot 后立即绑定，不依赖下一次渲染的闭包。 */
-  const requestForScope = targetScope => (operation, payload = {}) => {
+  const requestForScope = useCallback(targetScope => (operation, payload = {}) => {
     if (!targetScope) throw new Error('云端助理尚未连接');
     if (payload.agentId && payload.agentId !== targetScope.agentId) throw new Error('云端实例不一致');
     if (operation !== 'personal-assistant.bots.list' && payload.botId && payload.botId !== targetScope.botId) throw new Error('云端助理不一致');
     return request(operation, { ...payload, ...targetScope });
-  };
-  const scopedRequest = scope ? requestForScope(scope) : null;
-  /** 云电脑面板自己会选 Bot，这里只补 agentId，不校验 botId。 */
-  const panelRequest = (operation, payload = {}) => request(operation, {
-    ...payload,
-    ...(scope?.agentId && !payload.agentId ? { agentId: scope.agentId } : {}),
-  });
+  }, [request]);
+  const computerBotId = panelView === 'detail' ? selectedBotId || scope?.botId : scope?.botId;
+  useEffect(() => {
+    if (nativeWorkbench?.available && scope?.agentId && computerBotId) {
+      const computerScope = { agentId: scope.agentId, botId: computerBotId };
+      nativeWorkbench.bind(computerScope, requestForScope(computerScope));
+    }
+    else nativeWorkbench?.unbind?.();
+  }, [nativeWorkbench, requestForScope, scope?.agentId, computerBotId]);
+  // Connection badges and toolbar state update independently of the chat.
+  // A new request identity would tear down the chat's bootstrap and event stream.
+  const scopedRequest = useMemo(() => scope ? requestForScope(scope) : null, [requestForScope, scope]);
   const clearCreateTimer = () => { if (createTimerRef.current) { clearTimeout(createTimerRef.current); createTimerRef.current = null; } };
   const stamp = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 
@@ -1300,23 +1276,49 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       const previousAuthorized = previousAuthorizedRef.current;
       previousAuthorizedRef.current = next.authorized;
       if (previousAuthorized === true && next.authorized === false) setLocalRevokedAt(String(Date.now()));
-      setRiskConfirmDraft(next.riskConfirm);
       return next;
     } catch {
       // Host 尚未实现 local-access.status：按「未连接」处理。绝不能猜成已授权。
       setConnection({ connected: false, authorized: false, scopes: [], riskConfirm: true, grantedAt: null, host: null, loading: false, unavailable: true });
-      setLocalScopes(LOCAL_ACCESS_SCOPES.map(item => item.id));
       return null;
     }
   };
 
-  const grantLocalAccess = async () => {
-    if (localBusy) return;
-    setLocalBusy('grant'); setLocalError(''); setLocalNotice('');
+  const localScopeKey = scope?.agentId && scope?.botId ? `${scope.agentId}:${scope.botId}` : '';
+  const localViewRef = useRef('');
+  localViewRef.current = localAccessOpen ? localScopeKey : '';
+  useEffect(() => {
+    setLocalDraft(null); setLocalError(''); setLocalWriteSupport(null);
+    if (!localAccessOpen || !localScopeKey) return;
+    let active = true;
+    void scopedCall('personal-assistant.local-access.capabilities').then(value => {
+      if (active) setLocalWriteSupport(value?.fileWrite === true);
+    }, () => { if (active) setLocalWriteSupport('unavailable'); });
+    return () => { active = false; };
+  }, [localAccessOpen, localScopeKey, request]);
+
+  const chooseLocalFolder = async () => {
+    if (localBusy || typeof pickDirectory !== 'function') return;
+    const openedFor = localViewRef.current;
+    setLocalBusy('pick'); setLocalError('');
     try {
-      await scopedCall('personal-assistant.local-access.grant', { scopes: localScopes, roots: localRootsDraft.split('\n').map(value => value.trim()).filter(Boolean) });
-      const next = await loadConnection();
-      setLocalNotice(next?.connected && next?.authorized ? '本机目录已授权并连接' : '授权已保存，等待云端连接');
+      const path = await pickDirectory();
+      if (typeof path !== 'string' || !path || !openedFor || localViewRef.current !== openedFor || !aliveRef.current) return;
+      setLocalDraft(current => {
+        const roots = current || [];
+        return roots.length >= 8 || roots.some(root => root.path === path) ? roots : [...roots, { path, writable: false }];
+      });
+    } catch (failure) {
+      if (localViewRef.current === openedFor) setLocalError(failure?.message || '未能打开系统文件夹选择器');
+    } finally { setLocalBusy(''); }
+  };
+
+  const grantLocalAccess = async () => {
+    if (localBusy || !localDraft?.length) return;
+    setLocalBusy('grant'); setLocalError('');
+    try {
+      await scopedCall('personal-assistant.local-access.grant', { scopes: ['file.read'], roots: localDraft.map(({ path, writable }) => ({ path, writable })) });
+      await loadConnection(); setLocalDraft(null);
     } catch (failure) {
       setLocalError(failure?.message || '授权失败：Host 尚未提供本机授权能力');
     } finally { setLocalBusy(''); }
@@ -1324,12 +1326,12 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   const revokeLocalAccess = async () => {
     if (localBusy) return;
-    setLocalBusy('revoke'); setLocalError(''); setLocalNotice('');
+    setLocalBusy('revoke'); setLocalError('');
     try {
       await rpc('personal-assistant.local-access.revoke');
       setLocalRevokedAt(String(Date.now()));
       await loadConnection();
-      setLocalNotice('已撤销本机授权');
+      setLocalDraft(null);
     } catch (failure) {
       setLocalError(failure?.message || '撤销失败：Host 尚未提供本机授权能力');
     } finally { setLocalBusy(''); }
@@ -1446,13 +1448,10 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     try { botId = directoryBots.length ? resolveAssistantBotId(directoryBots, initialBotId || configValue.botId) : ''; } catch { botId = directoryBots[0]?.botId || ''; }
     if (!aliveRef.current) return;
     const nextScope = { agentId: String(configValue.agentId || ''), botId };
-    setScope(nextScope);
+    setScope(previous => previous?.agentId === nextScope.agentId && previous?.botId === nextScope.botId ? previous : nextScope);
     setSelectedBotId(previous => previous || botId);
     // 写回「已开通 + 当前 Bot」：下次重开面板首帧就能直接渲染列表，而不是停在开通报板。
     writePanelCache('shell', { configured: true, agentId: nextScope.agentId, botId });
-    if (nativeWorkbench?.available) {
-      try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 原生侧栏绑定失败不阻断面板 */ }
-    }
     await loadOverview({ fallbackBots: directoryBots, primaryId: botId });
     if (!aliveRef.current) return;
     if (!botId) { setOverviewLoading(false); return; }
@@ -1493,7 +1492,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       setScope(nextScope);
       setSelectedBotId(target);
       setChatSessionId('');
-      if (nativeWorkbench?.available) { try { nativeWorkbench.bind(nextScope, requestForScope(nextScope)); } catch { /* 忽略 */ } }
       writePanelCache('shell', { configured: true, agentId: nextScope.agentId, botId: target });
     }
     setPanelView('chat');
@@ -1837,32 +1835,23 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   };
 
   const openCloudComputer = () => {
-    // Prefer the host-owned right sidebar when the DSH host exposes it. Older
-    // hosts keep the page variant as a safe fallback.
-    if (nativeWorkbench?.available && scope?.agentId && scope?.botId) {
-      try { nativeWorkbench.open(); return; } catch { /* fallback below */ }
-    }
-    setPanelView('desktop');
+    if (!nativeWorkbench?.available) { setNotice(nativeWorkbench?.unavailableReason || '请更新 Studio 以打开原生云电脑侧栏'); return; }
+    if (!scope?.agentId || !computerBotId) { setNotice('云端助理尚未连接'); return; }
+    try { nativeWorkbench.open(); } catch (failure) { setNotice(failure.message); }
   };
 
   /* ---------- 渲染 ---------- */
 
   const bots = overview?.bots || [];
   const degraded = overviewDegraded || detailDegraded || settingsDegraded;
-  // 圆点三态点击口径（契约第 2 章）：authorized/connected 打开授权弹层；offline 是重连。
+  const foreignGrant = connection.authorized && Boolean(scope?.agentId && scope?.botId)
+    && (connection.target?.agentId !== scope.agentId || connection.target?.botId !== scope.botId);
   const onDotOpen = () => {
-    if (connectionStateOf(connection) === 'offline') {
-      // offline 的点击含义是「重连」：立刻重查连接，并把结果直接显示在弹层里。
-      setLocalAccessOpen(true); setLocalError(''); setLocalNotice('正在重新检查本机连接…');
-      void loadConnection().then(next => {
-        setLocalNotice(next?.connected ? '本机已连接，可继续授权' : '本机仍未连接：请确认 DSH Host 本机客户端在运行');
-      });
-      return;
-    }
     setLocalAccessOpen(open => !open);
-    setLocalError(''); setLocalNotice('');
+    void loadConnection();
   };
-  const dotNode = connectionDot({ h, connection, onOpen: onDotOpen });
+  const localStatus = foreignGrant ? { ...connection, foreign: true } : connection;
+  const dotNode = connectionDot({ h, connection: localStatus, onOpen: onDotOpen, open: localAccessOpen });
   const configured = config?.configured === true;
 
   const anyMenuOpen = historyMenuOpen || botMenuOpen || modelMenuOpen || settingsModelMenuOpen || attachmentMenuOpen;
@@ -1945,7 +1934,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   }) : null;
 
   const renderHeader = () => h('header', { className: 'pa-head', 'data-window-drag': '' },
-    h('span', { className: 'pa-title' }, panelView === 'desktop' ? '云电脑' : '个人助理'),
+    h('span', { className: 'pa-title' }, '个人助理'),
     // 页签在「未开通 / 配置读取失败」时也必须可见：否则用户停在开通引导页，
     // 既进不了设置页（模型、提示词、本机授权），也没有任何恢复入口。
     ((configured || Boolean(overview)) && panelView !== 'create' && panelView !== 'desktop') || panelView === 'chat'
@@ -1954,14 +1943,13 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       : null,
     panelView === 'create' ? h('span', { className: 'pa-tag warn' }, '正在开通') : null,
     h('div', { className: 'pa-head-actions' },
-      panelView === 'desktop' ? panelButton({ h, label: '返回对话', variant: 'ghost', size: 'sm', ariaLabel: '返回对话', 'data-window-drag-recall': '', icon: icon(h, 'chevL', { size: 14 }), onClick: () => setPanelView('chat') }) : null,
       panelView === 'chat' && configured ? h('span', { className: 'pa-anchor' },
         iconButton({ h, name: 'clock', label: '历史会话', pressed: historyMenuOpen, 'data-window-drag-recall': '', 'data-pa-history-menu': historyMenuOpen ? 'open' : 'closed', onClick: toggleHistoryMenu }),
         historyMenu) : null,
       panelView === 'chat' && configured ? h('span', { className: 'pa-anchor' },
         iconButton({ h, name: 'file', label: '云端附件', pressed: attachmentMenuOpen, 'data-window-drag-recall': '', 'data-pa-attachment-menu': attachmentMenuOpen ? 'open' : 'closed', onClick: toggleAttachmentMenu }),
         attachmentMenu) : null,
-      panelView === 'chat' && configured ? iconButton({ h, name: 'compose', label: '新建会话', title: conversationBusy ? '请等待本轮结束后再新建会话' : '新建云端会话', 'data-window-drag-recall': '', disabled: conversationBusy, onClick: () => conversationControlsRef.current?.createSession?.() }) : null,
+      panelView === 'chat' && configured ? iconButton({ h, name: 'compose', label: '新建会话', title: conversationBusy ? '请等待本轮结束后再新建会话' : '新建云端会话', 'data-window-drag-recall': '', disabled: conversationBusy || conversationState.phase === 'loading', onClick: () => conversationControlsRef.current?.createSession?.() }) : null,
       panelView === 'chat' && configured ? panelButton({ h, label: '云电脑', variant: 'secondary', 'data-window-drag-recall': '', ariaLabel: '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', icon: icon(h, 'monitor', { size: 14 }), className: 'pa-hide-narrow', onClick: openCloudComputer }) : null,
       panelView === 'list' && configured ? panelButton({ h, label: '新建 Bot', variant: 'primary', 'data-window-drag-recall': '', icon: icon(h, 'plus', { size: 14 }), onClick: () => setCreateBot({ open: true, name: '', busy: false, error: '' }) }) : null,
       panelView === 'settings' ? panelButton({ h, label: settingsBusy === 'save' ? '保存中…' : '保存', variant: 'primary', 'data-window-drag-recall': '', disabled: Boolean(settingsBusy) || !configured || settingsInspect?.recordSource !== 'cloud' || ['submitting', 'updating', 'verifying', 'unknown'].includes(runtimeUpgrade?.status), onClick: saveSettings }) : null,
@@ -2016,7 +2004,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       return h('main', { className: 'pa-body' },
         renderSettings({
           h, loading: settingsLoading, degraded: settingsDegraded, notice: settingsNotice, error: settingsError, busy: settingsBusy,
-          inspect: settingsInspect, versions: settingsVersions, upgrade: runtimeUpgrade, localAccess: connection, modelOptions: MODEL_OPTIONS,
+          inspect: settingsInspect, versions: settingsVersions, upgrade: runtimeUpgrade, localAccess: localStatus, modelOptions: MODEL_OPTIONS,
           instance: { configured, agentId: config?.agentId || '', botId: scope?.botId, version: settingsInspect?.runtime?.version || '', status: settingsInspect?.status || (configured ? '运行中' : '未开通'), editable: configured },
           draft: settingsDraft, closeAssistant, modelMenuOpen: settingsModelMenuOpen,
           actions: {
@@ -2035,7 +2023,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
               environmentVariables: (previous.environmentVariables || []).map((row, at) => at === index ? { ...row, ...patch, dirty: true } : row),
             })),
             onDiagnostics: () => setLocalAccessOpen(false),
-            onRevokeLocal: () => { void revokeLocalAccess(); },
             onOpenLocalAccess: () => setLocalAccessOpen(true),
             onCheckUpdate: () => void checkRuntimeUpdate(),
             onUpgrade: target => void upgradeRuntime(target),
@@ -2101,13 +2088,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
           connectionDot: null,
         }));
     }
-    if (panelView === 'desktop') {
-      return h('div', { className: 'pa-body' },
-        h(PersonalAssistantPanel, {
-          request: panelRequest, variant: 'page', connectOnMount: true, embedded: true,
-          connectionDot: dotNode, onBack: () => setPanelView('chat'),
-        }));
-    }
     // list：有缓存概览时先回显，configuration 仍在后台校准
     if (!configured && !(overview?.bots?.length > 0)) return renderOnboarding();
     return h('main', { className: 'pa-body' },
@@ -2146,20 +2126,17 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   };
 
   const popover = renderLocalAccess({
-    h, open: localAccessOpen, connection, status: connection,
-    rootsDraft: localRootsDraft, targetBotId: scope?.botId || '',
-    selectedScopes: connection.authorized ? (connection.scopes.length ? connection.scopes : localScopes) : localScopes,
-    riskConfirm: connection.authorized ? connection.riskConfirm : riskConfirmDraft,
-    busy: localBusy, error: localError, notice: localNotice,
+    h, open: localAccessOpen, connection, draft: localDraft, canPick: typeof pickDirectory === 'function', writeSupport: localWriteSupport,
+    botName: bots.find(bot => bot.id === scope?.botId)?.name || (scope?.botId === 'default' ? '默认助理' : scope?.botId),
+    foreign: foreignGrant, busy: localBusy, error: localError,
     actions: {
-      onToggleScope: id => setLocalScopes(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id]),
-      onToggleRisk: () => setRiskConfirmDraft(value => !value),
-      onRootsChange: value => setLocalRootsDraft(value),
+      onPick: () => void chooseLocalFolder(), onEdit: () => setLocalDraft(connection.roots || []),
+      onCancelEdit: () => setLocalDraft(null),
+      onRemove: path => setLocalDraft(previous => previous?.filter(root => root.path !== path) || []),
+      onMode: (path, writable) => setLocalDraft(previous => previous?.map(root => root.path === path ? { ...root, writable } : root) || []),
       onGrant: () => void grantLocalAccess(),
       onRevoke: () => void revokeLocalAccess(),
-      onOpenLocalSettings: () => setNotice('请在这台 Mac 的 系统设置 › 隐私与安全性 里调整 DSH Host 的权限'),
       onClose: () => setLocalAccessOpen(false),
-      onRefresh: () => { setLocalError(''); setLocalNotice('正在重新检查本机连接…'); void loadConnection().then(next => setLocalNotice(next?.connected ? '本机已连接，可继续授权' : '本机仍未连接：请确认 DSH Host 本机客户端在运行')); },
     },
   });
 
@@ -2169,8 +2146,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     renderHeader(),
     h('div', {
       'data-pa-body': 'true', className: 'pa-body', 'data-dim': localAccessOpen ? 'true' : 'false',
-      // 页签与面板成对标注；Create / 云电脑视图没有页签，不挂 tabpanel 角色。
-      ...(['create', 'desktop'].includes(panelView) ? {} : { role: 'tabpanel', id: `pa-panel-${activeTab}`, 'aria-labelledby': `pa-tab-${activeTab}` }),
+      // 开通页没有页签，不挂 tabpanel 角色。
+      ...(panelView === 'create' ? {} : { role: 'tabpanel', id: `pa-panel-${activeTab}`, 'aria-labelledby': `pa-tab-${activeTab}` }),
     }, renderBody()),
     anyMenuOpen ? h('button', { type: 'button', 'aria-label': '关闭菜单', tabIndex: -1, className: 'pa-scrim', style: { zIndex: 25 }, onClick: closeMenus }) : null,
     localAccessOpen ? h('button', { type: 'button', 'aria-label': '关闭本机授权弹层', tabIndex: -1, className: 'pa-scrim', onClick: () => setLocalAccessOpen(false) }) : null,
@@ -2524,8 +2501,23 @@ export function apply(ctx) {
     }
   };
 
+  const directoryPicker = globalThis.__DSH_DIRECTORY_PICKER__;
+  const pickDirectory = typeof directoryPicker?.pick === 'function' ? () => directoryPicker.pick() : undefined;
+  const listeners = new Set();
+  let workbench = null;
+  const workbenchSource = {
+    getSnapshot: () => workbench,
+    subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+  };
+  const setWorkbench = value => { workbench = value; for (const notify of listeners) notify(); };
+  if (typeof ctx.inject === 'function') scope(() => ctx.inject(['sidebarRight'], sub => {
+    const native = createAssistantWorkbench({ sidebarRight: sub.sidebarRight, slots: sub.slots,
+      render: props => AssistantNativeRightbar({ ...props, React: clientReact, Panel: PersonalAssistantPanel }) });
+    setWorkbench(native);
+    return () => { setWorkbench(null); native.dispose(); };
+  }), 'personal-assistant: native sidebar');
   scope(() => ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request }),
+    name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request, workbenchSource, pickDirectory }),
   }, PersonalAssistantWorkspace)), 'personal-assistant: workspace');
   scope(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PERSONAL_ASSISTANT_PANEL_ID, order: 90, label: '个人助理',

@@ -309,6 +309,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   const outboxRef = useRef(new Map());
   const queueRef = useRef([]);
   const flushingRef = useRef(false);
+  const creatingSessionRef = useRef(false);
   const retryTimerRef = useRef(null);
   // 事件轮询/定时器回调里要读到最新值，避免用首次渲染的闭包判断"忙不忙"。
   const sendingRef = useRef(false); sendingRef.current = sending;
@@ -487,11 +488,12 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
   }, [call, clearCalibrateTimer, scope]);
 
   const createSession = useCallback(async () => {
-    if (!aliveRef.current) return;
+    if (!aliveRef.current || creatingSessionRef.current) return;
     if (sendingRef.current || awaitingRef.current || queueRef.current.length > 0) {
       setQueueNotice('当前会话还有进行中的任务，请等待完成后再新建会话');
       return;
     }
+    creatingSessionRef.current = true;
     setPhase('loading');
     setError('');
     try {
@@ -504,7 +506,7 @@ export function PersonalAssistantConversation({ React: R, request, scope, markdo
       if (!aliveRef.current) return;
       setPhase('error');
       setError(failure?.message || '新会话创建失败，请重试');
-    }
+    } finally { creatingSessionRef.current = false; }
   }, [call, openSession]);
 
   const bootstrap = useCallback(async () => {

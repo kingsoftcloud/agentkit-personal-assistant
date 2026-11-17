@@ -9,6 +9,7 @@ import { createCloudSessionTransport } from './cloud-session-transport.mjs';
 import { BotRegistry, loadBotRegistry, publicMemoryItems } from './bot-registry.mjs';
 import { createPersonalAssistantStateStore } from './persistent-state.mjs';
 import { createLocalAccess, isLocalControlOperation } from './local-access.mjs';
+import { LOCAL_FILE_ACTIONS } from './local-file-contract.mjs';
 import { assistantDesktopService, createAssistantDesktop } from './assistant-desktop.mjs';
 // Own the transport dependency: Host packaging and pnpm hoisting must not
 // select Node's incompatible built-in WebSocket or silently drop its CA option.
@@ -78,6 +79,7 @@ const LOCAL_OPERATIONS = new Set([
   'personal-assistant.bot.memory.delete',
   'personal-assistant.bot.model.update',
   'personal-assistant.local-access.status',
+  'personal-assistant.local-access.capabilities',
   'personal-assistant.local-access.grant',
   'personal-assistant.local-access.revoke',
   'personal-assistant.create.status',
@@ -667,10 +669,20 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
   async function handleLocalOperation(operation, payload, signal) {
     const services = await ensureServices();
     if (operation === 'personal-assistant.local-access.status') return services.localAccess.status();
-    if (operation === 'personal-assistant.local-access.grant') {
+    if (operation === 'personal-assistant.local-access.capabilities' || operation === 'personal-assistant.local-access.grant') {
       const current = await binding();
       if (payload.agentId && payload.agentId !== current.agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', '云端助理已改变，请重新打开授权页面', 409);
-      return services.localAccess.grant({ scopes: payload.scopes, roots: payload.roots, target: { ...await localTarget(current, signal, true), botId: requireBotId(payload.botId) } });
+      const grant = operation === 'personal-assistant.local-access.grant';
+      const target = { ...await localTarget(current, signal, grant), botId: requireBotId(payload.botId) };
+      if (!grant || (Array.isArray(payload.roots) && payload.roots.some(root => root?.writable === true))) {
+        const capabilities = await deviceTransport.request(target, 'personal-assistant.device.capabilities', {}, signal).catch(error => {
+          if (['LOCAL_DEVICE_INVALID', 'LOCAL_OPERATION_UNSUPPORTED', 'CLOUD_SESSION_OPERATION_UNSUPPORTED', 'PERSONAL_ASSISTANT_CLOUD_SESSION_UPGRADE_REQUIRED'].includes(error.code)) return { fileWrite: false };
+          throw error;
+        });
+        if (!grant) return { fileWrite: capabilities?.fileWrite === true };
+        if (capabilities?.fileWrite !== true) throw fail('LOCAL_WRITE_REQUIRES_RUNTIME_UPDATE', '请先升级云端运行时，再开启目录写入', 409);
+      }
+      return services.localAccess.grant({ scopes: payload.scopes, roots: payload.roots, target });
     }
     if (operation === 'personal-assistant.local-access.revoke') return services.localAccess.revoke();
     if (operation === 'personal-assistant.create.status') return publicCreateStatus();
@@ -816,7 +828,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       const services = await ensureServices();
       services.localAccess.assertAuthorized();
       const action = operation.slice('personal-assistant.local-control.'.length);
-      if (!['file.read', 'file.list'].includes(action)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前仅支持授权目录只读操作', 404);
+      if (!LOCAL_FILE_ACTIONS.includes(action)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前不支持此本机文件操作', 404);
       const access = await services.localAccess.status();
       const current = await binding();
       if (current.agentId !== access.target?.agentId) throw fail('LOCAL_ACCOUNT_CHANGED', '助理绑定已改变，请重新授权', 403);
