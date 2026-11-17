@@ -326,8 +326,7 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     const client = await getClient();
     const result = await client.action('ListAgents', { Page: 1, PageSize: 100 }, { signal });
     const rows = result?.data?.Agents ?? result?.Agents ?? [];
-    return rows.filter(row => record(row) && row.Framework === 'personal-assistant'
-      && row.Status === 'RUNNING' && AGENT_ID.test(text(row.AgentId)))
+    return rows.filter(row => record(row) && row.Framework === 'personal-assistant' && AGENT_ID.test(text(row.AgentId)))
       .sort((left, right) => String(right.CreatedAt || '').localeCompare(String(left.CreatedAt || '')));
   }
 
@@ -387,45 +386,61 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     } catch { signal?.throwIfAborted?.(); return ''; }
   }
 
-  async function bindingUsable(binding, signal) {
+  async function bindingHealth(binding, signal) {
     try {
       const data = await gatewayTicket(binding, { botId: DIRECTORY_BOT_ID, mode: 'read' }, signal);
-      return record(data) && TICKET.test(String(data.Ticket || ''));
+      return record(data) && TICKET.test(String(data.Ticket || '')) ? 'ready' : 'unavailable';
     } catch (error) {
-      // 401/403：凭证被拒。409：网关对「实例已不存在」返回 Code 404（在 gatewayTicket 里映射为
-      // 409）——两者都只说明本地这条绑定过期，必须当作不可用继续往下走。若在这里原样抛出，
-      // 一条死绑定会让 configuration() 整体失败，页面就看不到「未开通」也无法给出开通引导。
-      if ([401, 403, 409].includes(Number(error?.status))) return false;
-      throw error;
+      signal?.throwIfAborted();
+      return Number(error?.status) === 401 ? 'key-rejected' : 'unavailable';
     }
   }
 
-  /** Resolve, verify and (when the stored key is gone) re-acquire the binding. */
+  /** A missing list entry is not proof that a bound instance was removed or belongs to another account. */
+  async function inspectBoundAgent(binding, agents, signal) {
+    const listed = agents.find(row => row.AgentId === binding.agentId);
+    if (listed) return listed;
+    if (typeof getClient !== 'function') return { AgentId: binding.agentId, Name: binding.label, Status: 'RUNNING' };
+    const client = await getClient();
+    let detail;
+    try { detail = actionData(await client.action('GetAgent', { AgentId: binding.agentId }, { signal })); }
+    catch (error) {
+      if ([403, 404].includes(Number(error?.status))) return null;
+      throw error;
+    }
+    const basic = detail?.Basic ?? detail;
+    if (basic?.AgentId !== binding.agentId || (detail?.Deployment?.Framework ?? basic?.Framework) !== 'personal-assistant') {
+      throw fail('ASSISTANT_BINDING_UNVERIFIED', '暂时无法确认已绑定的个人助理，请稍后重试', 502);
+    }
+    return basic;
+  }
+
+  /** Reconnect to the bound instance until the control plane confirms it is gone. */
   async function refresh(signal, readyAgent = null) {
     const agents = readyAgent ? [readyAgent] : await discover(signal).catch(() => []);
-    const candidates = agents.map(row => ({ agentId: row.AgentId, name: text(row.Name), status: text(row.Status),
+    const running = agents.filter(row => row.Status === 'RUNNING');
+    const candidates = running.map(row => ({ agentId: row.AgentId, name: text(row.Name), status: text(row.Status),
       framework: text(row.Framework), endpoint: text(row.Endpoint), createdAt: text(row.CreatedAt) }));
-    const selected = candidates[0] ? agents[0] : null;
-    let binding = await readBinding();
-    // The account moved to a newer instance: the stored key still belongs to
-    // the old one, so fall through to the re-acquisition path.
-    if (binding && selected && binding.agentId !== selected.AgentId) binding = null;
-    if (binding && await bindingUsable(binding, signal)) return { binding, candidates, reason: '' };
-    // The stored key is stale (or belonged to another instance). Never keep it:
-    // 留下的死绑定会让之后每次检查都失败，必须在判定为过期时就清掉。
-    if (binding) {
-      await rm(file, { force: true }).catch(() => {});
-      cached = null; cacheAt = 0;
+    const binding = await readBinding();
+    const bound = binding && (readyAgent
+      ? readyAgent.AgentId === binding.agentId ? readyAgent : null
+      : await inspectBoundAgent(binding, agents, signal));
+    let selected = running[0];
+    const retained = bound && !['TERMINATED', 'DELETED'].includes(text(bound.Status).toUpperCase());
+    if (retained) {
+      selected = bound;
+      // During an image roll the gateway may reject a ticket while this instance still belongs to the account.
+      if (bound.Status !== 'RUNNING' || await bindingHealth(binding, signal) !== 'key-rejected') return { binding, candidates, reason: '' };
+    } else if (binding && !readyAgent) {
+      await disconnect();
     }
-    binding = null;
     if (!selected) return { binding: null, candidates, reason: 'needs-create' };
     const gatewayUrl = await environmentGateway();
     const apiKey = await acquireKey(selected.AgentId, signal);
     if (!apiKey) return { binding: null, candidates, reason: 'credential-unavailable' };
-    const next = { gatewayUrl, agentId: selected.AgentId, apiKey, label: text(selected.Name).slice(0, 80) };
-    // Prove the fresh key before persisting: a platform gap must not leave a
-    // dead credential in the Host store.
-    if (!await bindingUsable(next, signal)) return { binding: null, candidates, reason: 'credential-unavailable' };
+    const next = { gatewayUrl, agentId: selected.AgentId, apiKey, label: text(selected.Name).slice(0, 80),
+      manifest: retained ? binding.manifest : '' };
+    if (await bindingHealth(next, signal) !== 'ready') return { binding: null, candidates, reason: 'credential-unavailable' };
     await writeBinding(next);
     return { binding: next, candidates, reason: '' };
   }

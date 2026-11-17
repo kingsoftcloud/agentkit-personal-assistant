@@ -1,12 +1,69 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createAssistantDesktop } from '../src/assistant-desktop.mjs';
 
 const AGENT = 'ar-20261110220000-catalog';
 const KEY = `ak-${'0123456789abcdef'.repeat(2)}`;
+
+test('an unavailable bound instance keeps its identity while another instance is running', async t => {
+  const storeDir = await mkdtemp(join(tmpdir(), 'pa-binding-roll-'));
+  t.after(() => rm(storeDir, { recursive: true, force: true }));
+  const path = join(storeDir, 'assistant-binding.json');
+  const gatewayUrl = 'https://gateway.example';
+  const saved = { format: 'agentkit.personal-assistant-binding/v1', agentId: AGENT, apiKey: KEY, gatewayUrl };
+  await writeFile(path, JSON.stringify(saved));
+  const alternative = { AgentId: 'ar-newer', Name: 'Alternate', Status: 'RUNNING', Framework: 'personal-assistant' };
+  let status = 'UPDATING';
+  const client = { action: async (name, input) => {
+    if (name === 'ListAgents') return { data: { Agents: [alternative] } };
+    assert.equal(name, 'GetAgent');
+    assert.equal(input.AgentId, AGENT);
+    return { data: { Basic: { AgentId: AGENT, Status: status }, Deployment: { Framework: 'personal-assistant' } } };
+  } };
+  let ticketUnavailable = true;
+  const fetchImpl = async (_, { body }) => {
+    assert.equal(JSON.parse(body).AgentId, AGENT);
+    return ticketUnavailable ? Response.json({ Code: 404 }, { status: 404 })
+      : Response.json({ Code: 0, Data: { Ticket: 't'.repeat(43) } });
+  };
+  const options = { storeDir, fetchImpl, getClient: async () => client };
+  assert.deepEqual(await createAssistantDesktop(options).configuration(), { configured: true, agentId: AGENT });
+  status = 'RUNNING';
+  assert.deepEqual(await createAssistantDesktop(options).configuration(), { configured: true, agentId: AGENT });
+  ticketUnavailable = false;
+  assert.deepEqual(await createAssistantDesktop(options).configuration(), { configured: true, agentId: AGENT });
+  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), saved);
+});
+
+test('the control plane can confirm a removed binding and discover another running instance', async t => {
+  const storeDir = await mkdtemp(join(tmpdir(), 'pa-binding-removed-'));
+  t.after(() => rm(storeDir, { recursive: true, force: true }));
+  const path = join(storeDir, 'assistant-binding.json');
+  const gatewayUrl = 'https://gateway.example';
+  await writeFile(path, JSON.stringify({ format: 'agentkit.personal-assistant-binding/v1', agentId: AGENT, apiKey: KEY, gatewayUrl }));
+  const newId = 'ar-replacement';
+  const getClient = async () => ({ action: async (name, input) => {
+    if (name === 'ListAgents') return { data: { Agents: [{ AgentId: newId, Status: 'RUNNING', Framework: 'personal-assistant' }] } };
+    if (name === 'GetAgent') {
+      assert.equal(input.AgentId, AGENT);
+      throw Object.assign(new Error('Not found'), { status: 404 });
+    }
+    assert.equal(name, 'CreateAgentApiKey');
+    assert.equal(input.AgentId, newId);
+    return { data: { ApiKey: KEY } };
+  } });
+  const fetchImpl = async (_, { body }) => {
+    assert.equal(JSON.parse(body).AgentId, newId);
+    return Response.json({ Code: 0, Data: { Ticket: 't'.repeat(43) } });
+  };
+  const service = createAssistantDesktop({ storeDir, fetchImpl, getClient,
+    env: { AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL: gatewayUrl } });
+  assert.deepEqual(await service.configuration(), { configured: true, agentId: newId });
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).agentId, newId);
+});
 function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 'pre-online', agentStatus, agentApiKey, deploymentApiKey, failCreateKey = false, onStatusRead } = {}) {
   const storeDirPromise = mkdtemp(join(tmpdir(), 'pa-assistant-desktop-'));
   let created = false;
