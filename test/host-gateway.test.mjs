@@ -60,23 +60,13 @@ test('DSH owner-only Connection Fetch carries the standard RPC envelope and clea
   dispose(); assert.equal(removed, true);
 });
 
-test('本机授权与 local-control 前置校验：未授权 403，授权后按未实现 404，撤销后恢复 403', async () => {
+test('unbound Host refuses placeholder grants and local operations remain unauthorized', async () => {
   const gateway = createPersonalAssistantHostGateway({}, { env: {} });
-  const status = await gateway.request('personal-assistant.local-access.status');
-  assert.equal(status.authorized, false);
-  assert.equal(status.connected, false);
-  await assert.rejects(gateway.request('personal-assistant.local-control.session.create'),
-    { code: 'PERSONAL_ASSISTANT_LOCAL_NOT_AUTHORIZED', status: 403 });
-
-  assert.deepEqual(await gateway.request('personal-assistant.local-access.grant', { scopes: ['session.create'], riskConfirm: true }),
-    { authorized: true, grantedAt: (await gateway.request('personal-assistant.local-access.status')).grantedAt });
-  assert.equal((await gateway.request('personal-assistant.local-access.status')).authorized, true);
-  await assert.rejects(gateway.request('personal-assistant.local-control.session.create'),
-    { code: 'PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', status: 404 });
-
-  assert.deepEqual(await gateway.request('personal-assistant.local-access.revoke'), { authorized: false });
-  await assert.rejects(gateway.request('personal-assistant.local-control.session.create'),
-    { code: 'PERSONAL_ASSISTANT_LOCAL_NOT_AUTHORIZED', status: 403 });
+  assert.equal((await gateway.request('personal-assistant.local-access.status')).authorized, false);
+  await assert.rejects(gateway.request('personal-assistant.local-control.session.create'), { status: 403 });
+  await assert.rejects(gateway.request('personal-assistant.local-access.grant', { scopes: ['session.create'] }));
+  assert.equal((await gateway.request('personal-assistant.local-access.status')).authorized, false);
+  gateway.dispose();
 });
 
 test('新增本机 operation 在未绑定云端时降级返回，且不改变既有 operation 语义', async () => {
@@ -110,9 +100,17 @@ test('注册层把 local-control.* 交给授权校验，而不是直接回 404',
   assert.equal(denied.error.code, 'PERSONAL_ASSISTANT_LOCAL_NOT_AUTHORIZED');
   assert.equal(denied.error.details.status, 403);
   const granted = await handler('personal-assistant.local-access.grant', { scopes: ['session.create'], riskConfirm: false });
-  assert.equal(granted.ok, true);
+  assert.equal(granted.ok, false);
   const unsupported = await handler('personal-assistant.local-control.session.create', {});
   assert.equal(unsupported.ok, false);
-  assert.equal(unsupported.error.details.status, 404);
+  assert.equal(unsupported.error.details.status, 403);
   dispose();
+});
+
+test('a stale authorization page cannot grant directories to another bound assistant', async () => {
+  let granted = false;
+  const gateway = createPersonalAssistantHostGateway(config, { env: {}, localAccess: { grant() { granted = true; } } });
+  await assert.rejects(gateway.request('personal-assistant.local-access.grant', { agentId: 'ar-old-view', botId: 'default', scopes: ['file.read'], roots: ['/documents'] }), { code: 'PERSONAL_ASSISTANT_AGENT_MISMATCH' });
+  assert.equal(granted, false);
+  gateway.dispose();
 });

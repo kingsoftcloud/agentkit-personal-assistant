@@ -61,3 +61,10 @@ test('保存设置的提示文案（notice）必须渲染出来', () => {
     .join('\n');
   assert.match(statusTexts, /已提交云端更新/u, 'notice 不能被丢弃，否则保存成功后没有任何反馈');
 });
+
+test('upgrade waits for the authenticated Bot scope before allowing a click', () => {
+  const options = { h, versions: { upgrades: [{ version: '0.2.0' }] } };
+  const upgrade = tree => findAll(tree, node => node.type === 'button' && textOf(node).join('') === '升级到 v0.2.0')[0];
+  assert.equal(upgrade(renderSettings({ ...options, instance: { configured: true } })).props.disabled, true);
+  assert.equal(upgrade(renderSettings({ ...options, instance: { configured: true, botId: 'default' } })).props.disabled, false);
+});

@@ -116,78 +116,26 @@ test('client maps durable session and memory operations to the public gateway', 
 });
 
 
-test('public DSH client entry registers a Session launcher and sidebar row', () => {
+test('PA has its own main surface and never contributes a tab or composer to ordinary sessions', () => {
   const entries = [];
   const ctx = {
-    sidebarRight: { openTab(kind) { opened.push(kind); } },
-    effect(factory) { return factory(); },
-    get() { return undefined; },
+    connection: { rpc: { call: async () => ({ ok: true, value: {} }) } },
+    sessions: { create() { assert.fail('opening PA must not create a presentation-only local Session'); } },
+    uiWorkspace: { openSession() { assert.fail('PA must not replace the selected ordinary Session'); } },
+    uiConversation: { views: { register() { assert.fail('PA must not activate blank ordinary Sessions'); } } },
+    effect: factory => factory(),
     slots: {
-      inject(name, factory) {
-        entries.push(factory());
-        assert.ok(['conversation.view', 'conversation.composer', 'main', 'sidebar.panellist', 'settings.section'].includes(name));
-        return () => {};
-      },
-      register(definition, component) {
-        return { definition, component };
-      },
+      inject(_name, factory) { entries.push(factory()); return () => {}; },
+      register(definition, component) { return { definition, component }; },
     },
   };
   applyClient(ctx);
-  assert.deepEqual(clientInject, ['slots', 'connection', 'sidebarRight', 'uiWorkspace', 'workspaces', 'sessions', 'uiConversation']);
-  assert.deepEqual(entries.map(entry => entry.definition.name), ['conversation.view', 'conversation.composer', 'main', 'sidebar.panellist', 'settings.section']);
-  assert.equal(entries[0].definition.id, PERSONAL_ASSISTANT_VIEW_ID);
-  assert.equal(entries[1].component({ session: { sessionId: 'other' } }), null);
-  assert.equal(entries[2].definition.key, PERSONAL_ASSISTANT_PANEL_ID);
-  assert.equal(entries[2].component(), '正在打开个人助理会话…');
-  assert.equal(entries[3].definition.id, PERSONAL_ASSISTANT_PANEL_ID);
-  assert.equal(entries[3].component(), '助');
-  assert.equal(entries[4].definition.id, `${PERSONAL_ASSISTANT_PANEL_ID}-settings`);
-  assert.equal(entries[4].definition.label, '个人助理');
-  assert.deepEqual(PERSONAL_ASSISTANT_CLIENT_DEFAULTS, { enabled: false, autoConnect: false });
-});
-
-test('PA main launcher creates a dedicated DSH Session and activates the PA view', async () => {
-  const entries = [];
-  const activations = [];
-  const conversationViews = [];
-  const opened = [];
-  let created = 0;
-  const slots = {
-    inject(_name, factory) { entries.push(factory()); return () => {}; },
-    register(definition, component) { return { definition, component }; },
-  };
-  const ctx = {
-    sidebarRight: { openTab() {} },
-    sessions: {
-      list: { getSnapshot: () => ({ byId: {} }) },
-      async create() { assert.fail('PA should prefer the DSH UI workspace creation path'); },
-    },
-    uiWorkspace: {
-      async openWorkspace(workspace, prepare) { assert.equal(workspace, null); created += 1; prepare(`dsh-session-${created}`); },
-      openSession(id) { opened.push(id); },
-    },
-    uiConversation: {
-      views: { register(definition) { conversationViews.push(definition); return () => {}; } },
-      binding(id) { return { activate(view) { activations.push({ id, view }); } }; },
-    },
-    effect(factory) { return factory(); },
-    get() { return undefined; },
-    slots,
-  };
-  applyClient(ctx);
-  const main = entries.find(entry => entry.definition.name === 'main');
-  const openSession = main.definition.inject().openSession;
-  assert.equal(await openSession(), 'dsh-session-1');
-  assert.deepEqual(conversationViews.map(view => view.target), [PERSONAL_ASSISTANT_VIEW_ID]);
-  assert.equal(conversationViews[0].isActive(true), true);
-  assert.deepEqual(activations, [{ id: 'dsh-session-1', view: PERSONAL_ASSISTANT_VIEW_ID }]);
-  assert.deepEqual(opened, ['dsh-session-1']);
-  // The second call reuses the dedicated PA Session, never an arbitrary active Session.
-  ctx.sessions.list.getSnapshot = () => ({ byId: { 'dsh-session-1': { removed: false } } });
-  assert.equal(await openSession(), 'dsh-session-1');
-  assert.equal(created, 1);
-  assert.equal(opened.length, 2);
+  assert.deepEqual(entries.map(entry => entry.definition.name), ['main', 'sidebar.panellist', 'settings.section']);
+  const main = entries[0];
+  assert.equal(main.definition.key, PERSONAL_ASSISTANT_PANEL_ID);
+  assert.equal(typeof main.definition.inject().request, 'function');
+  assert.equal('openSession' in main.definition.inject(), false);
+  assert.deepEqual(clientInject, ['slots', 'connection']);
 });
 
 test('letterboxed desktop keeps ten grid coordinates within two pixels', () => {
@@ -216,55 +164,10 @@ test('client apply rejects a context without the public DSH slots service', () =
   assert.throws(() => applyClient({}), /public DSH slots service/);
 });
 
-test('Session surface package declares the DSH UI services it injects', async () => {
-  const packageJson = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'));
-  const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../personal-assistant.plugin.json'), 'utf8'));
-  const inject = packageJson.dsh?.client?.inject || [];
-  for (const name of ['@deepseek-ai/dsh-client-ui-session', '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-workspace']) {
-    assert.ok(inject.includes(name), `${name} must be declared for the PA Session surface`);
-  }
-  assert.equal(manifest.version, packageJson.version, 'plugin manifest and npm package versions must match');
+test('Workspace uses only the public slot renderer and connection', async () => {
+  const packageJson = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.deepEqual(packageJson.dsh.client.inject, ['@deepseek-ai/dsh-client-connection', '@deepseek-ai/dsh-client-ui-renderer']);
 });
-
-test('右侧栏云电脑标签页与设置页注册在插件作用域内，卸载即撤销', () => {
-  const effectDisposers = [];
-  const injected = [];
-  const tabTypes = [];
-  const opened = [];
-  const slots = {
-    inject(name, factory) { injected.push(factory()); return () => {}; },
-    register(definition, component) { return { definition, component }; },
-  };
-  const sub = {
-    slots,
-    sidebarRightTabs: { register(definition) { tabTypes.push(definition); return () => {}; } },
-    sidebarRight: { openTab(kind) { opened.push(kind); } },
-  };
-  const ctx = {
-    sidebarRight: { openTab(kind) { opened.push(kind); } },
-    effect(factory) { const dispose = factory(); assert.equal(typeof dispose, 'function'); effectDisposers.push(dispose); return dispose; },
-    inject(names, factory) { return factory(sub); },
-    slots,
-  };
-  applyClient(ctx);
-
-  assert.equal(tabTypes.length, 1);
-  assert.equal(tabTypes[0].id, PERSONAL_ASSISTANT_COMPUTER_TAB);
-  assert.equal(tabTypes[0].kind, PERSONAL_ASSISTANT_COMPUTER_TAB);
-  assert.equal(tabTypes[0].title(), '云电脑');
-  assert.equal(tabTypes[0].guide.length, 1);
-  assert.equal(tabTypes[0].guide[0].title(), '云电脑');
-  assert.deepEqual(injected.map(entry => entry.definition.name), [
-    'conversation.view', 'conversation.composer', 'main', 'sidebar.panellist', 'settings.section', 'sidebar.right.pane.tab', 'sidebar.right.pane.tab.title',
-  ]);
-  assert.equal(injected[5].definition.key, PERSONAL_ASSISTANT_COMPUTER_TAB);
-  assert.equal(injected[6].component(), '云电脑');
-  assert.equal(typeof injected[2].definition.inject().openSession, 'function');
-  assert.equal(injected[0].definition.id, PERSONAL_ASSISTANT_VIEW_ID);
-  assert.deepEqual(opened, []);
-  assert.equal(effectDisposers.length, 6);
-});
-
 
 test('个人助理侧栏图标是SVG，两条路径，不退回纯文本占位', () => {
   setClientReactRuntime({ createElement: (type, props, ...children) => ({ type, props, children }) });
@@ -293,4 +196,24 @@ test('滚轮按像素累计成刻度：鼠标一格 = 1 次滚动，余数跨帧
   assert.deepEqual(mergeWheel({ x: 0, y: 0 }, { deltaX: 120 }).clicks, { deltaX: 1, deltaY: 0 });
   assert.deepEqual(mergeWheel({ x: 0, y: 0 }, {}).clicks, { deltaX: 0, deltaY: 0 });
   assert.deepEqual(mergeWheel().clicks, { deltaX: 0, deltaY: 0 });
+});
+
+test('a live directory grant enables only the named local tool and never overrides an explicit Bot deny', async () => {
+  for (const deny of [[], ['assistant_local_read']]) {
+    let guard, granted = false;
+    const definitions = [];
+    const tools = { restrict() {}, guard(value) { guard = value; }, register(value) { definitions.push(value); } };
+    const agent = { ctx: { on() {}, get: name => name === 'tools' ? tools : name === 'systemPrompt' ? { section() {} } : undefined } };
+    const controller = { projections: async () => undefined, create: async () => {}, resolveAgent: async () => ({agent}), prompt: async () => ({accepted:true}) };
+    const runtime = createRuntime({ sessionController: controller }, { bots: [{botId:'default',systemPromptRevision:'v1',toolPolicy:{mode:'allowlist',allow:[],deny,requireApproval:[]}}] });
+    runtime.setLocalDeviceService({hasGrant: botId => botId === 'default' && granted});
+    await runtime.submitTurn({botId:'default',sessionId:'local-grant-test',input:'read'});
+    assert.equal(definitions.some(tool => tool.name === 'assistant_local_read'), true);
+    assert.match(guard({name:'assistant_local_read',token:Symbol()}), /BOT_TOOL_POLICY_DENIED/);
+    granted = true;
+    assert.equal(Boolean(guard({name:'assistant_local_read',token:Symbol()})), deny.length > 0);
+    assert.match(guard({name:'bash',token:Symbol()}), /HOST_TOOL_FORBIDDEN/);
+    granted = false;
+    assert.match(guard({name:'assistant_local_read',token:Symbol()}), /BOT_TOOL_POLICY_DENIED/);
+  }
 });

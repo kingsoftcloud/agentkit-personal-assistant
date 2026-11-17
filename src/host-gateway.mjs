@@ -1,5 +1,5 @@
 /** 通过 DSH 已鉴权 Connection RPC 转接到固定云网关；凭据始终留在 Host。 */
-import { createRequire } from 'node:module';
+import { WebSocket } from 'ws';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -10,27 +10,13 @@ import { BotRegistry, loadBotRegistry, publicMemoryItems } from './bot-registry.
 import { createPersonalAssistantStateStore } from './persistent-state.mjs';
 import { createLocalAccess, isLocalControlOperation } from './local-access.mjs';
 import { assistantDesktopService, createAssistantDesktop } from './assistant-desktop.mjs';
-/**
- * 云网关会拒掉 Node 内置（undici）WebSocket：握手成功后立即 1006 断开且不带关闭帧，
- * 面板只能看到「连接暂时不可用」。实测同一张 ticket 下浏览器、Python websockets 与 `ws`
- * 包均正常，因此这里优先解析 Node 原生 `ws`（DSH Host 自带），再回退全局 WebSocket。
- * 解析顺序：DSH Host 入口所在包 → 插件所在包及其上级 → 云端固定安装路径。
- */
-const resolveDefaultWebSocket = () => {
-  for (const base of [process.argv[1], import.meta.url, new URL('../../', import.meta.url).href, '/opt/agentkit/dsh-runtime/node_modules/']) {
-    if (!base) continue;
-    try {
-      const loaded = createRequire(base)('ws');
-      const Impl = loaded?.WebSocket ?? loaded?.default ?? loaded;
-      if (typeof Impl === 'function') return Impl;
-    } catch {}
-  }
-  return globalThis.WebSocket;
-};
-const DEFAULT_WEBSOCKET = resolveDefaultWebSocket();
+// Own the transport dependency: Host packaging and pnpm hoisting must not
+// select Node's incompatible built-in WebSocket or silently drop its CA option.
+const DEFAULT_WEBSOCKET = WebSocket;
 const ENDPOINT = '/api/personal-assistant';
 // 所有会话操作必须经过云端绑定和具名 Bot 的签名 control 票据。
 const SESSION_OPERATIONS = Object.freeze([
+  'personal-assistant.runtime.inspect',
   'personal-assistant.sessions.list',
   'personal-assistant.session.create',
   'personal-assistant.session.snapshot',
@@ -55,6 +41,8 @@ const BINDING_OPERATIONS = Object.freeze([
   'personal-assistant.settings.inspect',
   'personal-assistant.settings.update',
   'personal-assistant.settings.versions',
+  'personal-assistant.settings.upgrade',
+  'personal-assistant.settings.upgrade-status',
 ]);
 const BINDING_METHODS = Object.freeze({
   'personal-assistant.desktop.status': 'status',
@@ -65,6 +53,8 @@ const BINDING_METHODS = Object.freeze({
   'personal-assistant.settings.inspect': 'settings',
   'personal-assistant.settings.update': 'settingsUpdate',
   'personal-assistant.settings.versions': 'settingsVersions',
+  'personal-assistant.settings.upgrade': 'settingsUpgrade',
+  'personal-assistant.settings.upgrade-status': 'settingsUpgradeStatus',
 });
 // 这些写操作会改变 Host 侧的实例或绑定（创建/切换/断开/关闭/更新配置），必须绕过
 // binding 缓存重新读取，否则「刚创建或刚切换的实例」会被几毫秒前的旧绑定吃掉。
@@ -74,6 +64,7 @@ const BINDING_REFRESH_OPERATIONS = new Set([
   'personal-assistant.desktop.disconnect',
   'personal-assistant.desktop.destroy',
   'personal-assistant.settings.update',
+  'personal-assistant.settings.upgrade',
 ]);
 const AGENT_ID = /^ar-[A-Za-z0-9-]{4,120}$/u;
 const BOT_ID = /^[a-z][a-z0-9._-]{0,63}$/u;
@@ -299,7 +290,7 @@ export const LEGACY_STUDIO_PERSONAL_ASSISTANT_DESKTOP_SERVICE = 'studioPersonalA
 
 // 默认走系统信任链：内网/预发网关的证书不在 Node 内置 CA 里，直接 fetch 会 "fetch failed"。
 const defaultFetchImpl = createSystemFetch();
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getHostDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, hostVersion, clipboardExecFile } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getHostDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, hostVersion, clipboardExecFile, getStateRoot } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -349,16 +340,13 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       return { configured, agentId, host: undefined };
     }
     hostSeen = true;
+    // Control-plane settings remain available while the data-plane runtime rolls.
+    if (skipConfiguration) return { configured, agentId, host: hostService };
     // 服务对象被替换（晚加载/重载）时，旧缓存里的 Host 服务引用不能继续用。
     if (cachedBinding && cachedBinding.value.host !== hostService) clearBindingCache();
     if (!fresh && cachedBinding && Date.now() - cachedBinding.at < bindingCacheTtlMs) return cachedBinding.value;
     // 并发合并：同一时刻只向 Host 打一次 configuration，其余请求共享同一个 promise。
     if (!fresh && pendingBinding) return pendingBinding;
-    // First creation must not be blocked by an old binding whose gateway
-    // probe fails. Creation replaces that binding, and only needs the Host's
-    // create capability; configuration/issueTicket are still required for
-    // every operation that reads or uses the existing instance.
-    if (skipConfiguration) return { configured, agentId, host: hostService };
     if (typeof hostService.configuration !== 'function' || typeof hostService.issueTicket !== 'function') {
       clearBindingCache();
       throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', '请更新 Host 云连接服务', 503);
@@ -398,6 +386,10 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     issueTicket: (scope, signal) => request('personal-assistant.desktop.ticket', scope, signal),
     WebSocketImpl, ca: trustedCAs(),
   });
+  const deviceTransport = createCloudSessionTransport({
+    issueTicket: (scope, signal) => request('personal-assistant.desktop.ticket', scope, signal),
+    WebSocketImpl, ca: trustedCAs(), timeoutMs: 30_000,
+  });
   function publicBindingStatus(value) {
     if (!plain(value) || typeof value.configured !== 'boolean') throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 返回的绑定状态无效', 502);
     const reason = typeof value.reason === 'string' ? value.reason.slice(0, 80) : '';
@@ -432,7 +424,8 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       model: settingsText(value.model, 120),
       prompt: typeof value.prompt === 'string' ? value.prompt.slice(0, 8_000) : '',
       environmentVariables,
-      recordSource: value.recordSource === 'host' ? 'host' : 'missing',
+      recordSource: ['host', 'cloud'].includes(value.recordSource) ? value.recordSource : 'missing',
+      detailAvailable: value.detailAvailable === true, detailNote: settingsText(value.detailNote, 300),
     };
   }
   function publicSettingsVersions(value) {
@@ -441,7 +434,8 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       .filter(row => typeof row.version === 'string' && /^\d+\.\d+\.\d+$/u.test(row.version))
       .slice(0, 200).map(row => ({ version: row.version, image: settingsText(row.image, 200),
         capabilities: Array.isArray(row.capabilities) ? row.capabilities.filter(cap => typeof cap === 'string').slice(0, 20) : [] }));
-    return { currentVersion: settingsText(value.currentVersion, 40), versions, catalogAvailable: versions.length > 0 };
+    const upgrades = versions.filter(row => value.upgrades?.some(item => item.version === row.version));
+    return { currentVersion: settingsText(value.currentVersion, 40), versions, upgrades, catalogAvailable: versions.length > 0 };
   }
   function publicSettingsUpdate(value) {
     if (!plain(value) || value.saved !== true) throw fail('PERSONAL_ASSISTANT_HOST_UNAVAILABLE', 'Host 没有确认配置已提交，请稍后重试', 502);
@@ -459,13 +453,6 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     return servicesPromise;
   };
 
-  function hostConnected() {
-    try {
-      const hostService = getHostDesktop();
-      return Boolean(hostService && typeof hostService.configuration === 'function' && typeof hostService.issueTicket === 'function');
-    } catch { return false; }
-  }
-
   async function createHostServices() {
     const profileId = String(config.profileId ?? agentId ?? 'default').trim() || 'default';
     let registry;
@@ -473,12 +460,14 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     try { registry = botRegistry ?? loadBotRegistry({ bots: config.bots, env, profileId }); }
     catch { registryError = true; registry = new BotRegistry({ profileId }); }
     let store = stateStore ?? null;
-    if (!store && stateRoot) {
-      try { store = await createPersonalAssistantStateStore(stateRoot).init(); } catch { store = null; }
+    const localStateRoot = stateRoot || getStateRoot?.();
+    if (!store && localStateRoot) {
+      try { store = await createPersonalAssistantStateStore(localStateRoot).init(); } catch { store = null; }
     }
     const access = localAccess ?? createLocalAccess({
       stateStore: store,
-      probeConnection: () => hostConnected(),
+      transport: (scope, operation, payload, signal) => deviceTransport.request(scope, operation, payload, signal),
+      getTarget: () => binding(),
       platform: String(platform ?? process.platform),
       hostVersion: String(hostVersion ?? config.hostVersion ?? env.DSH_HOST_VERSION ?? ''),
     });
@@ -674,7 +663,11 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
   async function handleLocalOperation(operation, payload, signal) {
     const services = await ensureServices();
     if (operation === 'personal-assistant.local-access.status') return services.localAccess.status();
-    if (operation === 'personal-assistant.local-access.grant') return services.localAccess.grant({ scopes: payload.scopes, riskConfirm: payload.riskConfirm });
+    if (operation === 'personal-assistant.local-access.grant') {
+      const current = await binding();
+      if (payload.agentId && payload.agentId !== current.agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', '云端助理已改变，请重新打开授权页面', 409);
+      return services.localAccess.grant({ scopes: payload.scopes, roots: payload.roots, target: { agentId: current.agentId, botId: requireBotId(payload.botId) } });
+    }
     if (operation === 'personal-assistant.local-access.revoke') return services.localAccess.revoke();
     if (operation === 'personal-assistant.create.status') return publicCreateStatus();
     if (operation === 'personal-assistant.bots.overview') return publicOverview(services, signal);
@@ -818,7 +811,12 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (isLocalControlOperation(operation)) {
       const services = await ensureServices();
       services.localAccess.assertAuthorized();
-      throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
+      const action = operation.slice('personal-assistant.local-control.'.length);
+      if (!['file.read', 'file.list'].includes(action)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前仅支持授权目录只读操作', 404);
+      const access = await services.localAccess.status();
+      const current = await binding();
+      if (current.agentId !== access.target?.agentId) throw fail('LOCAL_ACCOUNT_CHANGED', '助理绑定已改变，请重新授权', 403);
+      return cloudSessions.request(access.target, 'personal-assistant.device.execute', { ...payload, action, deviceId: access.deviceId }, signal);
     }
     if (!OPERATIONS.has(operation)) throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
     // 本机剪贴板不依赖云端绑定，先于 binding() 处理：面板刚打开、账号还没绑定时也能用。
@@ -834,7 +832,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     const refreshBinding = BINDING_REFRESH_OPERATIONS.has(operation);
     const created = operation === 'personal-assistant.desktop.create';
     const bindingStartedAt = Date.now();
-    const current = await binding(signal, refreshBinding, { skipConfiguration: created });
+    const current = await binding(signal, refreshBinding, { skipConfiguration: created || operation.startsWith('personal-assistant.settings.') });
     onBindingMs(Date.now() - bindingStartedAt);
     if (refreshBinding) clearBindingCache();
     const bindingMethod = BINDING_METHODS[operation];
@@ -852,15 +850,21 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         // Closing frees a paid cloud resource: never accept an implicit target.
         if (typeof confirm !== 'string' || !AGENT_ID.test(confirm)) throw fail('PERSONAL_ASSISTANT_AGENT_INVALID', '关闭个人助理需要再次确认实例标识');
       }
-      const settingsWrite = operation === 'personal-assistant.settings.update';
-      const settingsRead = operation === 'personal-assistant.settings.inspect' || operation === 'personal-assistant.settings.versions';
+      const upgrading = bindingMethod === 'settingsUpgrade';
+      const settingsWrite = bindingMethod === 'settingsUpdate' || upgrading;
+      const settingsRead = ['settings', 'settingsVersions', 'settingsUpgradeStatus'].includes(bindingMethod);
+      if (bindingMethod === 'settingsUpdate' && host.settingsUpgradeStatus) {
+        const upgrade = await host.settingsUpgradeStatus({}, signal);
+        if (['submitting', 'updating', 'verifying', 'unknown'].includes(upgrade?.status)) throw fail('UPGRADE_BUSY', '请等待运行时升级确认后再修改配置', 409);
+      }
       const scoped = created ? AbortSignal.timeout(360_000) : closing ? AbortSignal.timeout(120_000)
         : settingsWrite ? AbortSignal.timeout(120_000) : settingsRead ? AbortSignal.timeout(30_000) : AbortSignal.timeout(15_000);
       const deadline = signal ? AbortSignal.any([signal, scoped]) : scoped;
       const input = closing
         ? { agentId: current.agentId, confirmAgentId: String(payload.confirmAgentId) }
+        : upgrading ? { agentId: payload.agentId, botId: requireBotId(payload.botId), runtimeVersion: payload.runtimeVersion, imageDigest: payload.imageDigest, expectedVersion: payload.expectedVersion }
         : settingsWrite
-          ? { model: payload.model, prompt: payload.prompt, runtimeVersion: payload.runtimeVersion,
+          ? { agentId: payload.agentId, model: payload.model, prompt: payload.prompt, runtimeVersion: payload.runtimeVersion,
               environmentVariables: payload.environmentVariables, deleteKeys: payload.deleteKeys }
           : operation === 'personal-assistant.settings.versions'
             ? { currentVersion: payload.currentVersion }
@@ -880,6 +884,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       if (bindingMethod === 'settings') return publicSettings(value);
       if (bindingMethod === 'settingsVersions') return publicSettingsVersions(value);
       if (bindingMethod === 'settingsUpdate') return publicSettingsUpdate(value);
+      if (upgrading || bindingMethod === 'settingsUpgradeStatus') return value;
       return publicBinding(value);
     }
     if (operation === 'personal-assistant.configuration') return {
@@ -896,7 +901,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (!botId || botId.length > 64 || /[\u0000-\u001f]/u.test(botId)) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请选择已创建的助理');
     if (SESSION_OPERATIONS.includes(operation)) {
       if (botId === DIRECTORY_BOT_ID) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请选择真实云端助理', 403);
-      if (!['personal-assistant.sessions.list', 'personal-assistant.session.create'].includes(operation)) requireSessionId(payload.sessionId);
+      if (!['personal-assistant.runtime.inspect', 'personal-assistant.sessions.list', 'personal-assistant.session.create', 'personal-assistant.file.list'].includes(operation)) requireSessionId(payload.sessionId);
       if (payload.cursor !== undefined && (!Number.isSafeInteger(payload.cursor) || payload.cursor < 0)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '增量游标无效');
       return cloudSessions.request({ agentId: current.agentId, botId }, operation, payload, signal);
     }
@@ -927,7 +932,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
       try {
         if (servicesPromise) void servicesPromise.then(services => services.localAccess?.dispose?.()).catch(() => {});
       } catch { /* 清理失败不影响卸载 */ }
-      cloudSessions.dispose();
+      cloudSessions.dispose(); deviceTransport.dispose();
     },
   });
 }
@@ -959,12 +964,19 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}, { session
       configuration,
       getClient: cloud.getClient,
       getDeploymentClient: cloud.getDeploymentClient,
+      inspectRuntime: (scope, signal) => gateway.request('personal-assistant.runtime.inspect', scope, signal),
     }));
     return ownedDesktop;
   };
   // 生产注册路径开启短 TTL 绑定缓存：一次面板打开会以 5 次串行 configuration 起手，
   // 2s 缓存把它们收敛成 1 次。直接构造 gateway（含单测）默认不缓存，保持逐次确认语义。
-  const gateway = createPersonalAssistantHostGateway(config, { getHostDesktop: resolveDesktop, bindingCacheMs: 2000 });
+  const gateway = createPersonalAssistantHostGateway(config, { getHostDesktop: resolveDesktop, bindingCacheMs: 2000, getStateRoot: () => {
+    const root = ctx.get?.(PERSONAL_ASSISTANT_HOST_CLOUD_SERVICE)?.storeDir;
+    return root ? join(root, 'personal-assistant') : '';
+  } });
+  ctx.inject?.([PERSONAL_ASSISTANT_HOST_CLOUD_SERVICE], () => {
+    void gateway.request('personal-assistant.local-access.status').catch(() => {});
+  });
   // Connection 的 /api 物理载体先执行 Host/Origin、浏览器鉴权及 owner Peer 校验。
   // 使用公开 exact Fetch 注册表，避免自建服务、抢占 Gateway interceptor 或修改 remotes。
   const unregister = ctx.connection.fetch.register({ path: ENDPOINT, methods: ['POST'], requestBody: 'buffered', async fetch(request) {

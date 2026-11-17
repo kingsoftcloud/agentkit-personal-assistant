@@ -1,5 +1,5 @@
 /**
- * 「设置」视图（重新设计 DEMO：实例 / 本机授权 / 模型 / 提示词 / 环境变量 / 运行时 / 关闭）。
+ * 个人助理设置：实例、目录授权、配置和运行时升级。
  *
  * 纯函数：草稿 draft 与保存由 index.mjs 持有；这里只渲染与派发 onXxx 回调。
  * 敏感值不回显：已保存的敏感变量显示掩码，留空表示不修改。
@@ -25,10 +25,10 @@ function localSection({ h, localAccess, actions }) {
   const authorized = state === 'authorized';
   return section({ h, title: '本机授权', children: group({ h, children: row({ h, children: [
     h('div', { key: 'body', className: 'pa-grow' },
-      h('div', { className: 'pa-row-title' }, '允许助理控制本机', badge({ h, label: CONNECTION_COPY[state], tone: authorized ? 'success' : state === 'connected' ? 'warn' : 'neutral', dot: true })),
-      h('div', { className: 'pa-cap' }, '发起新会话、操作本地窗口与文件；高风险操作前先问你')),
+      h('div', { className: 'pa-row-title' }, '读取授权目录', badge({ h, label: CONNECTION_COPY[state], tone: authorized ? 'success' : state === 'connected' ? 'warn' : 'neutral', dot: true })),
+      h('div', { className: 'pa-cap' }, '只读访问你选择的本机目录，可随时撤销')),
     link({ h, key: 'detail', label: '详情', onClick: () => actions.onOpenLocalAccess?.() }),
-    switchControl({ h, checked: authorized, disabled: state === 'offline', label: '允许助理控制本机', onChange: next => (next ? actions.onOpenLocalAccess?.() : actions.onRevokeLocal?.()) }),
+    switchControl({ h, checked: localAccess?.authorized === true, disabled: state === 'offline' && !localAccess?.authorized, label: '允许助理读取授权目录', onChange: next => (next ? actions.onOpenLocalAccess?.() : actions.onRevokeLocal?.()) }),
   ] }) }) });
 }
 
@@ -84,14 +84,19 @@ function envSection({ h, draft, editable, actions }) {
     : rows.map((item, index) => envRow({ h, item, index, editable, actions })) }) });
 }
 
-function runtimeSection({ h, instance, versions, busy, actions }) {
-  const list = Array.isArray(versions?.versions) ? versions.versions : [];
-  const upgradable = versions?.catalogAvailable === true && list.length > 0;
+function runtimeSection({ h, instance, versions, busy, upgrade, actions }) {
+  const target = versions?.upgrades?.at(-1);
+  const upgradable = Boolean(target);
+  const pending = ['submitting', 'updating', 'verifying', 'unknown'].includes(upgrade?.status);
+  const stateText = pending ? `正在确认 v${upgrade.targetVersion} 就绪，云电脑可能短暂重连`
+    : upgrade?.status === 'succeeded' ? `已确认 v${upgrade.observedVersion} 运行中`
+    : upgrade?.error || (upgradable ? `可升级到 v${target.version}，会保留实例配置和数据` : '当前没有可升级版本');
   return section({ h, title: '运行时', children: group({ h, children: row({ h, children: [
     h('div', { key: 'body', className: 'pa-grow' },
       h('div', { className: 'pa-row-title' }, instance?.version ? `v${String(instance.version).replace(/^v/u, '')}` : '未知版本', upgradable ? badge({ h, label: '有新版本', tone: 'accent' }) : null),
-      h('div', { className: 'pa-cap' }, upgradable ? '云端有可升级的运行时版本' : '云端还没有发布可升级版本')),
-    button({ h, key: 'check', label: '检查更新', size: 'sm', busy: busy === 'versions', busyLabel: '检查中…', onClick: () => actions.onCheckUpdate?.() }),
+      h('div', { className: 'pa-cap', role: 'status' }, stateText)),
+    upgradable ? button({ h, key: 'upgrade', label: `升级到 v${target.version}`, size: 'sm', disabled: pending || Boolean(busy) || !instance?.botId, title: instance?.botId ? '' : '正在读取云端助理，请稍候', onClick: () => actions.onUpgrade?.(target) }) : null,
+    button({ h, key: 'check', label: '检查更新', size: 'sm', disabled: Boolean(busy), busy: busy === 'versions', busyLabel: '检查中…', onClick: () => actions.onCheckUpdate?.() }),
   ] }) }) });
 }
 
@@ -121,7 +126,7 @@ function closeSection({ h, instance, closeAssistant, actions }) {
 export function renderSettings({
   h, loading = false, degraded = false, notice = '', error = '', busy = '',
   inspect = null, instance = null, localAccess = null, draft = null, modelOptions = [], versions = null,
-  modelMenuOpen = false,
+  modelMenuOpen = false, upgrade = null,
   closeAssistant = { open: false, text: '', busy: false, error: '', closedNotice: '' },
   actions = {},
 } = {}) {
@@ -131,11 +136,10 @@ export function renderSettings({
       section({ h, key: 'model', title: '模型', children: group({ h, children: skeletonRows({ h, rows: 1 }) }) }),
       section({ h, key: 'env', title: '环境变量', children: group({ h, children: skeletonRows({ h, rows: 2 }) }) })));
   }
-  // 只有 Host 自己写下的配置清单（recordSource === 'host'）才允许在线编辑；
-  // 旧版 Host 创建的实例没有清单，服务端也拿不到模型/提示词，必须保持只读。
   const recordSource = inspect?.recordSource;
-  const editable = instance?.configured === true && recordSource === 'host';
-  const legacy = Boolean(recordSource) && recordSource !== 'host';
+  const legacy = recordSource === 'missing';
+  const editable = instance?.configured === true && ['host', 'cloud'].includes(recordSource)
+    && !['submitting', 'updating', 'verifying', 'unknown'].includes(upgrade?.status);
   return h('div', { className: 'pa-page', 'data-pa-scroll': 'settings' }, h('div', { className: 'pa-page-inner' },
     error ? h('div', { role: 'alert', className: 'pa-note danger' }, icon(h, 'warn', { size: 16, style: { marginTop: 2 } }), h('span', null, error)) : null,
     notice ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, notice)) : null,
@@ -146,7 +150,7 @@ export function renderSettings({
     modelSection({ h, draft, modelOptions, editable, menuOpen: modelMenuOpen, actions }),
     promptSection({ h, draft, editable, actions }),
     envSection({ h, draft, editable, actions }),
-    runtimeSection({ h, instance, versions, busy, actions }),
+    runtimeSection({ h, instance, versions, busy, upgrade, actions }),
     closeSection({ h, instance, closeAssistant, actions }),
   ));
 }

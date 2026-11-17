@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const RUNTIME_FILES = new Set([
   'assistant-runtime.mjs',
+  'local-device-channel.mjs',
+  'build-info.mjs',
   'cloud-session-channel.mjs',
   'desktop-ws.mjs',
   'desktop-permit.mjs',

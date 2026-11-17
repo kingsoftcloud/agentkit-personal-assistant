@@ -42,7 +42,11 @@ async function pack(role, files) {
 
 const results = [
   await pack('runtime', [
+    ['node_modules/ws', join(root, 'node_modules', 'ws')],
+    ['node_modules/yaml', join(root, 'node_modules', 'yaml')],
     ['bin/assistant-runtime', join(root, 'scripts', 'assistant-runtime-launcher.sh')],
+    ['runtime/local-device-channel.mjs', join(root, 'runtime', 'local-device-channel.mjs')],
+    ['runtime/build-info.mjs', join(root, 'runtime', 'build-info.mjs')],
     ['runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['runtime/cloud-session-channel.mjs', join(root, 'runtime', 'cloud-session-channel.mjs')],
     ['runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],
@@ -57,6 +61,8 @@ const results = [
     ['plugin/personal-assistant.plugin.json', join(root, 'personal-assistant.plugin.json')],
     ['plugin/personal-assistant.plugin.schema.json', join(root, 'personal-assistant.plugin.schema.json')],
     ['plugin/src', join(root, 'src')],
+    ['plugin/runtime/local-device-channel.mjs', join(root, 'runtime', 'local-device-channel.mjs')],
+    ['plugin/runtime/build-info.mjs', join(root, 'runtime', 'build-info.mjs')],
     ['plugin/runtime/assistant-runtime.mjs', join(root, 'runtime', 'assistant-runtime.mjs')],
     ['plugin/runtime/cloud-session-channel.mjs', join(root, 'runtime', 'cloud-session-channel.mjs')],
     ['plugin/runtime/desktop-ws.mjs', join(root, 'runtime', 'desktop-ws.mjs')],

@@ -11,6 +11,7 @@
  * HTTP or plugin return values, and every failure carries `status` (or
  * `details.status`) so the plugin can keep a truthful error state.
  */
+import { createRuntimeUpgrade } from './runtime-upgrade.mjs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -221,7 +222,7 @@ function gatewayForRegion(value) {
   return undefined;
 }
 
-export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = process.env, configuration: configurationSource, getClient, getDeploymentClient } = {}) {
+export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = process.env, configuration: configurationSource, getClient, getDeploymentClient, inspectRuntime } = {}) {
   const file = join(storeDir, 'assistant-binding.json');
   let cached, cacheAt = 0;
   const ttl = 5_000;
@@ -575,8 +576,7 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     if (!agent) throw fail('ASSISTANT_CREATE_TIMEOUT', '个人助理正在创建中，请稍后重试', 504);
     const resolved = await refresh(signal, agent);
     if (!resolved.binding) throw fail('ASSISTANT_CREDENTIAL_UNAVAILABLE', '个人助理已创建，但云端暂时无法获取连接凭证，请稍后重试', 503);
-    // Remember the declaration this Host wrote; the platform does not echo it
-    // back on GetAgent, and a later settings update must reuse the same name.
+    // Cache the accepted declaration for older control planes and offline reads.
     // A parallel request or a retry can join an existing order. Its generated
     // name and manifest are not the declaration the order actually accepted.
     if (agent.Name === name && !data?.AlreadyExists && !data?.PendingOrder) {
@@ -591,14 +591,8 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     return { configured: false };
   }
 
-  /** Read the bound instance's editable configuration.
-   *
-   * The platform `GetAgent` projection is the source of truth for the
-   * deployment status/version and the non-secret environment rows. The model,
-   * prompt and instance name live in the managed-runtime declaration, which
-   * the platform does not echo today; Host therefore keeps the declaration
-   * it wrote in the binding file and reports `recordSource: 'missing'` when an
-   * instance predates that record instead of guessing. */
+  /** Cloud deployment and its canonical manifest are authoritative. Older
+   * control planes may only expose the local creation record as a read fallback. */
   async function settings(input = {}, signal) {
     const binding = await readBinding();
     const agentId = binding?.agentId;
@@ -635,6 +629,9 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     const deployment = record(data.Deployment) ? data.Deployment : {};
     const runtime = record(deployment.RuntimeConfig) ? deployment.RuntimeConfig : {};
     const advanced = record(data.Advanced) ? data.Advanced : {};
+    const cloudManifest = text(deployment.ManagedRuntimeConfig?.Manifest);
+    const cloudRecord = parseManifest(cloudManifest);
+    if (cloudRecord && cloudManifest !== binding.manifest) await writeBinding({ ...binding, manifest: cloudManifest });
     return {
       ...local,
       name: text(basic.Name) || local.name,
@@ -647,6 +644,9 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
         imageDigest: text(runtime.ImageDigest),
         updatedAt: text(basic.UpdatedAt),
       },
+      model: cloudRecord?.model || local.model,
+      prompt: cloudRecord?.prompt ?? local.prompt,
+      recordSource: cloudRecord ? 'cloud' : local.recordSource,
       environmentVariables: publicEnvironmentRows(advanced.EnvironmentVariables),
       detailAvailable: true,
       detailNote: '',
@@ -661,7 +661,8 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     const binding = await readBinding();
     if (!binding || !AGENT_ID.test(binding.agentId)) throw fail('ASSISTANT_NOT_CREATED', '当前没有可用的个人助理，请先开通或连接', 409);
     const recorded = parseManifest(binding.manifest);
-    const currentVersion = text(input.currentVersion) || recorded?.runtimeVersion || '';
+    const current = await settings({}, signal);
+    const currentVersion = current.detailAvailable ? current.runtime.version : (recorded?.runtimeVersion || '');
     const versions = [];
     if (typeof getDeploymentClient === 'function') {
       try {
@@ -690,6 +691,7 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     return {
       currentVersion: RUNTIME_VERSION.test(currentVersion) ? currentVersion : '',
       versions,
+      upgrades: current.detailAvailable ? versions.filter(row => compareVersions(row.version, currentVersion) > 0) : [],
       catalogAvailable: versions.length > 0,
     };
   }
@@ -701,8 +703,10 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
    * single UpdateAgent call covers every setting and the instance rolls only
    * once. The page never restarts the instance itself. */
   async function settingsUpdate(input = {}, signal) {
+    await settings({}, signal);
     const binding = await readBinding();
     if (!binding || !AGENT_ID.test(binding.agentId)) throw fail('ASSISTANT_NOT_CREATED', '当前没有可用的个人助理，请先开通或连接', 409);
+    if (input.agentId && input.agentId !== binding.agentId) throw fail('ASSISTANT_AGENT_MISMATCH', '当前助理已改变，请重新打开设置', 409);
     if (typeof getDeploymentClient !== 'function') throw fail('ASSISTANT_SETTINGS_UNAVAILABLE', '当前 Host 版本还不支持个人助理配置', 503);
     const parsed = normalizeSettingsInput(input);
     const recorded = parseManifest(binding.manifest);
@@ -714,12 +718,17 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     const name = recorded?.name || '';
     if (!name) {
       throw fail('ASSISTANT_SETTINGS_MANIFEST_MISSING',
-        '这个个人助理是用旧版 Host 创建的，本机没有记录它的配置清单，暂时不能在线修改；可以先关闭再重新创建，等平台提供读取接口后即可直接编辑', 409);
+        '云端尚未提供此实例的完整配置，请更新控制面后重试；已有实例和数据会保留', 409);
     }
     const model = parsed.model ?? recorded.model ?? DEFAULT_MODEL;
     if (!MODEL_NAME.test(model)) throw fail('ASSISTANT_SETTINGS_MODEL_INVALID', '模型名称无效', 400);
     const prompt = parsed.prompt ?? recorded.prompt ?? DEFAULT_PROMPT;
-    const manifest = buildManifest({ name, version, model, prompt });
+    if (input.expectedVersion && recorded.runtimeVersion !== input.expectedVersion) throw fail('UPGRADE_VERSION_CHANGED', '云端版本已改变，请重新检查更新', 409);
+    const declaration = parseYaml(binding.manifest);
+    declaration.runtime = { ...declaration.runtime, version };
+    if (parsed.model !== undefined) declaration.model = model;
+    if (parsed.prompt !== undefined) declaration.prompt = prompt;
+    const manifest = stringifyYaml(declaration);
     const payload = {
       AgentId: binding.agentId,
       ManagedRuntimeConfig: { RuntimeName: 'personal-assistant', RuntimeVersion: version, Manifest: manifest },
@@ -768,15 +777,16 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     return { configured: false, agentId, closed: true };
   }
 
+  const upgrades = createRuntimeUpgrade({ path: join(storeDir, 'assistant-upgrade.json'), inspect: settings, versions: settingsVersions, update: settingsUpdate, probe: inspectRuntime || (() => { throw fail('UPGRADE_PROBE_UNAVAILABLE', '当前 Host 不支持运行时验证', 503); }) });
   return Object.freeze({ configuration, issueTicket, status, connect, create, disconnect, destroy,
-    settings, settingsUpdate, settingsVersions });
+    settings, settingsUpdate, settingsVersions, settingsUpgrade: upgrades.start, settingsUpgradeStatus: upgrades.status });
 }
 
 /** The service shape the standalone plugin consumes via `ctx.get()`. */
 export function assistantDesktopService(impl) {
   return Object.freeze({ format: SERVICE, configuration: impl.configuration, issueTicket: impl.issueTicket,
     status: impl.status, connect: impl.connect, create: impl.create, disconnect: impl.disconnect, destroy: impl.destroy,
-    settings: impl.settings, settingsUpdate: impl.settingsUpdate, settingsVersions: impl.settingsVersions });
+    settings: impl.settings, settingsUpdate: impl.settingsUpdate, settingsVersions: impl.settingsVersions, settingsUpgrade: impl.settingsUpgrade, settingsUpgradeStatus: impl.settingsUpgradeStatus });
 }
 
 export const ASSISTANT_DESKTOP_SERVICE = SERVICE;

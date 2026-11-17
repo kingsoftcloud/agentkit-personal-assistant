@@ -72,14 +72,12 @@ export function createPersonalAssistantClient({ gateway, profileId = 'default' }
 }
 
 export const inject = Object.freeze([
-  'slots', 'connection', 'sidebarRight', 'uiWorkspace', 'workspaces', 'sessions', 'uiConversation',
+  'slots', 'connection',
 ]);
 export const PERSONAL_ASSISTANT_PANEL_ID = 'personal-assistant';
 export const PERSONAL_ASSISTANT_CLIENT_DEFAULTS = Object.freeze({ enabled: false, autoConnect: false });
 export const PERSONAL_ASSISTANT_COMPUTER_TAB = 'personal-assistant-computer';
 export const PERSONAL_ASSISTANT_VIEW_ID = 'personal-assistant-session';
-const PERSONAL_ASSISTANT_DSH_SESSION_KEY = 'personal-assistant.dsh-session-id';
-const personalAssistantDshSessions = new Set();
 /** Settings and the main panel are mounted in different DSH slots. */
 export const PERSONAL_ASSISTANT_CONFIGURATION_EVENT = 'personal-assistant:configuration-changed';
 
@@ -95,7 +93,6 @@ import { fitDesktopBox, mapDisplayPoint, mergeWheel, normalizeDisplay } from './
 import { createDesktopControl } from './desktop-control.mjs';
 import { createClipboardChannel, isPasteShortcut, isCopyShortcut, copyShortcutEvents, copyCloudClipboard, pasteToCloud, readLocalClipboard, writeLocalClipboard, clipboardTextOf } from './components/desktop-clipboard.mjs';
 import { PersonalAssistantConversation, DEFAULT_SUGGESTIONS } from './conversation.mjs';
-import { createSessionAssistantWorkbench } from './native-workbench.mjs';
 import { publicBotDirectory, resolveAssistantBotId } from './bot-directory.mjs';
 export const PERSONAL_ASSISTANT_CLIENT_BUILD = typeof __PA_CLIENT_BUILD__ === 'string' ? __PA_CLIENT_BUILD__ : '开发模式';
 /** 构建标记按本机时区显示（构建串是 UTC，直接截断会让用户看到 8 小时前的时间）。 */
@@ -899,104 +896,36 @@ export function PersonalAssistantHome({ request, nativeWorkbench, sessionSurface
 
 }
 
-/**
- * DSH Session-scoped Personal Assistant view.
- *
- * This is the surface mounted by `conversation.view`, so the host keeps its
- * normal Session chrome and can mount the cloud computer in the native right
- * sidebar.  The old global `main` panel remains available as an exported
- * legacy component for consumers that embed it directly, but the plugin entry
- * no longer uses it as the primary Personal Assistant route.
- */
-export function PersonalAssistantSessionView({ request, sessionId, sidebarRight } = {}) {
+/** PA owns a main surface; ordinary DSH conversations keep their own chrome and input. */
+export function PersonalAssistantWorkspace({ request } = {}) {
   const R = clientReact || globalThis.React;
-  if (!R) return '个人助理会话页面尚未就绪，请重新打开';
-  const { createElement: h, useEffect, useRef } = R;
-  const bridgeRef = useRef(null);
-  if (!bridgeRef.current || bridgeRef.current.sessionId !== sessionId) {
-    bridgeRef.current?.workbench?.dispose?.();
-    bridgeRef.current = {
-      sessionId,
-      workbench: createSessionAssistantWorkbench({ sidebarRight, kind: PERSONAL_ASSISTANT_COMPUTER_TAB }),
-    };
-  }
-  const workbench = bridgeRef.current.workbench;
-  useEffect(() => () => workbench.dispose?.(), [workbench]);
-  return h(PersonalAssistantShell, { request, nativeWorkbench: workbench });
+  if (!R) return '个人助理页面尚未就绪';
+  const { createElement: h, useRef, useState } = R;
+  const [binding, setBinding] = useState(null);
+  const [computerOpen, setComputerOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const bridge = useRef(null);
+  if (!bridge.current) bridge.current = {
+    available: true,
+    bind(scope, scopedRequest) {
+      setBinding(previous => previous?.scope.agentId === scope.agentId && previous?.scope.botId === scope.botId
+        && previous?.request === scopedRequest ? previous : { scope: { ...scope }, request: scopedRequest });
+    },
+    open() { setComputerOpen(true); },
+  };
+  const visible = computerOpen && binding;
+  return h('section', { className: 'pa-workspace', 'data-personal-assistant-workspace': true,
+    'data-computer-open': Boolean(visible), 'data-computer-expanded': Boolean(visible && expanded) },
+    themeStyle(h),
+    h('div', { className: 'pa-workspace-assistant', hidden: Boolean(visible && expanded) },
+      h(PersonalAssistantShell, { request, nativeWorkbench: bridge.current })),
+    visible ? h('aside', { className: 'pa-workspace-computer', 'aria-label': '云电脑' },
+      h('div', { className: 'pa-workspace-computer-bar' }, h('strong', null, '云电脑'),
+        h('button', { type: 'button', onClick: () => setExpanded(value => !value), 'aria-label': expanded ? '还原云电脑' : '展开云电脑' }, expanded ? '还原' : '展开'),
+        h('button', { type: 'button', onClick: () => { setComputerOpen(false); setExpanded(false); }, 'aria-label': '关闭云电脑' }, '关闭')),
+      h(PersonalAssistantPanel, { key: `${binding.scope.agentId}:${binding.scope.botId}`, request: binding.request,
+        initialBotId: binding.scope.botId, variant: 'native-tab', nativeFullscreen: expanded })) : null);
 }
-
-/** DSH's resident composer is replaced by the Personal Assistant composer. */
-export function PersonalAssistantComposerPlaceholder() { return null; }
-
-function storedPersonalAssistantSessionId() {
-  try {
-    const id = String(globalThis.localStorage?.getItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY) || '').trim();
-    if (!id) return '';
-    const raw = globalThis.localStorage?.getItem(`dsh.conversation.${id}`);
-    const state = raw ? JSON.parse(raw) : null;
-    if (state?.personalAssistantOwned !== true || state.view !== PERSONAL_ASSISTANT_VIEW_ID) return '';
-    personalAssistantDshSessions.add(id);
-    return id;
-  } catch { return ''; }
-}
-
-function rememberPersonalAssistantSessionId(sessionId) {
-  const id = String(sessionId || '').trim();
-  if (!id) return;
-  personalAssistantDshSessions.add(id);
-  try { globalThis.localStorage?.setItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY, id); } catch { /* storage is optional */ }
-}
-
-function forgetPersonalAssistantSessionId(sessionId) {
-  const id = String(sessionId || '').trim();
-  if (id) personalAssistantDshSessions.delete(id);
-  try {
-    if (!sessionId || String(globalThis.localStorage?.getItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY) || '') === id) {
-      globalThis.localStorage?.removeItem(PERSONAL_ASSISTANT_DSH_SESSION_KEY);
-    }
-  } catch { /* storage is optional */ }
-}
-
-function persistPersonalAssistantView(sessionId) {
-  const id = String(sessionId || '').trim();
-  if (!id) return;
-  try {
-    const key = `dsh.conversation.${id}`;
-    let state = {};
-    const raw = globalThis.localStorage?.getItem(key);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') state = parsed;
-    }
-    state.view = PERSONAL_ASSISTANT_VIEW_ID;
-    state.personalAssistantOwned = true;
-    state.viewRequest = null;
-    globalThis.localStorage?.setItem(key, JSON.stringify(state));
-  } catch { /* storage is optional */ }
-}
-
-/** Small loading surface shown only while the main panel hands navigation to DSH. */
-export function PersonalAssistantSessionLauncher({ openSession } = {}) {
-  const R = clientReact || globalThis.React;
-  if (!R) return '正在打开个人助理会话…';
-  const { createElement: h, useEffect, useRef, useState } = R;
-  const started = useRef(false);
-  const [error, setError] = useState('');
-  useEffect(() => {
-    if (started.current || typeof openSession !== 'function') return undefined;
-    started.current = true;
-    let alive = true;
-    Promise.resolve().then(() => openSession()).catch(reason => {
-      if (alive) setError(reason?.message || '无法打开个人助理会话');
-    });
-    return () => { alive = false; };
-  }, [openSession]);
-  return h('div', {
-    'data-personal-assistant-session-launcher': 'true', role: error ? 'alert' : 'status',
-    style: { height: '100%', display: 'grid', placeItems: 'center', padding: 24, color: 'var(--dsw-alias-label-secondary, #536174)' },
-  }, error || '正在打开个人助理会话…');
-}
-
 
 /* ------------------------------------------------------------------ *
  * 面板外壳：panelView 状态机（list|detail|settings|create|chat|desktop）。
@@ -1240,6 +1169,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const [connection, setConnection] = useState({ connected: false, authorized: false, scopes: [], riskConfirm: true, grantedAt: null, host: null, loading: true, unavailable: false });
   const [localAccessOpen, setLocalAccessOpen] = useState(false);
   const [localScopes, setLocalScopes] = useState(LOCAL_ACCESS_SCOPES.map(scope => scope.id));
+  const [localRootsDraft, setLocalRootsDraft] = useState('');
   const [riskConfirmDraft, setRiskConfirmDraft] = useState(true);
   const [localBusy, setLocalBusy] = useState('');
   const [localError, setLocalError] = useState('');
@@ -1299,6 +1229,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   const [settingsBusy, setSettingsBusy] = useState('');
   const [settingsError, setSettingsError] = useState('');
   const [settingsNotice, setSettingsNotice] = useState('');
+  const [runtimeUpgrade, setRuntimeUpgrade] = useState(null);
   const [settingsDraft, setSettingsDraft] = useState({ model: '', prompt: '', environmentVariables: [] });
   const [envDeletes, setEnvDeletes] = useState([]);
   const [closeAssistant, setCloseAssistant] = useState({ open: false, text: '', busy: false, error: '', closedNotice: '' });
@@ -1351,6 +1282,10 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     try {
       const value = await rpc('personal-assistant.local-access.status');
       const next = {
+        available: value?.available === true,
+        roots: Array.isArray(value?.roots) ? value.roots : [],
+        target: value?.target,
+        lastError: value?.lastError || '',
         connected: value?.connected === true,
         authorized: value?.authorized === true,
         scopes: Array.isArray(value?.scopes) ? value.scopes.map(String) : [],
@@ -1365,7 +1300,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       const previousAuthorized = previousAuthorizedRef.current;
       previousAuthorizedRef.current = next.authorized;
       if (previousAuthorized === true && next.authorized === false) setLocalRevokedAt(String(Date.now()));
-      if (!next.authorized) setLocalScopes(next.scopes.length ? next.scopes : LOCAL_ACCESS_SCOPES.map(item => item.id));
       setRiskConfirmDraft(next.riskConfirm);
       return next;
     } catch {
@@ -1380,9 +1314,9 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     if (localBusy) return;
     setLocalBusy('grant'); setLocalError(''); setLocalNotice('');
     try {
-      await rpc('personal-assistant.local-access.grant', { scopes: localScopes, riskConfirm: riskConfirmDraft });
+      await scopedCall('personal-assistant.local-access.grant', { scopes: localScopes, roots: localRootsDraft.split('\n').map(value => value.trim()).filter(Boolean) });
       const next = await loadConnection();
-      setLocalNotice(next?.authorized ? '已授权本机控制' : '授权已提交，等待本机确认');
+      setLocalNotice(next?.connected && next?.authorized ? '本机目录已授权并连接' : '授权已提交，等待本机确认');
     } catch (failure) {
       setLocalError(failure?.message || '授权失败：Host 尚未提供本机授权能力');
     } finally { setLocalBusy(''); }
@@ -1544,6 +1478,12 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request]);
 
+  useEffect(() => {
+    if (!localAccessOpen && !connection.authorized) return;
+    const timer = setInterval(() => { void loadConnection(); }, 5000);
+    return () => clearInterval(timer);
+  }, [localAccessOpen, connection.authorized, request]);
+
   /* ---------- 列表动作 ---------- */
 
   const openChat = (botId = '') => {
@@ -1677,7 +1617,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       setSettingsDegraded(false);
       writePanelCache('settings-inspect', raw || {});
       try {
-        const versions = await scopedCall('personal-assistant.settings.versions', { currentVersion: raw?.runtime?.version || '' });
+        const versions = await scopedCall('personal-assistant.settings.versions');
+        setRuntimeUpgrade(await scopedCall('personal-assistant.settings.upgrade-status'));
         setSettingsVersions(versions && typeof versions === 'object' ? versions : { catalogAvailable: false, versions: [] });
       } catch {
         setSettingsVersions({ catalogAvailable: false, versions: [] });
@@ -1690,12 +1631,47 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     } finally { setSettingsLoading(false); }
   };
 
+  const checkRuntimeUpdate = async () => {
+    setSettingsBusy('versions'); setSettingsError('');
+    try {
+      setSettingsVersions(await scopedCall('personal-assistant.settings.versions'));
+      setRuntimeUpgrade(await scopedCall('personal-assistant.settings.upgrade-status'));
+    } catch (failure) { setSettingsError(failure.message); }
+    finally { setSettingsBusy(''); }
+  };
+  const upgradeRuntime = async target => {
+    setSettingsBusy('upgrade'); setSettingsError('');
+    try {
+      setRuntimeUpgrade(await scopedCall('personal-assistant.settings.upgrade', {
+        runtimeVersion: target.version, imageDigest: target.image, expectedVersion: settingsVersions.currentVersion,
+      }));
+    } catch (failure) {
+      setSettingsError(failure.message);
+      setRuntimeUpgrade(await scopedCall('personal-assistant.settings.upgrade-status').catch(() => null));
+    } finally { setSettingsBusy(''); }
+  };
+  useEffect(() => {
+    if (panelView !== 'settings' || !['submitting', 'updating', 'verifying', 'unknown'].includes(runtimeUpgrade?.status)) return;
+    let disposed = false;
+    const timer = setTimeout(async () => {
+      try {
+        const operation = await scopedCall('personal-assistant.settings.upgrade-status');
+        if (disposed) return;
+        setRuntimeUpgrade(operation);
+        if (operation?.status === 'succeeded') await loadSettings();
+      } catch (failure) {
+        if (!disposed) { setSettingsError(failure.message); setRuntimeUpgrade(value => ({ ...value })); }
+      }
+    }, 3000);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [panelView, runtimeUpgrade, scope?.agentId]);
+
   const saveSettings = async () => {
     if (settingsBusy) return;
     setSettingsBusy('save'); setSettingsError(''); setSettingsNotice('');
     try {
       const environmentVariables = (settingsDraft.environmentVariables || [])
-        .filter(row => String(row.key || '').trim())
+        .filter(row => String(row.key || '').trim() && (row.dirty === true || row.saved !== true))
         .map(row => ({ key: String(row.key).trim(), value: String(row.value ?? ''), sensitive: row.sensitive === true }));
       await scopedCall('personal-assistant.settings.update', {
         model: String(settingsDraft.model || '').trim(),
@@ -2039,8 +2015,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       return h('main', { className: 'pa-body' },
         renderSettings({
           h, loading: settingsLoading, degraded: settingsDegraded, notice: settingsNotice, error: settingsError, busy: settingsBusy,
-          inspect: settingsInspect, versions: settingsVersions, localAccess: connection, modelOptions: MODEL_OPTIONS,
-          instance: { configured, agentId: config?.agentId || '', version: settingsInspect?.runtime?.version || '', status: settingsInspect?.status || (configured ? '运行中' : '未开通'), editable: configured },
+          inspect: settingsInspect, versions: settingsVersions, upgrade: runtimeUpgrade, localAccess: connection, modelOptions: MODEL_OPTIONS,
+          instance: { configured, agentId: config?.agentId || '', botId: scope?.botId, version: settingsInspect?.runtime?.version || '', status: settingsInspect?.status || (configured ? '运行中' : '未开通'), editable: configured },
           draft: settingsDraft, closeAssistant, modelMenuOpen: settingsModelMenuOpen,
           actions: {
             onToggleModelMenu: open => setSettingsModelMenuOpen(previous => (typeof open === 'boolean' ? open : !previous)),
@@ -2060,7 +2036,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
             onDiagnostics: () => setLocalAccessOpen(false),
             onRevokeLocal: () => { void revokeLocalAccess(); },
             onOpenLocalAccess: () => setLocalAccessOpen(true),
-            onCheckUpdate: () => { if (settingsVersions?.catalogAvailable) setSettingsNotice('云端有可升级版本，升级入口暂未接入面板'); },
+            onCheckUpdate: () => void checkRuntimeUpdate(),
+            onUpgrade: target => void upgradeRuntime(target),
             onCloseStart: () => setCloseAssistant({ open: true, text: '', busy: false, error: '', closedNotice: closeAssistant.closedNotice }),
             onCloseText: value => setCloseAssistant(previous => ({ ...previous, text: value })),
             onCloseCancel: () => setCloseAssistant(previous => ({ ...previous, open: false, text: '', error: '' })),
@@ -2169,12 +2146,14 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
 
   const popover = renderLocalAccess({
     h, open: localAccessOpen, connection, status: connection,
+    rootsDraft: localRootsDraft, targetBotId: scope?.botId || '',
     selectedScopes: connection.authorized ? (connection.scopes.length ? connection.scopes : localScopes) : localScopes,
     riskConfirm: connection.authorized ? connection.riskConfirm : riskConfirmDraft,
     busy: localBusy, error: localError, notice: localNotice,
     actions: {
       onToggleScope: id => setLocalScopes(previous => previous.includes(id) ? previous.filter(item => item !== id) : [...previous, id]),
       onToggleRisk: () => setRiskConfirmDraft(value => !value),
+      onRootsChange: value => setLocalRootsDraft(value),
       onGrant: () => void grantLocalAccess(),
       onRevoke: () => void revokeLocalAccess(),
       onOpenLocalSettings: () => setNotice('请在这台 Mac 的 系统设置 › 隐私与安全性 里调整 DSH Host 的权限'),
@@ -2348,7 +2327,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     setEnvRows(rows => rows.filter((_, at) => at !== index));
     if (row.saved && row.key) setEnvDeletes(keys => keys.includes(row.key) ? keys : [...keys, row.key]);
   };
-  const editable = settings?.recordSource === 'host';
+  const editable = ['host', 'cloud'].includes(settings?.recordSource);
   const saveSettings = useCallback(async () => {
     if (!editable || settingsBusy) return;
     setSettingsBusy(true); setSettingsError(''); setSettingsNotice('');
@@ -2356,7 +2335,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       const environmentVariables = envRows.filter(row => row.dirty === true || row.saved !== true)
         .map(row => ({ key: String(row.key || '').trim(), value: String(row.value || ''), sensitive: row.sensitive === true }));
       await request('personal-assistant.settings.update', {
-        model: model.trim(), prompt, runtimeVersion: version,
+        model: model.trim(), prompt,
         environmentVariables, deleteKeys: envDeletes,
       });
       setSettingsNotice(`已提交云端更新（版本 ${version}），个人助理正在应用新配置，通常 1–2 分钟完成，期间云电脑会短暂重连。`);
@@ -2402,18 +2381,12 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
         line('云端配置', h('div', { style: settingsStyle.note },
           settingsBusy ? '读取中…' : (settingsError || '暂时读不到云端配置；请点下方“检查连接”重试')), true));
     }
-    if (settings.recordSource !== 'host') {
+    if (!['host', 'cloud'].includes(settings.recordSource)) {
       return h('div', { style: settingsStyle.card },
         line('云端配置', h('div', { style: settingsStyle.note },
-          '这个个人助理是用旧版 DSH Host 创建的，本机没有记录它的配置清单，暂时不能在线修改。可以关闭后重新创建；等云端平台提供读取接口后即可直接编辑。'), true));
+          '这个个人助理是用旧版 DSH Host 创建的，本机没有记录它的配置清单，暂时不能在线修改。请更新云端控制面以读取配置，已有实例和数据会保留。'), true));
     }
-    const versionControl = versions && versions.catalogAvailable
-      ? h('select', { style: settingsStyle.input, value: version, disabled: settingsBusy, 'aria-label': '运行时版本',
-          onChange: event => setVersion(String(event?.target?.value ?? '')) },
-          versions.versions.map(item => h('option', { key: item.version, value: item.version },
-            item.version === settings.runtime?.version ? `${item.version}（当前）` : item.version)))
-      : h('div', { style: settingsStyle.note },
-          `${settings.runtime?.version || version || '未知版本'} · 云端还没有发布可升级版本`);
+    const versionControl = h('div', { style: settingsStyle.note }, `${settings.runtime?.version || '未知版本'} · 请在个人助理的设置页检查和执行升级`);
     const envEditor = h('div', null,
       envRows.length
         ? envRows.map((row, index) => h('div', { key: `env-${index}`, style: settingsStyle.envRow },
@@ -2550,122 +2523,9 @@ export function apply(ctx) {
     }
   };
 
-  const sessions = ctx.sessions || ctx.get?.('sessions');
-  const uiWorkspace = ctx.uiWorkspace || ctx.get?.('uiWorkspace');
-  const uiConversation = ctx.uiConversation || ctx.get?.('uiConversation');
-  storedPersonalAssistantSessionId();
-  let openingSession;
-  let currentPersonalAssistantSessionId = '';
-  const activatePersonalAssistantSession = sessionId => {
-    const id = String(sessionId || '').trim();
-    if (!id) return;
-    // Session creation and the local Controller projection are asynchronous.
-    // Retry activation briefly while the normal Session binding catches up.
-    // DSH may finish restoring the Session chrome after openSession returns;
-    // keep the public binding authoritative for a few seconds without
-    // reaching into the host DOM or clicking a foreign Chat tab.
-    let remaining = 120;
-    const activate = () => {
-      try {
-        const binding = uiConversation?.binding?.(id);
-        if (!binding || typeof binding.activate !== 'function') throw new Error('session binding pending');
-        binding.activate(PERSONAL_ASSISTANT_VIEW_ID);
-        return true;
-      } catch { return false; }
-    };
-    if (activate()) return;
-    const retry = () => {
-      if (activate() || --remaining <= 0) return;
-      globalThis.setTimeout?.(retry, 25);
-    };
-    globalThis.setTimeout?.(retry, 0);
-  };
-  const openAndActivatePersonalAssistantSession = sessionId => {
-    const id = String(sessionId || '').trim();
-    if (!id) return;
-    // Open first so DSH mounts the Session surface, then select the PA view.
-    persistPersonalAssistantView(id);
-    uiWorkspace?.openSession?.(id);
-    activatePersonalAssistantSession(id);
-  };
-  const openPersonalAssistantSession = () => {
-    if (openingSession) return openingSession;
-    openingSession = (async () => {
-      // The global sidebar may have rendered from a cached Session list while
-      // the launcher is already clickable. Refresh once before choosing the
-      // presentation Session so we do not accidentally create a fresh blank
-      // Session when a reusable non-blank Session is already available.
-      const refreshSessions = sessions?.refresh?.();
-      if (refreshSessions && typeof refreshSessions.catch === 'function') await refreshSessions.catch(() => {});
-      const list = sessions?.list?.getSnapshot?.();
-      const stored = currentPersonalAssistantSessionId || storedPersonalAssistantSessionId();
-      const existing = stored && list?.byId?.[stored];
-      // A Session created in this same Host lifetime may not have reached the
-      // list projection yet. Keep reusing it while the projection catches up;
-      // a persisted id from an earlier lifetime still requires list evidence.
-      if (stored && existing?.removed !== true && (currentPersonalAssistantSessionId || existing)) {
-        currentPersonalAssistantSessionId = stored;
-        personalAssistantDshSessions.add(stored);
-        openAndActivatePersonalAssistantSession(stored);
-        return stored;
-      }
-      if (stored) forgetPersonalAssistantSessionId(stored);
-
-      // Never borrow the currently selected Studio/绘画/普通对话 Session. The
-      // PA presentation gets its own DSH Session so switching products cannot
-      // replace the PA view with the host's ordinary Chat view.
-      let sessionId = '';
-      // openWorkspace is the DSH UI-owned creation path: it creates the
-      // independent presentation window and mounts the normal Session chrome
-      // before the plugin activates its view. Calling sessions.create alone
-      // yields a blank Session whose conversation.view slots are not mounted.
-      if (typeof uiWorkspace?.openWorkspace === 'function') {
-        await uiWorkspace.openWorkspace(null, created => { sessionId = String(created || ''); });
-      } else if (typeof sessions?.create === 'function') {
-        sessionId = String(await sessions.create({}) || '');
-      }
-      if (!sessionId) throw new Error('DSH Host 未返回个人助理会话标识');
-      currentPersonalAssistantSessionId = sessionId;
-      rememberPersonalAssistantSessionId(sessionId);
-      persistPersonalAssistantView(sessionId);
-      openAndActivatePersonalAssistantSession(sessionId);
-      return sessionId;
-    })().finally(() => { openingSession = undefined; });
-    return openingSession;
-  };
-
-  // DSH intentionally hides every `conversation.view` while a Session is
-  // still blank.  PA owns a real, dedicated Session, so the first open is
-  // blank by design; register a tiny activity target for the same view id
-  // and keep it active until the first PA turn arrives.  This uses the
-  // public Conversation registry and lets the normal DSH Session shell mount
-  // the PA view without manufacturing a fake transcript event.
-  if (typeof uiConversation?.views?.register === 'function') {
-    scope(() => uiConversation.views.register({
-      target: PERSONAL_ASSISTANT_VIEW_ID,
-      create: () => ({
-        empty: true,
-        replace: () => true,
-        apply: () => true,
-      }),
-      isActive: () => true,
-    }), 'personal-assistant: blank Session activity');
-  }
-
-  // The PA view is a normal DSH Session target.  Opening the computer from
-  // this view therefore uses the Session-owned right sidebar instead of the
-  // legacy global panel surface.
-  scope(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
-    name: 'conversation.view', id: PERSONAL_ASSISTANT_VIEW_ID, order: -10, label: '个人助理',
-  }, props => PersonalAssistantSessionView({ ...props, request, sidebarRight: ctx.sidebarRight }))), 'personal-assistant: conversation view');
-  scope(() => ctx.slots.inject('conversation.composer', () => ctx.slots.register({
-    name: 'conversation.composer', priority: -20,
-    select: owner => owner?.session?.sessionId && personalAssistantDshSessions.has(owner.session.sessionId)
-      ? { sessionId: owner.session.sessionId } : null,
-  }, PersonalAssistantComposerPlaceholder)), 'personal-assistant: conversation composer');
   scope(() => ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ openSession: openPersonalAssistantSession }),
-  }, PersonalAssistantSessionLauncher)), 'personal-assistant: session launcher');
+    name: 'main', key: PERSONAL_ASSISTANT_PANEL_ID, inject: () => ({ request }),
+  }, PersonalAssistantWorkspace)), 'personal-assistant: workspace');
   scope(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
     name: 'sidebar.panellist', id: PERSONAL_ASSISTANT_PANEL_ID, order: 90, label: '个人助理',
   }, PersonalAssistantPanelIcon)), 'personal-assistant: sidebar row');
@@ -2674,37 +2534,6 @@ export function apply(ctx) {
     name: 'settings.section', id: `${PERSONAL_ASSISTANT_PANEL_ID}-settings`, order: 196, label: '个人助理',
     inject: () => ({ request }),
   }, PersonalAssistantSettings)), 'personal-assistant: settings section');
-  // 普通会话标签页仍可注册；全局个人助理页面使用原生 panel surface，不创建本地会话。
-  const registerComputerTab = () => {
-    if (typeof ctx.inject !== 'function') return;
-    scope(() => ctx.inject(['sidebarRightTabs'], (sub) => {
-      const cleanups = [];
-      const add = (dispose) => { if (typeof dispose === 'function') cleanups.push(dispose); };
-      try {
-        const tabs = sub.sidebarRightTabs;
-        if (tabs === undefined || typeof tabs.register !== 'function') return undefined;
-        add(tabs.register({
-          id: PERSONAL_ASSISTANT_COMPUTER_TAB,
-          kind: PERSONAL_ASSISTANT_COMPUTER_TAB,
-          title: () => '云电脑',
-          guide: [{
-            order: 20,
-            title: () => '云电脑',
-            description: () => '个人助理的云端电脑画面，可获取控制权',
-          }],
-        }));
-        add(sub.slots.inject('sidebar.right.pane.tab', () => sub.slots.register({
-          name: 'sidebar.right.pane.tab', key: PERSONAL_ASSISTANT_COMPUTER_TAB, inject: () => ({ request }),
-        }, props => PersonalAssistantPanel({ ...props, variant: 'computer' }))));
-        add(sub.slots.inject('sidebar.right.pane.tab.title', () => sub.slots.register({
-          name: 'sidebar.right.pane.tab.title', key: PERSONAL_ASSISTANT_COMPUTER_TAB,
-        }, PersonalAssistantComputerTabTitle)));
-      } catch (error) {
-        try { console.warn('[personal-assistant] 右侧栏注册失败', error); } catch {}
-      }
-      return () => { for (const dispose of cleanups.reverse()) dispose(); };
-    }), 'personal-assistant: right tab');
-  };
-  registerComputerTab();
 }
+
 export const createClientPlugin = createPersonalAssistantClient;

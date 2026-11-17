@@ -4,6 +4,8 @@ import { createComputerBrokerClient, createHttpComputerBrokerTransport } from '.
 import { createComputerToolset } from '../src/cloud-computer-tools.mjs';
 import { BotRegistry } from '../src/bot-registry.mjs';
 import { createPersonalAssistantStateStore } from '../src/persistent-state.mjs';
+import { createLocalDeviceService } from './local-device-channel.mjs';
+import { createBuildInfo } from './build-info.mjs';
 import { createCloudSessionChannel } from './cloud-session-channel.mjs';
 import { attachDesktopWebSocket } from './desktop-ws.mjs';
 import { pathToFileURL } from 'node:url';
@@ -44,6 +46,10 @@ await mkdir(state, { recursive: true, mode: 0o700 });
 const claimLocks = `${state}/claim-locks`;
 await mkdir(claimLocks, { recursive: true, mode: 0o700 });
 const stateStore = await createPersonalAssistantStateStore(state).init();
+const localDevices = createLocalDeviceService({ stateStore });
+await localDevices.ready;
+runtime?.setLocalDeviceService?.(localDevices);
+const runtimeInfo = () => ({ runtimeInstanceId, version: env.AGENTENGINE_MANAGED_RUNTIME_VERSION || '', ready: turnBridge?.available === true, build: createBuildInfo(env) });
 const scheduleRetryAttempts = Math.min(Math.max(Number(runtime?.scheduleRetry?.attempts ?? env.SCHEDULE_RETRY_ATTEMPTS ?? 3) || 3, 1), 6);
 const scheduleRetryDelaysMs = (Array.isArray(runtime?.scheduleRetry?.delaysMs) ? runtime.scheduleRetry.delaysMs : String(env.SCHEDULE_RETRY_DELAYS_MS ?? '2000,10000').split(','))
   .map(value => Math.max(0, Number(value) || 0));
@@ -485,9 +491,9 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles }) });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles, localDevices, runtimeInfo }) });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
-return { server, stateStore, reconcileSchedules, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { scheduler.dispose(); if (reconcileTimer) clearInterval(reconcileTimer); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
+return { server, stateStore, reconcileSchedules, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { localDevices.dispose(); scheduler.dispose(); if (reconcileTimer) clearInterval(reconcileTimer); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

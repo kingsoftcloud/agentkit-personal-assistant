@@ -1,5 +1,5 @@
-/** 云端持久会话适配层。只由签名 control permit 授权，永不调用本机 Host。 */
-export function createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId = '', stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles }) {
+/** 云端持久会话适配层。只由签名 control permit 授权，本机只读操作仅经显式授权的 device 通道。 */
+export function createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId = '', stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles, localDevices, runtimeInfo }) {
   const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
   const session = async (botId, sessionId) => {
     if (!(await stateStore.sessions(botId)).some(row => row.sessionId === sessionId)) throw fail('SESSION_NOT_FOUND', '当前助理不存在这个会话', 404);
@@ -11,6 +11,11 @@ export function createCloudSessionChannel({ assistantId, computerId, runtimeInst
     try { registry.require(botId); } catch { throw fail('BOT_NOT_FOUND', '云端不存在该助理', 404); }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw fail('CLOUD_SESSION_REQUEST_INVALID', '会话请求格式错误');
     const scope = { agentId: assistantId, botId, computerId, executionTarget: 'cloud', ...(runtimeInstanceId ? { runtimeInstanceId, stateStorage: 'state-path' } : {}) };
+    if (operation === 'personal-assistant.runtime.inspect' && runtimeInfo) return runtimeInfo();
+    if (operation.startsWith('personal-assistant.device.') && localDevices) {
+      const action = operation.slice('personal-assistant.device.'.length);
+      return action === 'execute' ? localDevices.execute(botId, payload) : localDevices.handle(botId, action, payload);
+    }
     if (operation === 'personal-assistant.sessions.list') return { ...scope, sessions: (await stateStore.sessions(botId)).map(row => ({ sessionId: row.sessionId, title: row.title, updatedAt: Date.parse(row.updatedAt) || 0 })).sort((a, b) => b.updatedAt - a.updatedAt) };
     if (operation === 'personal-assistant.session.create') return { ...scope, ...await sessionCreate({ botId, title: String(payload.title || '').slice(0, 200) }) };
     if (operation === 'personal-assistant.file.list') {

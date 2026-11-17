@@ -267,7 +267,7 @@ test('设置读写经 DSH Host 转发，页面参数被收敛且凭据不出 Hos
     apiKey: 'page-secret', gatewayUrl: 'https://evil.example',
   });
   assert.equal(updated.saved, true);
-  assert.deepEqual(seen[1], ['update', { model: 'deepseek-v4.1-flash-1017', prompt: '新提示词', runtimeVersion: '0.1.37',
+  assert.deepEqual(seen[1], ['update', { agentId: undefined, model: 'deepseek-v4.1-flash-1017', prompt: '新提示词', runtimeVersion: '0.1.37',
     environmentVariables: [{ key: 'FLAG', value: '1' }], deleteKeys: ['OLD'] }]);
   const versions = await gateway.request('personal-assistant.settings.versions', { currentVersion: '0.1.37', agentId: 'ar-host' });
   assert.equal(versions.currentVersion, '0.1.37');

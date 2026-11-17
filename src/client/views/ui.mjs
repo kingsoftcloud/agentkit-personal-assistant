@@ -23,6 +23,7 @@ export const TOKENS = Object.freeze({
 export function connectionStateOf(connection) {
   const connected = connection?.connected === true;
   const authorized = connection?.authorized === true;
+  if (!connected && connection?.available === true && !authorized) return 'connected';
   if (!connected) return 'offline';
   return authorized ? 'authorized' : 'connected';
 }
@@ -30,7 +31,7 @@ export function connectionStateOf(connection) {
 export const CONNECTION_COPY = Object.freeze({ authorized: '本机已授权', connected: '本机未授权', offline: '本机未连接' });
 const CONNECTION_TITLE = Object.freeze({
   authorized: '本机已授权，点击查看授权范围或取消授权',
-  connected: '本机已连接但未授权，点击请求授权',
+  connected: '本机可连接，点击选择授权目录',
   offline: '本机未连接，点击重新检查连接',
 });
 const CONNECTION_TONE = Object.freeze({ authorized: 'ok', connected: 'warn', offline: '' });
