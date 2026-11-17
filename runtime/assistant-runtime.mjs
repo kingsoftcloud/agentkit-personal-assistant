@@ -491,7 +491,7 @@ const server = createServer(async (request, response) => {
     return send(response, status, { error: error?.code || error?.message || 'PERSONAL_ASSISTANT_RUNTIME_FAILED' });
   }
 });
-attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles, localDevices, runtimeInfo }) });
+attachDesktopWebSocket({ server, runtimeToken, assistantId, brokerDesktopRequest, brokerDesktopFrameBinary, botIdOf, taskIdOf, listBots: () => registry.list(), sessionRequest: createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId, stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles, localDevices, runtimeInfo, modelCatalog: runtime?.modelCatalog }) });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
 return { server, stateStore, reconcileSchedules, waitForIdle: () => Promise.allSettled([...pendingTurns]), close: () => { localDevices.dispose(); scheduler.dispose(); if (reconcileTimer) clearInterval(reconcileTimer); return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve())); } };
 }

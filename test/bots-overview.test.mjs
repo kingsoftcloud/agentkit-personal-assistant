@@ -118,7 +118,7 @@ test('云端目录不可达或未绑定时概览降级为本地数据，不抛�
   }
 });
 
-test('Bot 详情按契约白名单返回；记忆删除与模型更新在重启后仍生效', async () => {
+test('Bot 详情按契约白名单返回；只接受实例级模型设置，重启后保留记忆删除', async () => {
   const opened = await workspace().open();
   try {
     const detail = await opened.gateway.request('personal-assistant.bot.detail', { botId: 'default' });
@@ -134,19 +134,18 @@ test('Bot 详情按契约白名单返回；记忆删除与模型更新在重启�
     });
     assert.equal(JSON.stringify(detail).includes('systemPrompt'), false);
 
-    assert.deepEqual(await opened.gateway.request('personal-assistant.bot.model.update', { botId: 'default', model: 'deepseek-v4.1' }), { model: 'deepseek-v4.1' });
-    assert.equal(opened.registry.get('default').model, 'deepseek-v4.1');
+    await assert.rejects(opened.gateway.request('personal-assistant.bot.model.update', { botId: 'default', model: 'another-model' }), { code: 'PERSONAL_ASSISTANT_INSTANCE_MODEL_REQUIRED' });
     assert.deepEqual(await opened.gateway.request('personal-assistant.bot.memory.delete', { botId: 'default', memoryId: 'pref' }), { deleted: true });
     assert.deepEqual(await opened.gateway.request('personal-assistant.bot.memory.delete', { botId: 'default', memoryId: 'pref' }), { deleted: false });
 
-    // 模拟 Host 重启：新 gateway + 同一状态目录，模型覆盖与记忆删除都要保留。
+    // 新 gateway 没有写入本机的模型覆盖。
     const restartedRegistry = new BotRegistry({ bots: [{ botId: 'default', displayName: '默认助理', systemPromptRevision: '1' }] });
     const restarted = createPersonalAssistantHostGateway(config, {
       env: {}, fetchImpl: async () => { throw new Error('offline'); },
       botRegistry: restartedRegistry, stateStore: opened.store, localAccess: createLocalAccess({ stateStore: opened.store }),
     });
     const after = await restarted.request('personal-assistant.bot.detail', { botId: 'default' });
-    assert.equal(after.bot.model, 'deepseek-v4.1');
+    assert.equal(after.bot.model, '');
     assert.deepEqual(after.memory.items.map(item => item.id), ['report']);
   } finally {
     await rm(opened.root, { recursive: true, force: true });

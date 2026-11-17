@@ -24,7 +24,7 @@ function botRow({ h, bot, actions }) {
       avatar({ h, key: 'avatar', name: bot.name, soft: !primary }),
       h('div', { key: 'body', className: 'pa-grow' },
         h('div', { className: 'pa-row-title' }, h('span', { className: 'pa-ellipsis' }, bot.name), primary ? badge({ h, label: '主助理' }) : null, statusBadge({ h, status: bot.status })),
-        h('div', { className: 'pa-sub pa-ellipsis' }, `${bot.model || '默认模型'} · 记忆 ${bot.memoryCount || 0} · 能力 ${bot.capabilityCount || 0}`)),
+        h('div', { className: 'pa-sub pa-ellipsis' }, `记忆 ${bot.memoryCount || 0} · 能力 ${bot.capabilityCount || 0}`)),
       button({ h, key: 'chat', label: '对话', variant: primary ? 'primary' : 'secondary', size: 'sm', ariaLabel: `与${bot.name}对话`, 'data-pa-stat': primary ? '对话' : undefined, onClick: event => { event?.stopPropagation?.(); actions.onEnter?.(bot.id); } }),
       icon(h, 'chevR', { size: 14, color: 'var(--pa-ink-4)' }),
     ],

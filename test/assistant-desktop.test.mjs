@@ -102,7 +102,7 @@ function harness({ env = {}, catalog = { '0.1.56': {}, '0.1.58': {} }, region = 
   return {
     storeDirPromise,
     get request() { return request; },
-    options: { env, fetchImpl, configuration: { resolve: async () => ({ values: { cloudRegion: region } }) }, getClient: async () => client, getDeploymentClient: async () => deployment },
+    options: { env, fetchImpl, configuration: { resolve: async () => ({ values: { cloudRegion: region, modelName: 'gateway-model' } }) }, getClient: async () => client, getDeploymentClient: async () => deployment },
   };
 }
 
@@ -148,6 +148,7 @@ test('创建个人助理跟随 catalog 最新版本，而不是使用已下架�
   assert.deepEqual(await service.create({}), { configured: true, agentId: AGENT });
   assert.equal(harnessValue.request.ManagedRuntimeConfig.RuntimeVersion, '0.1.58');
   assert.match(harnessValue.request.ManagedRuntimeConfig.Manifest, /version: 0\.1\.58/u);
+  assert.match(harnessValue.request.ManagedRuntimeConfig.Manifest, /model: gateway-model/u);
 });
 
 test('显式运行时版本仍优先于 catalog 自动选择', async () => {

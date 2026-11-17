@@ -143,10 +143,11 @@ export function checkGlyph({ h, checked }) {
 
 /** 下拉菜单项（勾选态）。 */
 export function menu({ h, items = [], className = '', label = '', footer = null, ...rest }) {
+  const listbox = rest.role === 'listbox';
   return h('div', { className: cx('pa-pop', 'pa-menu', className), 'data-pop-body': 'true', role: 'menu', ...rest },
     label ? h('div', { className: 'pa-menu-label' }, label) : null,
     items.map(item => h('button', {
-      key: item.id, type: 'button', role: 'menuitem', className: cx('pa-menu-item', item.on && 'on'), onClick: item.onClick,
+      key: item.id, type: 'button', role: listbox ? 'option' : 'menuitem', 'aria-selected': listbox ? Boolean(item.checked) : undefined, className: cx('pa-menu-item', item.on && 'on'), onClick: item.onClick,
     }, item.leading || null,
     h('span', { className: 'pa-grow' }, h('span', { className: cx('pa-ellipsis', item.mono && 'pa-mono'), style: { display: 'block' } }, item.label), item.detail ? h('span', { className: 'pa-cap pa-ellipsis', style: { display: 'block' } }, item.detail) : null),
     item.checked ? h('span', { className: 'pa-ck' }, icon(h, 'check')) : null)),
@@ -190,8 +191,8 @@ export function formatElapsed(ms) {
 }
 
 /** 模型目录：切换菜单里显示的说明。 */
-export const MODEL_NOTES = Object.freeze({
-  'deepseek-v4.1-flash-1017': '响应快 · 上下文 128K',
-  'deepseek-v4.1-pro': '更强推理 · 上下文 256K',
-});
-export const modelNote = model => MODEL_NOTES[model] || '支持工具调用';
+export function modelNote(tokens) {
+  if (!Number.isSafeInteger(tokens) || tokens <= 0) return '';
+  const amount = tokens % (1024 ** 2) === 0 ? (tokens / 1024 ** 2) + 'M' : tokens % 1024 === 0 ? (tokens / 1024) + 'K' : tokens.toLocaleString('zh-CN');
+  return '上下文 ' + amount;
+}

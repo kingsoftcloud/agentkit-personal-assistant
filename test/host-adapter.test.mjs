@@ -143,7 +143,7 @@ test('独立插件可从通用 DSH Host 云服务建立自己的个人助理适�
       if (name !== 'agentkitHostCloud') return undefined;
       return {
         storeDir,
-        configuration: { resolve: async () => ({ values: { cloudRegion: 'pre-online' } }) },
+        configuration: { resolve: async () => ({ values: { cloudRegion: 'pre-online', modelName: 'gateway-model' } }) },
         getClient: async () => ({ action: async () => ({ Agents: [] }) }),
         getDeploymentClient: async () => ({}),
       };

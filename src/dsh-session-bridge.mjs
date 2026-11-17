@@ -77,7 +77,7 @@ async function readSessionEvents(controller, sessionId, signal) {
  * contract. The controller remains the source of truth for execution and
  * history; this bridge only performs session admission and prompt delivery.
  */
-export function createDshTurnBridge({ ctx, sessionController, registry, platformPrompt = '', setupAgent, requestIdFactory = randomUUID } = {}) {
+export function createDshTurnBridge({ ctx, sessionController, registry, platformPrompt = '', platformModel, setupAgent, requestIdFactory = randomUUID } = {}) {
   const controller = sessionController ?? serviceFromContext(ctx);
   const available = Boolean(controller && typeof controller.prompt === 'function');
   const installedPrompts = new WeakMap();
@@ -108,6 +108,11 @@ export function createDshTurnBridge({ ctx, sessionController, registry, platform
     if (!agent || typeof prompt?.section !== 'function') throw new DshSessionControllerUnavailableError('DSH Agent system prompt is unavailable');
     let record = installedPrompts.get(agent);
     if (record && record.botId !== botId) throw Object.assign(new Error('DSH Agent belongs to another Bot'), { code: 'DSH_SESSION_BOT_CONFLICT', status: 409 });
+    // Resumed sessions can carry a previous instance model in their event log.
+    if (platformModel) {
+      const current = agent.model.current();
+      if (current?.provider !== platformModel.provider || current.model !== platformModel.model) agent.model.select(platformModel);
+    }
     if (record) {
       record.memory = await memories(botId);
       if (record.memory.length && !record.hasMemoryContext) throw new DshSessionControllerUnavailableError('DSH Agent memory context is unavailable');

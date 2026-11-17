@@ -8,7 +8,7 @@ import { renderSettings } from './views/settings.mjs';
 import { renderLocalAccess } from './views/local-access.mjs';
 import { AssistantNativeRightbar, createAssistantWorkbench } from './native-workbench.mjs';
 import { renderCreateProgress } from './views/create-progress.mjs';
-import { avatar, button as panelButton, connectionDot, iconButton, menu, menuSeparator, toast as toastView } from './views/ui.mjs';
+import { avatar, button as panelButton, connectionDot, iconButton, menu, menuSeparator, modelNote, toast as toastView } from './views/ui.mjs';
 import { cx, icon, themeStyle } from './views/theme.mjs';
 
 export class PersonalAssistantGatewayUnavailableError extends Error {
@@ -1118,6 +1118,23 @@ function settingsDraftFrom(inspect) {
  * 面板外壳组件：注册在 main 槽位。
  * props 与旧 PersonalAssistantHome 对齐，便于宿主无感切换。
  */
+function useModelCatalog({ useEffect, useState }, { request, agentId, botId, refreshKey }) {
+  const [state, setState] = useState(null);
+  const key = agentId && botId ? JSON.stringify([agentId, botId, refreshKey]) : '';
+  useEffect(() => {
+    if (!key) { setState(null); return; }
+    let disposed = false;
+    void Promise.resolve().then(() => request('personal-assistant.models.list', { agentId, botId })).then(value => {
+      if (!Array.isArray(value?.models)) throw new Error('模型目录不可用');
+      if (!disposed) setState({ key, status: 'ready', model: value.model, models: value.models });
+    }).catch(() => {
+      if (!disposed) setState({ key, status: 'unavailable', models: [], error: '暂时读不到模型目录，请检查连接或升级云端运行时' });
+    });
+    return () => { disposed = true; };
+  }, [request, key, agentId, botId]);
+  return state?.key === key ? state : { status: key ? 'loading' : 'idle', models: [] };
+}
+
 export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory, initialBotId = '' } = {}) {
   const R = clientReact || globalThis.React;
   if (!R) return '个人助理页面尚未就绪，请重新打开';
@@ -1136,10 +1153,9 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
 
   // —— 导航 ——
   const [panelView, setPanelView] = useState('chat');
-  // 页头/输入框的弹出菜单：历史会话、切换 Bot、模型下拉（详情与设置各一份）。
+  // 页头、输入框和设置的弹出菜单。
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
   const [botMenuOpen, setBotMenuOpen] = useState(false);
-  const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [settingsModelMenuOpen, setSettingsModelMenuOpen] = useState(false);
   const conversationControlsRef = useRef(null);
   // ref 只用于命令式调用（createSession/openSession）；页头要跟着变的 busy/sessionId
@@ -1189,7 +1205,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
   const [detailDegraded, setDetailDegraded] = useState(false);
   const [manageMemory, setManageMemory] = useState(false);
   const [showAllMemory, setShowAllMemory] = useState(false);
-  const [modelBusy, setModelBusy] = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState({ open: false, text: '', busy: false, error: '' });
   const [createBot, setCreateBot] = useState({ open: false, name: '', busy: false, error: '' });
   // —— 设置 ——
@@ -1202,6 +1217,10 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
   const [settingsNotice, setSettingsNotice] = useState('');
   const [runtimeUpgrade, setRuntimeUpgrade] = useState(null);
   const [settingsDraft, setSettingsDraft] = useState({ model: '', prompt: '', environmentVariables: [] });
+  const modelCatalog = useModelCatalog(R, {
+    request, agentId: panelView === 'settings' && scope?.agentId === config?.agentId ? scope?.agentId : '', botId: scope?.botId,
+    refreshKey: [settingsInspect?.runtime?.version, settingsInspect?.runtime?.updatedAt, runtimeUpgrade?.observedVersion],
+  });
   const [envDeletes, setEnvDeletes] = useState([]);
   const [closeAssistant, setCloseAssistant] = useState({ open: false, text: '', busy: false, error: '', closedNotice: '' });
   // —— 首次创建 ——
@@ -1528,20 +1547,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
 
   const botSummary = botId => (overview?.bots || []).find(bot => bot.id === botId) || { id: botId, name: botId, role: 'custom', status: 'idle', model: '', memoryCount: 0, capabilityCount: 0, computer: 'offline' };
 
-  const changeBotModel = async model => {
-    const botId = selectedBotId || detail?.bot?.id;
-    if (!botId || !model || modelBusy) return;
-    setModelBusy('model'); setNotice('');
-    try {
-      await scopedCall('personal-assistant.bot.model.update', { botId, model });
-      setDetail(previous => previous ? { ...previous, bot: { ...previous.bot, model } } : previous);
-      setOverview(previous => previous ? { ...previous, bots: previous.bots.map(bot => bot.id === botId ? { ...bot, model } : bot) } : previous);
-      setNotice('模型已切换，从下一条消息生效');
-    } catch (failure) {
-      setNotice(failure?.message || '模型切换失败，请稍后重试');
-    } finally { setModelBusy(''); }
-  };
-
   const deleteMemory = async memoryId => {
     const botId = selectedBotId || detail?.bot?.id;
     if (!botId || !memoryId) return;
@@ -1600,6 +1605,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
 
   const openSettings = () => {
     setPanelView('settings'); setSettingsError(''); setSettingsNotice('');
+    setSettingsModelMenuOpen(false);
     setCloseAssistant(previous => ({ ...previous, open: false, text: '', error: '' }));
     const cached = readPanelCache('settings-inspect');
     if (cached?.value) { applySettingsDraft(cached.value); setSettingsDegraded(false); }
@@ -1671,9 +1677,10 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
       const environmentVariables = (settingsDraft.environmentVariables || [])
         .filter(row => String(row.key || '').trim() && (row.dirty === true || row.saved !== true))
         .map(row => ({ key: String(row.key).trim(), value: String(row.value ?? ''), sensitive: row.sensitive === true }));
+      const model = String(settingsDraft.model || '').trim();
       await rpc('personal-assistant.settings.update', {
         agentId: settingsInspect.agentId,
-        model: String(settingsDraft.model || '').trim(),
+        ...(model && model !== settingsInspect.model ? { model, botId: scope?.botId } : {}),
         prompt: String(settingsDraft.prompt || ''),
         environmentVariables,
         deleteKeys: envDeletes,
@@ -1854,8 +1861,8 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
   const dotNode = connectionDot({ h, connection: localStatus, onOpen: onDotOpen, open: localAccessOpen });
   const configured = config?.configured === true;
 
-  const anyMenuOpen = historyMenuOpen || botMenuOpen || modelMenuOpen || settingsModelMenuOpen || attachmentMenuOpen;
-  const closeMenus = () => { setHistoryMenuOpen(false); setBotMenuOpen(false); setModelMenuOpen(false); setSettingsModelMenuOpen(false); setAttachmentMenuOpen(false); };
+  const anyMenuOpen = historyMenuOpen || botMenuOpen || settingsModelMenuOpen || attachmentMenuOpen;
+  const closeMenus = () => { setHistoryMenuOpen(false); setBotMenuOpen(false); setSettingsModelMenuOpen(false); setAttachmentMenuOpen(false); };
   const goTab = tab => {
     closeMenus();
     if (tab === 'settings') { openSettings(); return; }
@@ -2004,7 +2011,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
       return h('main', { className: 'pa-body' },
         renderSettings({
           h, loading: settingsLoading, degraded: settingsDegraded, notice: settingsNotice, error: settingsError, busy: settingsBusy,
-          inspect: settingsInspect, versions: settingsVersions, upgrade: runtimeUpgrade, localAccess: localStatus, modelOptions: MODEL_OPTIONS,
+          inspect: settingsInspect, versions: settingsVersions, upgrade: runtimeUpgrade, localAccess: localStatus, modelCatalog,
           instance: { configured, agentId: config?.agentId || '', botId: scope?.botId, version: settingsInspect?.runtime?.version || '', status: settingsInspect?.status || (configured ? '运行中' : '未开通'), editable: configured },
           draft: settingsDraft, closeAssistant, modelMenuOpen: settingsModelMenuOpen,
           actions: {
@@ -2041,13 +2048,11 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
           memory: detail?.memory || null,
           capabilities: detail?.capabilities || [],
           computer: detail?.computer || null,
-          modelOptions: MODEL_OPTIONS,
-          manageMemory, showAllMemory, modelBusy, deleteConfirm, modelMenuOpen,
+          manageMemory, showAllMemory, deleteConfirm,
           actions: {
             onBack: () => setPanelView('list'),
             onOpenChat: botId => openChat(botId),
-            onToggleModelMenu: () => setModelMenuOpen(open => !open),
-            onChangeModel: model => { setModelMenuOpen(false); void changeBotModel(model); },
+            onOpenModelSettings: openSettings,
             onToggleManageMemory: () => setManageMemory(value => !value),
             onToggleAllMemory: () => setShowAllMemory(value => !value),
             onDeleteMemory: id => void deleteMemory(id),
@@ -2071,7 +2076,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
         }, avatar({ h, name: botName, size: 's16', soft: currentBot?.role !== 'primary' }), h('span', { className: 'pa-ellipsis', style: { maxWidth: 140 } }, botName), icon(h, 'chevD', { size: 12 })),
         botMenuOpen ? menu({
           h, className: 'up', label: '切换 Bot', 'aria-label': '切换 Bot',
-          items: bots.map(bot => ({ id: bot.id, label: bot.name, detail: bot.role === 'primary' ? '主助理' : (bot.model || ''), checked: bot.id === (scope?.botId || selectedBotId), leading: avatar({ h, name: bot.name, size: 's24', soft: bot.role !== 'primary' }), onClick: () => { setBotMenuOpen(false); openChat(bot.id); } })),
+          items: bots.map(bot => ({ id: bot.id, label: bot.name, detail: bot.role === 'primary' ? '主助理' : '', checked: bot.id === (scope?.botId || selectedBotId), leading: avatar({ h, name: bot.name, size: 's24', soft: bot.role !== 'primary' }), onClick: () => { setBotMenuOpen(false); openChat(bot.id); } })),
           footer: [menuSeparator({ h, key: 'sep' }), h('button', { key: 'new', type: 'button', className: 'pa-menu-item', onClick: () => { setBotMenuOpen(false); setPanelView('list'); setCreateBot({ open: true, name: '', busy: false, error: '' }); } }, icon(h, 'plus', { size: 14 }), '新建 Bot')],
         }) : null);
       return h('div', { className: 'pa-body' },
@@ -2154,9 +2159,6 @@ export function PersonalAssistantShell({ request, nativeWorkbench, pickDirectory
     popover,
     showToast ? toastView({ h, text: notice, tone: /失败|不可用|错误|无法/u.test(notice) ? 'danger' : '' }) : null);
 }
-
-/** 可切换的模型目录：Host 侧 bot.model.update 不限制取值，这里只给常见档位。 */
-const MODEL_OPTIONS = Object.freeze(['deepseek-v4.1-flash-1017', 'deepseek-v4.1-pro']);
 
 /** 附件大小：给「云端附件」下拉项用的短标签。 */
 function formatBytes(bytes) {
@@ -2280,6 +2282,8 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
   }, [bindingBusy, check, request]);
 
   const agentId = config?.agentId || '';
+  const modelBotId = bots?.[0]?.botId;
+  const modelCatalog = useModelCatalog(R, { request, agentId, botId: modelBotId, refreshKey: checkedAt });
   const canConfirm = Boolean(agentId) && confirmText.trim() === agentId;
   const closeAssistant = useCallback(async () => {
     if (!canConfirm) return;
@@ -2313,7 +2317,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       const environmentVariables = envRows.filter(row => row.dirty === true || row.saved !== true)
         .map(row => ({ key: String(row.key || '').trim(), value: String(row.value || ''), sensitive: row.sensitive === true }));
       await request('personal-assistant.settings.update', {
-        agentId: settings.agentId, model: model.trim(), prompt,
+        agentId: settings.agentId, ...(model && model !== settings.model ? { model, botId: modelBotId } : {}), prompt,
         environmentVariables, deleteKeys: envDeletes,
       });
       setSettingsNotice(`已提交云端更新（版本 ${version}），个人助理正在应用新配置，通常 1–2 分钟完成，期间云电脑会短暂重连。`);
@@ -2329,7 +2333,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     } catch (reason) {
       setSettingsError(reason?.message || '保存配置失败，请稍后重试');
     } finally { setSettingsBusy(false); }
-  }, [editable, envDeletes, envRows, model, prompt, request, settings?.agentId, settingsBusy, version]);
+  }, [editable, envDeletes, envRows, model, modelBotId, prompt, request, settings?.agentId, settings?.model, settingsBusy, version]);
 
   useEffect(() => { void check(); }, [check]);
 
@@ -2397,9 +2401,12 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
         ? line('说明', h('div', { style: settingsStyle.note },
             settings.detailNote || '云端平台暂时没有返回实例详情，下面显示的是本机记录的配置；环境变量详情暂时不可见。'))
         : null,
-      line('模型', h('input', { style: settingsStyle.input, value: model, disabled: settingsBusy,
-        placeholder: '例如 deepseek-v4.1-flash-1017', 'aria-label': '模型名称',
-        onChange: event => setModel(String(event?.target?.value ?? '')) })),
+      line('模型', h('div', null,
+        h('select', { style: settingsStyle.input, value: model, disabled: settingsBusy || !editable || modelCatalog.models.length === 0,
+          'aria-label': '模型名称', onChange: event => setModel(event.target.value) },
+          modelCatalog.models.some(row => row.id === model) ? null : h('option', { value: model }, model || '未读取到模型'),
+          modelCatalog.models.map(row => h('option', { key: row.id, value: row.id }, row.id + ' · ' + modelNote(row.contextWindow)))),
+        modelCatalog.error ? h('div', { style: settingsStyle.note }, modelCatalog.error) : null)),
       line('系统提示词', h('textarea', { style: settingsStyle.textarea, value: prompt, disabled: settingsBusy,
         'aria-label': '系统提示词', onChange: event => setPrompt(String(event?.target?.value ?? '')) })),
       line('运行时版本', versionControl),
