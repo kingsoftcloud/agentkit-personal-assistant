@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** 离线安装个人助理、原生侧栏和DSH 宿主包；默认仅检查。 */
+/** Install the PA tarball into an existing DSH profile without a registry. */
 import { promises as fs } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, posix } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -104,12 +104,13 @@ export async function installLocal({ profile, manifest, apply = false, dshNode =
   const original = await fs.readFile(packagePath), pkg = parseJson(original, 'profile package.json');
   const manifestPath = resolve(manifest), manifestBytes = await fs.readFile(manifestPath);
   const release = parseJson(manifestBytes, 'release manifest');
-  if (!Array.isArray(release.packages) || release.packages.length !== 2) fail('manifest 必须包含个人助理和原生侧栏');
+  if (!Array.isArray(release.packages) || !release.packages.length || release.packages.length > 2) fail('manifest 必须包含个人助理安装包');
   const names = release.packages.map(item => item.pkgName);
-  if (new Set(names).size !== names.length || !names.includes(PA) || !names.includes(SIDEBAR) ||
+  if (new Set(names).size !== names.length || !names.includes(PA) ||
       names.some(name => ![PA, SIDEBAR].includes(name))) fail('manifest 包集合不正确');
-  const sourceCommit = release.sidebar?.sourceCommit || release.packages.find(item => item.pkgName === SIDEBAR).sourceCommit;
-  if (!/^[a-f0-9]{40}$/.test(sourceCommit || '')) fail('manifest 缺少侧栏 sourceCommit');
+  const sidebar = release.packages.find(item => item.pkgName === SIDEBAR);
+  const sourceCommit = sidebar && (release.sidebar?.sourceCommit || sidebar.sourceCommit);
+  if (sidebar && !/^[a-f0-9]{40}$/.test(sourceCommit || '')) fail('manifest 缺少侧栏 sourceCommit');
   const prepared = [];
   for (const item of release.packages) {
     if (!item.version || typeof item.version !== 'string' || !/^[a-f0-9]{64}$/.test(item.sha256 || '') ||

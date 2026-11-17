@@ -593,8 +593,7 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
 
   /** Cloud deployment and its canonical manifest are authoritative. Older
    * control planes may only expose the local creation record as a read fallback. */
-  async function settings(input = {}, signal) {
-    const binding = await readBinding();
+  async function settingsForBinding(binding, signal) {
     const agentId = binding?.agentId;
     if (!AGENT_ID.test(agentId || '')) throw fail('ASSISTANT_NOT_CREATED', '当前没有可用的个人助理，请先开通或连接', 409);
     const manifest = parseManifest(binding.manifest);
@@ -613,6 +612,7 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
       model: manifest?.model || '',
       prompt: manifest?.prompt ?? '',
       environmentVariables: [],
+      manifest: binding.manifest,
       recordSource: manifest ? 'host' : 'missing',
       detailAvailable: false,
       detailNote: '云端平台暂时没有返回实例详情（预发平台尚未开放个人助理的配置读取），下面显示的是本机记录的创建配置；环境变量详情暂时不可见。',
@@ -631,7 +631,6 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     const advanced = record(data.Advanced) ? data.Advanced : {};
     const cloudManifest = text(deployment.ManagedRuntimeConfig?.Manifest);
     const cloudRecord = parseManifest(cloudManifest);
-    if (cloudRecord && cloudManifest !== binding.manifest) await writeBinding({ ...binding, manifest: cloudManifest });
     return {
       ...local,
       name: text(basic.Name) || local.name,
@@ -647,10 +646,16 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
       model: cloudRecord?.model || local.model,
       prompt: cloudRecord?.prompt ?? local.prompt,
       recordSource: cloudRecord ? 'cloud' : local.recordSource,
+      manifest: cloudRecord ? cloudManifest : local.manifest,
       environmentVariables: publicEnvironmentRows(advanced.EnvironmentVariables),
       detailAvailable: true,
       detailNote: '',
     };
+  }
+
+  async function settings(_input = {}, signal) {
+    const { manifest: _, ...publicSettings } = await settingsForBinding(await readBinding(), signal);
+    return publicSettings;
   }
 
   /** Candidate runtime versions published for this environment. The catalog is
@@ -658,11 +663,8 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
    * instance's current version and explains that no upgrade target is
    * published. */
   async function settingsVersions(input = {}, signal) {
-    const binding = await readBinding();
-    if (!binding || !AGENT_ID.test(binding.agentId)) throw fail('ASSISTANT_NOT_CREATED', '当前没有可用的个人助理，请先开通或连接', 409);
-    const recorded = parseManifest(binding.manifest);
     const current = await settings({}, signal);
-    const currentVersion = current.detailAvailable ? current.runtime.version : (recorded?.runtimeVersion || '');
+    const currentVersion = current.runtime.version;
     const versions = [];
     if (typeof getDeploymentClient === 'function') {
       try {
@@ -691,7 +693,8 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     return {
       currentVersion: RUNTIME_VERSION.test(currentVersion) ? currentVersion : '',
       versions,
-      upgrades: current.detailAvailable ? versions.filter(row => compareVersions(row.version, currentVersion) > 0) : [],
+      upgrades: current.recordSource === 'cloud' && RUNTIME_VERSION.test(currentVersion)
+        ? versions.filter(row => /@sha256:[a-f0-9]{64}$/u.test(row.image) && compareVersions(row.version, currentVersion) > 0) : [],
       catalogAvailable: versions.length > 0,
     };
   }
@@ -702,29 +705,26 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
    * declaration and environment variables through its incremental patch, so a
    * single UpdateAgent call covers every setting and the instance rolls only
    * once. The page never restarts the instance itself. */
-  async function settingsUpdate(input = {}, signal) {
-    await settings({}, signal);
+  async function applySettings(input = {}, signal, upgrade = false) {
     const binding = await readBinding();
     if (!binding || !AGENT_ID.test(binding.agentId)) throw fail('ASSISTANT_NOT_CREATED', '当前没有可用的个人助理，请先开通或连接', 409);
     if (input.agentId && input.agentId !== binding.agentId) throw fail('ASSISTANT_AGENT_MISMATCH', '当前助理已改变，请重新打开设置', 409);
     if (typeof getDeploymentClient !== 'function') throw fail('ASSISTANT_SETTINGS_UNAVAILABLE', '当前 Host 版本还不支持个人助理配置', 503);
-    const parsed = normalizeSettingsInput(input);
-    const recorded = parseManifest(binding.manifest);
-    const version = parsed.version || recorded?.runtimeVersion || '';
-    if (!RUNTIME_VERSION.test(version)) throw fail('ASSISTANT_SETTINGS_VERSION_REQUIRED', '请先选择个人助理的运行时版本，再保存配置', 400);
-    // The platform needs the complete declaration on every PA update. The
-    // instance name must not change, so a legacy binding without a recorded
-    // manifest fails closed instead of overwriting the instance with guesses.
-    const name = recorded?.name || '';
-    if (!name) {
+    const current = await settingsForBinding(binding, signal);
+    if (current.recordSource !== 'cloud') {
       throw fail('ASSISTANT_SETTINGS_MANIFEST_MISSING',
         '云端尚未提供此实例的完整配置，请更新控制面后重试；已有实例和数据会保留', 409);
     }
+    const parsed = normalizeSettingsInput(input);
+    const recorded = parseManifest(current.manifest);
+    const version = upgrade ? parsed.version : recorded.runtimeVersion;
+    if (input.expectedVersion && recorded.runtimeVersion !== input.expectedVersion) throw fail('UPGRADE_VERSION_CHANGED', '云端版本已改变，请重新检查更新', 409);
+    if (!upgrade && parsed.version && parsed.version !== version) throw fail('UPGRADE_REQUIRED', '请使用运行时区域的升级操作', 409);
+    if (!RUNTIME_VERSION.test(version)) throw fail('ASSISTANT_SETTINGS_VERSION_REQUIRED', '无法确认云端运行时版本，请稍后重试', 409);
     const model = parsed.model ?? recorded.model ?? DEFAULT_MODEL;
     if (!MODEL_NAME.test(model)) throw fail('ASSISTANT_SETTINGS_MODEL_INVALID', '模型名称无效', 400);
     const prompt = parsed.prompt ?? recorded.prompt ?? DEFAULT_PROMPT;
-    if (input.expectedVersion && recorded.runtimeVersion !== input.expectedVersion) throw fail('UPGRADE_VERSION_CHANGED', '云端版本已改变，请重新检查更新', 409);
-    const declaration = parseYaml(binding.manifest);
+    const declaration = parseYaml(current.manifest);
     declaration.runtime = { ...declaration.runtime, version };
     if (parsed.model !== undefined) declaration.model = model;
     if (parsed.prompt !== undefined) declaration.prompt = prompt;
@@ -744,11 +744,14 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     let client;
     try { client = await getDeploymentClient(); }
     catch { throw fail('ASSISTANT_SETTINGS_UNAVAILABLE', '暂时无法连接云端控制面，请稍后重试', 503); }
+    const latest = await readBinding();
+    if (latest?.agentId !== binding.agentId || latest.gatewayUrl !== binding.gatewayUrl) throw fail('ASSISTANT_AGENT_MISMATCH', '当前助理已改变，请重新打开设置', 409);
     try { await client.forAgent(binding.agentId).update(payload, { signal }); }
     catch (error) { throw settingsFailure(error); }
-    await writeBinding({ ...binding, manifest, label: binding.label });
     return { configured: true, agentId: binding.agentId, version, model, prompt, saved: true, status: 'updating' };
   }
+
+  const settingsUpdate = (input, signal) => applySettings(input, signal);
 
   /** Close the bound cloud assistant for good: remove the managed runtime
    * (the pod), let the platform release the AICP key and the Ding order, then
@@ -777,7 +780,7 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     return { configured: false, agentId, closed: true };
   }
 
-  const upgrades = createRuntimeUpgrade({ path: join(storeDir, 'assistant-upgrade.json'), inspect: settings, versions: settingsVersions, update: settingsUpdate, probe: inspectRuntime || (() => { throw fail('UPGRADE_PROBE_UNAVAILABLE', '当前 Host 不支持运行时验证', 503); }) });
+  const upgrades = createRuntimeUpgrade({ path: join(storeDir, 'assistant-upgrade.json'), inspect: settings, versions: settingsVersions, update: (input, signal) => applySettings(input, signal, true), probe: inspectRuntime || (() => { throw fail('UPGRADE_PROBE_UNAVAILABLE', '当前 Host 不支持运行时验证', 503); }) });
   return Object.freeze({ configuration, issueTicket, status, connect, create, disconnect, destroy,
     settings, settingsUpdate, settingsVersions, settingsUpgrade: upgrades.start, settingsUpgradeStatus: upgrades.status });
 }

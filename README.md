@@ -8,6 +8,8 @@
 - 会话与记忆、日程与自动化任务
 - 云电脑工具入口：截图、键鼠输入、浏览器导航、剪贴板（仅快捷键路径）
 - 桌面接管使用**短期一次性 permit**（`scope=desktop`、可读/可控两种模式、单次 jti、最长 60 秒），不使用长期凭证
+- 本机目录授权：为一个云端助理选择只读目录，Host 在线时可读取文本文件，授权可随时撤销
+- 云端运行时升级：从环境发布目录选择版本，保留现有实例和数据，等待新进程就绪后确认
 
 ## 安装
 
@@ -15,7 +17,9 @@
 npm i @kingsoftcloud/agentkit-personal-assistant
 ```
 
-插件随 DSH profile 安装；客户端面板产物是 `dist/client.js`（安装时由 `prepack` 构建）。宿主侧要求 Node.js 22.23.4+，DSH 0.2.1。
+插件随 DSH profile 安装；发布包已包含客户端产物和 PA 自己的运行依赖。需要 DSH 0.2.2-rc.1 Host，Node.js 22.23.4 或 24.22.1 以上的受支持版本。云端镜像升级和本机目录读取需要环境支持相应控制面与运行时；只更新本机插件不会替换云端镜像。
+
+已有 DSH 的机器可在离线环境使用发布 tarball 和 SHA256 清单，通过 `scripts/install-local.mjs --profile <绝对路径> --manifest <清单> --apply` 安装，随后重启该 Host。省略 `--apply` 可先检查包和目标 profile。升级本机插件无需换 Studio App，也不需要安装额外侧栏包。
 
 ## 运行架构
 

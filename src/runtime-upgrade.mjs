@@ -60,9 +60,9 @@ export function createRuntimeUpgrade({ path, inspect, versions, update, probe, n
         targetVersion: target.version, targetImage: target.image, startedAt: now(), status: 'submitting' });
       try {
         await update({ agentId: current.agentId, runtimeVersion: target.version, expectedVersion: current.runtime.version }, signal);
-        return save({ ...operation, status: 'updating' });
+        return save({ ...operation, status: 'updating' }, true);
       } catch (error) {
-        await save({ ...operation, status: error.status >= 400 && error.status < 500 ? 'failed' : 'unknown', error: error.message });
+        await save({ ...operation, status: error.status >= 400 && error.status < 500 ? 'failed' : 'unknown', error: error.message }, true);
         throw error;
       }
     })();

@@ -1316,7 +1316,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
     try {
       await scopedCall('personal-assistant.local-access.grant', { scopes: localScopes, roots: localRootsDraft.split('\n').map(value => value.trim()).filter(Boolean) });
       const next = await loadConnection();
-      setLocalNotice(next?.connected && next?.authorized ? '本机目录已授权并连接' : '授权已提交，等待本机确认');
+      setLocalNotice(next?.connected && next?.authorized ? '本机目录已授权并连接' : '授权已保存，等待云端连接');
     } catch (failure) {
       setLocalError(failure?.message || '授权失败：Host 尚未提供本机授权能力');
     } finally { setLocalBusy(''); }
@@ -1667,13 +1667,14 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
   }, [panelView, runtimeUpgrade, scope?.agentId]);
 
   const saveSettings = async () => {
-    if (settingsBusy) return;
+    if (settingsBusy || settingsInspect?.recordSource !== 'cloud' || !settingsInspect.agentId) return;
     setSettingsBusy('save'); setSettingsError(''); setSettingsNotice('');
     try {
       const environmentVariables = (settingsDraft.environmentVariables || [])
         .filter(row => String(row.key || '').trim() && (row.dirty === true || row.saved !== true))
         .map(row => ({ key: String(row.key).trim(), value: String(row.value ?? ''), sensitive: row.sensitive === true }));
-      await scopedCall('personal-assistant.settings.update', {
+      await rpc('personal-assistant.settings.update', {
+        agentId: settingsInspect.agentId,
         model: String(settingsDraft.model || '').trim(),
         prompt: String(settingsDraft.prompt || ''),
         environmentVariables,
@@ -1963,7 +1964,7 @@ export function PersonalAssistantShell({ request, nativeWorkbench, initialBotId 
       panelView === 'chat' && configured ? iconButton({ h, name: 'compose', label: '新建会话', title: conversationBusy ? '请等待本轮结束后再新建会话' : '新建云端会话', 'data-window-drag-recall': '', disabled: conversationBusy, onClick: () => conversationControlsRef.current?.createSession?.() }) : null,
       panelView === 'chat' && configured ? panelButton({ h, label: '云电脑', variant: 'secondary', 'data-window-drag-recall': '', ariaLabel: '打开云电脑侧栏', title: '打开或重新打开云电脑侧栏', icon: icon(h, 'monitor', { size: 14 }), className: 'pa-hide-narrow', onClick: openCloudComputer }) : null,
       panelView === 'list' && configured ? panelButton({ h, label: '新建 Bot', variant: 'primary', 'data-window-drag-recall': '', icon: icon(h, 'plus', { size: 14 }), onClick: () => setCreateBot({ open: true, name: '', busy: false, error: '' }) }) : null,
-      panelView === 'settings' ? panelButton({ h, label: settingsBusy === 'save' ? '保存中…' : '保存', variant: 'primary', 'data-window-drag-recall': '', disabled: settingsBusy === 'save' || !configured || !settingsInspect, onClick: saveSettings }) : null,
+      panelView === 'settings' ? panelButton({ h, label: settingsBusy === 'save' ? '保存中…' : '保存', variant: 'primary', 'data-window-drag-recall': '', disabled: Boolean(settingsBusy) || !configured || settingsInspect?.recordSource !== 'cloud' || ['submitting', 'updating', 'verifying', 'unknown'].includes(runtimeUpgrade?.status), onClick: saveSettings }) : null,
       panelView === 'create' ? panelButton({ h, label: createCollapsed ? '展开' : '收起', variant: 'ghost', size: 'sm', 'data-window-drag-recall': '', onClick: toggleCreateCollapsed }) : null,
       h('span', { className: 'pa-head-sep', 'aria-hidden': 'true' }),
       dotNode));
@@ -2327,7 +2328,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     setEnvRows(rows => rows.filter((_, at) => at !== index));
     if (row.saved && row.key) setEnvDeletes(keys => keys.includes(row.key) ? keys : [...keys, row.key]);
   };
-  const editable = ['host', 'cloud'].includes(settings?.recordSource);
+  const editable = settings?.recordSource === 'cloud' && Boolean(settings.agentId);
   const saveSettings = useCallback(async () => {
     if (!editable || settingsBusy) return;
     setSettingsBusy(true); setSettingsError(''); setSettingsNotice('');
@@ -2335,7 +2336,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
       const environmentVariables = envRows.filter(row => row.dirty === true || row.saved !== true)
         .map(row => ({ key: String(row.key || '').trim(), value: String(row.value || ''), sensitive: row.sensitive === true }));
       await request('personal-assistant.settings.update', {
-        model: model.trim(), prompt,
+        agentId: settings.agentId, model: model.trim(), prompt,
         environmentVariables, deleteKeys: envDeletes,
       });
       setSettingsNotice(`已提交云端更新（版本 ${version}），个人助理正在应用新配置，通常 1–2 分钟完成，期间云电脑会短暂重连。`);
@@ -2351,7 +2352,7 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
     } catch (reason) {
       setSettingsError(reason?.message || '保存配置失败，请稍后重试');
     } finally { setSettingsBusy(false); }
-  }, [editable, envDeletes, envRows, model, prompt, request, settingsBusy, version]);
+  }, [editable, envDeletes, envRows, model, prompt, request, settings?.agentId, settingsBusy, version]);
 
   useEffect(() => { void check(); }, [check]);
 
@@ -2381,10 +2382,10 @@ export function PersonalAssistantSettings({ request, openComputer = null } = {})
         line('云端配置', h('div', { style: settingsStyle.note },
           settingsBusy ? '读取中…' : (settingsError || '暂时读不到云端配置；请点下方“检查连接”重试')), true));
     }
-    if (!['host', 'cloud'].includes(settings.recordSource)) {
+    if (!editable) {
       return h('div', { style: settingsStyle.card },
         line('云端配置', h('div', { style: settingsStyle.note },
-          '这个个人助理是用旧版 DSH Host 创建的，本机没有记录它的配置清单，暂时不能在线修改。请更新云端控制面以读取配置，已有实例和数据会保留。'), true));
+          '暂未读取到云端完整配置。检查连接后重试，已有实例和数据会保留。'), true));
     }
     const versionControl = h('div', { style: settingsStyle.note }, `${settings.runtime?.version || '未知版本'} · 请在个人助理的设置页检查和执行升级`);
     const envEditor = h('div', null,

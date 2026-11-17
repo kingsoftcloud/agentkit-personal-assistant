@@ -79,7 +79,12 @@ export function createLocalDeviceService({ stateStore, now = Date.now, pollMs = 
       const job = pending.get(input.requestId);
       if (!job) return { accepted: false, reason: 'request-ended' };
       if (job.device !== device) throw fail('LOCAL_RESULT_SCOPE', '结果与执行设备不匹配', 403);
-      if (Buffer.byteLength(JSON.stringify(input.value ?? input.error)) > 100 * 1024) throw fail('LOCAL_RESULT_LIMIT', '本机结果超过大小限制', 413);
+      // A 64 KiB UTF-8 file can expand up to six times in JSON (control characters).
+      // Leave envelope headroom below the shared 1 MiB socket limit.
+      if (Buffer.byteLength(JSON.stringify(input.value ?? input.error ?? null)) > 416 * 1024) {
+        await settle(job, fail('LOCAL_RESULT_LIMIT', '本机结果超过大小限制', 413));
+        return { accepted: false, reason: 'result-size-limit' };
+      }
       await settle(job, input.ok === true ? null : fail(input.error?.code || 'LOCAL_READ_FAILED', input.error?.message || '本机读取失败'), input.value);
       return { accepted: true };
     }

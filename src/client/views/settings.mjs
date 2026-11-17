@@ -89,7 +89,7 @@ function runtimeSection({ h, instance, versions, busy, upgrade, actions }) {
   const upgradable = Boolean(target);
   const pending = ['submitting', 'updating', 'verifying', 'unknown'].includes(upgrade?.status);
   const stateText = pending ? `正在确认 v${upgrade.targetVersion} 就绪，云电脑可能短暂重连`
-    : upgrade?.status === 'succeeded' ? `已确认 v${upgrade.observedVersion} 运行中`
+    : upgrade?.status === 'succeeded' ? `上次升级已确认 v${upgrade.observedVersion} 就绪`
     : upgrade?.error || (upgradable ? `可升级到 v${target.version}，会保留实例配置和数据` : '当前没有可升级版本');
   return section({ h, title: '运行时', children: group({ h, children: row({ h, children: [
     h('div', { key: 'body', className: 'pa-grow' },
@@ -138,12 +138,12 @@ export function renderSettings({
   }
   const recordSource = inspect?.recordSource;
   const legacy = recordSource === 'missing';
-  const editable = instance?.configured === true && ['host', 'cloud'].includes(recordSource)
+  const editable = instance?.configured === true && recordSource === 'cloud'
     && !['submitting', 'updating', 'verifying', 'unknown'].includes(upgrade?.status);
   return h('div', { className: 'pa-page', 'data-pa-scroll': 'settings' }, h('div', { className: 'pa-page-inner' },
     error ? h('div', { role: 'alert', className: 'pa-note danger' }, icon(h, 'warn', { size: 16, style: { marginTop: 2 } }), h('span', null, error)) : null,
     notice ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, notice)) : null,
-    legacy ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '这个个人助理是用旧版 DSH Host 创建的，本机没有配置清单，暂时不能在线修改模型、提示词与环境变量。')) : null,
+    ['host', 'missing'].includes(recordSource) ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '暂未读取到云端完整配置。当前设置为只读，已有实例和数据会保留。')) : null,
     degraded && !legacy ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '云端设置暂不可用，下面显示的是本地缓存')) : null,
     instanceSection({ h, instance, inspect }),
     localSection({ h, localAccess, actions }),

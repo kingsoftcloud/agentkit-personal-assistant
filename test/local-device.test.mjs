@@ -16,7 +16,7 @@ async function setup(t) {
  const devices=createLocalDeviceService({stateStore:cloud,pollMs:100,timeoutMs:2000});
  const registry=new BotRegistry({bots:[{botId:'default',systemPromptRevision:'v1'},{botId:'other',systemPromptRevision:'v1'}]});
  const channel=createCloudSessionChannel({assistantId:'ar-local-test',stateStore:cloud,registry,localDevices:devices});
- const target={agentId:'ar-local-test',botId:'default'};
+ const target={agentId:'ar-local-test',botId:'default',authority:'account-a'};
  const access=createLocalAccess({stateStore:local,getTarget:async()=>target,transport:async(scope,operation,payload)=>channel({...scope,operation,payload})});
  const directory=join(root,'documents');await mkdir(directory);await writeFile(join(directory,'proof.txt'),'local file evidence');await writeFile(join(root,'private.txt'),'outside secret');
  t.after(async()=>{access.dispose();devices.dispose();await new Promise(resolve=>setTimeout(resolve,120));await rm(root,{recursive:true,force:true})});

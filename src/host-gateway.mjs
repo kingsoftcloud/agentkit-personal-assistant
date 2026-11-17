@@ -2,7 +2,7 @@
 import { WebSocket } from 'ws';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { DIRECTORY_BOT_ID, publicBotDirectory } from './client/bot-directory.mjs';
 import { createCloudSessionTransport } from './cloud-session-transport.mjs';
@@ -290,7 +290,7 @@ export const LEGACY_STUDIO_PERSONAL_ASSISTANT_DESKTOP_SERVICE = 'studioPersonalA
 
 // 默认走系统信任链：内网/预发网关的证书不在 Node 内置 CA 里，直接 fetch 会 "fetch failed"。
 const defaultFetchImpl = createSystemFetch();
-export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getHostDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, hostVersion, clipboardExecFile, getStateRoot } = {}) {
+export function createPersonalAssistantHostGateway(config = {}, { env = process.env, fetchImpl = defaultFetchImpl, WebSocketImpl = DEFAULT_WEBSOCKET, getHostDesktop = () => undefined, sessionChannel, cloudSessionTransport, bindingCacheMs = 0, botRegistry, stateStore, localAccess, platform, hostVersion, clipboardExecFile, getStateRoot, getCloudGrantIdentity } = {}) {
   const agentId = String(config.agentId ?? env.AGENTKIT_PERSONAL_ASSISTANT_AGENT_ID ?? '').trim();
   const rawUrl = String(config.gatewayUrl ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL ?? '').trim();
   const apiKey = String(config.apiKey ?? env.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_API_KEY ?? '').trim();
@@ -304,6 +304,10 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     } catch { throw fail('PERSONAL_ASSISTANT_GATEWAY_INVALID', '云网关地址无效；预发 HTTP 需由 Host 显式允许'); }
   }
   const configured = Boolean(base && agentId && apiKey);
+  async function localTarget(current, signal, verify = false) {
+    const parts = current.host ? await getCloudGrantIdentity?.(verify ? current.agentId : '', signal) : configured ? [base.origin, apiKey] : null;
+    return { agentId: current.agentId, authority: parts ? createHash('sha256').update(JSON.stringify(parts)).digest('hex') : '' };
+  }
   let hostSeen = false;
   // binding 缓存：面板每次打开都会串行读 5 次 configuration（configuration、bots.list 内部
   // 签票、sessions.list、session.snapshot、session.events），而 Host 的绑定在 2s 内基本
@@ -467,7 +471,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     const access = localAccess ?? createLocalAccess({
       stateStore: store,
       transport: (scope, operation, payload, signal) => deviceTransport.request(scope, operation, payload, signal),
-      getTarget: () => binding(),
+      getTarget: async () => localTarget(await binding()),
       platform: String(platform ?? process.platform),
       hostVersion: String(hostVersion ?? config.hostVersion ?? env.DSH_HOST_VERSION ?? ''),
     });
@@ -666,7 +670,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (operation === 'personal-assistant.local-access.grant') {
       const current = await binding();
       if (payload.agentId && payload.agentId !== current.agentId) throw fail('PERSONAL_ASSISTANT_AGENT_MISMATCH', '云端助理已改变，请重新打开授权页面', 409);
-      return services.localAccess.grant({ scopes: payload.scopes, roots: payload.roots, target: { agentId: current.agentId, botId: requireBotId(payload.botId) } });
+      return services.localAccess.grant({ scopes: payload.scopes, roots: payload.roots, target: { ...await localTarget(current, signal, true), botId: requireBotId(payload.botId) } });
     }
     if (operation === 'personal-assistant.local-access.revoke') return services.localAccess.revoke();
     if (operation === 'personal-assistant.create.status') return publicCreateStatus();
@@ -970,7 +974,20 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}, { session
   };
   // 生产注册路径开启短 TTL 绑定缓存：一次面板打开会以 5 次串行 configuration 起手，
   // 2s 缓存把它们收敛成 1 次。直接构造 gateway（含单测）默认不缓存，保持逐次确认语义。
-  const gateway = createPersonalAssistantHostGateway(config, { getHostDesktop: resolveDesktop, bindingCacheMs: 2000, getStateRoot: () => {
+  const gateway = createPersonalAssistantHostGateway(config, { getHostDesktop: resolveDesktop, bindingCacheMs: 2000, getCloudGrantIdentity: async (verifyAgentId, signal) => {
+    const cloud = ctx.get?.(PERSONAL_ASSISTANT_HOST_CLOUD_SERVICE);
+    const configuration = await (typeof cloud?.configuration === 'function' ? cloud.configuration() : cloud?.configuration ?? cloud?.configurationPromise);
+    const { values } = await configuration?.resolve() || {};
+    const account = values?.cloudAccountId || values?.cloudAccessKey;
+    if (verifyAgentId) {
+      try {
+        const client = await cloud.getDeploymentClient();
+        const result = await client.forAgent(verifyAgentId).get({}, { signal });
+        if ((result?.data ?? result?.Data ?? result)?.Basic?.AgentId !== verifyAgentId) throw new Error('agent unavailable');
+      } catch { throw fail('LOCAL_ACCOUNT_CHANGED', '当前云账号无法验证此助理，请检查连接后重新授权', 403); }
+    }
+    return account ? [account, values.cloudRegion, values.cloudServerUrl, values.cloudCustomSource, cloud.env?.AGENTKIT_PERSONAL_ASSISTANT_GATEWAY_URL] : null;
+  }, getStateRoot: () => {
     const root = ctx.get?.(PERSONAL_ASSISTANT_HOST_CLOUD_SERVICE)?.storeDir;
     return root ? join(root, 'personal-assistant') : '';
   } });

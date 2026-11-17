@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createPersonalAssistantStateStore } from '../src/persistent-state.mjs';
 import { createLocalAccess, LOCAL_ACCESS_NOT_AUTHORIZED, isLocalControlOperation } from '../src/local-access.mjs';
 
-const target = { agentId: 'ar-test', botId: 'default' };
+const target = { agentId: 'ar-test', botId: 'default', authority: 'account-a' };
 const waitingTransport = async (_scope, operation, _input, signal) => {
   if (!operation.endsWith('.poll')) return { connected: true };
   return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
@@ -50,9 +50,10 @@ test('unsupported scopes and relative roots are rejected before registering a de
 }));
 test('disconnected cloud retains the explicit grant; account change stops reconnecting', async () => fixture(async ({ root, create }) => {
   let calls = 0;
-  const access = create({ getTarget: async () => ({ agentId: 'ar-other' }), retryMs: 5,
+  const access = create({ getTarget: async () => ({ ...target, authority: 'account-b' }), retryMs: 5,
     transport: async () => { calls++; } });
-  await assert.rejects(access.grant({ scopes: ['file.read'], roots: [root], target }), { code: 'LOCAL_ACCOUNT_CHANGED' });
+  const grant = await access.grant({ scopes: ['file.read'], roots: [root], target });
+  assert.match(grant.lastError, /绑定已改变/);
   assert.equal((await access.status()).authorized, true);
   assert.equal((await access.status()).connected, false);
   await new Promise(resolve => setTimeout(resolve, 20));
