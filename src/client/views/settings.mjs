@@ -31,17 +31,20 @@ function localSection({ h, localAccess, actions }) {
   ] }) }) });
 }
 
-function modelSection({ h, draft, modelOptions, editable, menuOpen, actions }) {
-  const options = Array.isArray(modelOptions) ? modelOptions.filter(Boolean) : [];
-  const current = draft?.model || options[0] || '';
-  return section({ h, title: '模型', children: group({ h, visible: true, children: h('span', { className: 'pa-anchor block' },
+function modelSection({ h, draft, modelCatalog, editable, menuOpen, actions }) {
+  const options = modelCatalog.models;
+  const current = draft?.model || modelCatalog.model;
+  const detail = modelNote(options.find(option => option.id === current)?.contextWindow)
+    || (modelCatalog.status === 'loading' ? '正在读取云端模型目录…' : modelCatalog.error
+      || (modelCatalog.status === 'ready' ? '当前模型未出现在云端目录中' : '连接云端实例后可选择模型'));
+  return section({ h, title: '模型', right: h('span', { className: 'pa-cap' }, '保存后对所有 Bot 生效'), children: group({ h, visible: true, children: h('span', { className: 'pa-anchor block' },
     h('button', {
       type: 'button', className: 'pa-row click pa-select', 'aria-label': '模型', 'aria-haspopup': 'listbox', 'aria-expanded': menuOpen ? 'true' : 'false', disabled: !editable || options.length === 0,
       onClick: () => actions.onToggleModelMenu?.(),
     },
-    h('span', { className: 'pa-grow' }, h('span', { className: 'pa-mono', style: { display: 'block' } }, current || '默认模型'), h('span', { className: 'pa-cap', style: { display: 'block' } }, modelNote(current))),
+    h('span', { className: 'pa-grow' }, h('span', { className: 'pa-mono', style: { display: 'block' } }, current || '未读取到模型'), h('span', { className: 'pa-cap', style: { display: 'block' } }, detail)),
     icon(h, 'chevD', { size: 14, color: 'var(--pa-ink-3)' })),
-    menuOpen ? menu({ h, className: 'full', role: 'listbox', 'aria-label': '选择模型', items: options.map(option => ({ id: option, label: option, mono: true, detail: modelNote(option), checked: option === current, onClick: () => { actions.onModelChange?.(option); actions.onToggleModelMenu?.(false); } })) }) : null) }) });
+    menuOpen && editable && options.length > 0 ? menu({ h, className: 'full models', role: 'listbox', 'aria-label': '选择模型', items: options.map(({ id, contextWindow }) => ({ id, label: id, mono: true, detail: modelNote(contextWindow), checked: id === current, onClick: () => { actions.onModelChange?.(id); actions.onToggleModelMenu?.(false); } })) }) : null) }) });
 }
 
 function promptSection({ h, draft, editable, actions }) {
@@ -124,7 +127,7 @@ function closeSection({ h, instance, closeAssistant, actions }) {
 
 export function renderSettings({
   h, loading = false, degraded = false, notice = '', error = '', busy = '',
-  inspect = null, instance = null, localAccess = null, draft = null, modelOptions = [], versions = null,
+  inspect = null, instance = null, localAccess = null, draft = null, modelCatalog = { models: [] }, versions = null,
   modelMenuOpen = false, upgrade = null,
   closeAssistant = { open: false, text: '', busy: false, error: '', closedNotice: '' },
   actions = {},
@@ -146,7 +149,7 @@ export function renderSettings({
     degraded && !legacy ? h('div', { role: 'status', className: 'pa-note' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '云端设置暂不可用，下面显示的是本地缓存')) : null,
     instanceSection({ h, instance, inspect }),
     localSection({ h, localAccess, actions }),
-    modelSection({ h, draft, modelOptions, editable, menuOpen: modelMenuOpen, actions }),
+    modelSection({ h, draft, modelCatalog, editable, menuOpen: modelMenuOpen, actions }),
     promptSection({ h, draft, editable, actions }),
     envSection({ h, draft, editable, actions }),
     runtimeSection({ h, instance, versions, busy, upgrade, actions }),

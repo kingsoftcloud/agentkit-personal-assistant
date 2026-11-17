@@ -9,6 +9,7 @@ import { workspaceDir } from './workspace.mjs';
 import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
 import { readFileSync } from 'node:fs';
 import { registerPersonalAssistantHostGateway } from './host-gateway.mjs';
+import { listCloudModels, PERSONAL_ASSISTANT_CLOUD_PROVIDER } from './cloud-model.mjs';
 import { createHostSessionChannel } from './host-session-channel.mjs';
 import { loadPersonalAssistantManifest } from './platform-manifest.mjs';
 import { restrictPersonalAssistantToolScope } from './bot-tool-scope.mjs';
@@ -69,7 +70,9 @@ export function createRuntime(ctx, config = {}) {
   const computerTransport = config.computerTransport ?? (typeof brokerEndpoint === 'string' && brokerEndpoint.trim()
     ? createHttpComputerBrokerTransport({ baseUrl: brokerEndpoint }) : undefined);
   const registry = new BotRegistry({ profileId: config.profileId ?? identity.assistantId ?? 'default', bots: configuredBots(config.bots, env) });
-  const platformPrompt = env.AGENTENGINE_MANIFEST_PATH ? loadPersonalAssistantManifest(env).prompt : (config.platformSystemPrompt ?? '');
+  const manifest = env.AGENTENGINE_MANIFEST_PATH ? loadPersonalAssistantManifest(env) : null;
+  const platformPrompt = manifest?.prompt ?? config.platformSystemPrompt ?? '';
+  const platformModel = manifest && { provider: PERSONAL_ASSISTANT_CLOUD_PROVIDER, model: manifest.model };
   const computerBroker = config.computerBroker ?? createComputerBrokerClient({ transport: computerTransport });
   const scheduleManager = config.scheduleManager ?? createScheduleManager({ now: config.now });
   let automationService, localDeviceService;
@@ -79,6 +82,7 @@ export function createRuntime(ctx, config = {}) {
     sessionController: config.sessionController ?? sessionControllerFromContext(ctx),
     registry,
     platformPrompt,
+    platformModel,
     setupAgent: async (agent, botId) => {
       // 只限制这个 PA Agent；Host 文件、shell、subagent 等全局工具不能绕过电脑租约或读私有状态。
       restrictPersonalAssistantToolScope(agent, botId, { getPolicy: () => {
@@ -118,6 +122,7 @@ export function createRuntime(ctx, config = {}) {
     workspace,
     turnBridge,
     submitTurn: turnBridge.submitTurn,
+    modelCatalog: manifest ? async () => ({ model: manifest.model, models: await listCloudModels(ctx.llm) }) : undefined,
     createComputerToolset: createBotComputerToolset,
   });
 }

@@ -42,9 +42,10 @@ test('云端提供权威配置清单（recordSource=cloud）才可以编辑', ()
     inspect: { recordSource: 'cloud', status: 'RUNNING' },
     instance: { configured: true, status: '运行中' },
     draft: { model: 'deepseek-v4.1-flash-1017', prompt: '' },
-    modelOptions: [{ value: 'deepseek-v4.1-flash-1017', label: 'DeepSeek V4.1' }],
+    modelCatalog: { status: 'ready', models: [{ id: 'deepseek-v4.1-flash-1017', contextWindow: 1_048_576 }] },
   });
   assert.equal(modelSelect(tree)?.props.disabled, false, 'recordSource=cloud 时应当可编辑');
+  assert.match(textOf(modelSelect(tree)).join(''), /上下文 1M/u);
 });
 
 test('保存设置的提示文案（notice）必须渲染出来', () => {

@@ -16,6 +16,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
+import { MODEL_NAME } from './cloud-model.mjs';
 
 const FORMAT = 'agentkit.personal-assistant-binding/v1';
 const SERVICE = 'agentkitPersonalAssistantDesktop';
@@ -27,12 +28,10 @@ const AGENT_ID = /^ar-[A-Za-z0-9-]{4,120}$/u;
 const BOT_ID = /^[A-Za-z0-9._:-]{1,64}$/u;
 const MAX_TICKET_SECONDS = 60;
 const RUNTIME_VERSION = /^\d+\.\d+\.\d+$/u;
-const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,100}$/u;
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u;
 const MAX_ENV_VALUE = 4096;
 const MAX_ENV_VARIABLES = 64;
 const MAX_MANIFEST_BYTES = 16 * 1024;
-const DEFAULT_MODEL = 'deepseek-v4.1-flash-1017';
 const DEFAULT_PROMPT = '请用中文完成用户任务。只使用提供的云电脑工具，不得假装已经执行。';
 const PREPROD_GATEWAY = 'https://pa-desktop-pre.agent-pre.kspmas.ksyun.com';
 const ONLINE_GATEWAY = 'https://pa-desktop.agent.kspmas.ksyun.com';
@@ -222,7 +221,7 @@ function gatewayForRegion(value) {
   return undefined;
 }
 
-export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = process.env, configuration: configurationSource, getClient, getDeploymentClient, inspectRuntime } = {}) {
+export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = process.env, configuration: configurationSource, getClient, getDeploymentClient, inspectRuntime, listRuntimeModels } = {}) {
   const file = join(storeDir, 'assistant-binding.json');
   let cached, cacheAt = 0;
   const ttl = 5_000;
@@ -535,13 +534,15 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     // The catalog is the source of truth. A stale hardcoded version makes a
     // valid Host look unauthorized as soon as old catalog entries are pruned.
     const version = await resolveCreateRuntimeVersion({ env, configurationSource, getDeploymentClient, signal });
-    const model = text(env.AGENTKIT_PERSONAL_ASSISTANT_MODEL) || DEFAULT_MODEL;
+    const source = typeof configurationSource === 'function' ? configurationSource() : configurationSource;
+    const { values } = await (await source)?.resolve() || {};
+    const model = text(env.AGENTKIT_PERSONAL_ASSISTANT_MODEL) || text(values?.modelName);
+    if (!MODEL_NAME.test(model)) throw fail('ASSISTANT_CREATE_MODEL_REQUIRED', '请先在 Studio 的模型设置中选择个人助理默认模型', 409);
     const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
     const name = `personal-assistant-${stamp}-${randomUUID().slice(0, 10)}`;
     // Keep the declaration Host writes, so later settings edits can rebuild
     // the exact same instance identity without inventing a new name.
     const manifest = buildManifest({ name, version, model, prompt: DEFAULT_PROMPT });
-    const { values } = await (await configurationSource)?.resolve() || {};
     const region = text(values?.cloudRegion) === 'pre-online' ? 'cn-beijing-6' : (text(values?.cloudRegion) || 'cn-beijing-6');
     const request = {
       Name: name, Description: '个人助理', Framework: 'personal-assistant', Region: region,
@@ -736,8 +737,13 @@ export function createAssistantDesktop({ storeDir, fetchImpl = fetch, env = proc
     if (input.expectedVersion && recorded.runtimeVersion !== input.expectedVersion) throw fail('UPGRADE_VERSION_CHANGED', '云端版本已改变，请重新检查更新', 409);
     if (!upgrade && parsed.version && parsed.version !== version) throw fail('UPGRADE_REQUIRED', '请使用运行时区域的升级操作', 409);
     if (!RUNTIME_VERSION.test(version)) throw fail('ASSISTANT_SETTINGS_VERSION_REQUIRED', '无法确认云端运行时版本，请稍后重试', 409);
-    const model = parsed.model ?? recorded.model ?? DEFAULT_MODEL;
+    const model = parsed.model ?? recorded.model;
     if (!MODEL_NAME.test(model)) throw fail('ASSISTANT_SETTINGS_MODEL_INVALID', '模型名称无效', 400);
+    if (parsed.model !== undefined && model !== recorded.model) {
+      if (!BOT_ID.test(text(input.botId)) || !listRuntimeModels) throw fail('ASSISTANT_SETTINGS_MODEL_UNAVAILABLE', '请重新打开个人助理设置并加载云端模型目录', 409);
+      const catalog = await listRuntimeModels({ agentId: binding.agentId, botId: input.botId }, signal);
+      if (!catalog.models.some(row => row.id === model)) throw fail('ASSISTANT_SETTINGS_MODEL_NOT_AVAILABLE', '当前网关目录中没有此模型，请重新选择', 409);
+    }
     const prompt = parsed.prompt ?? recorded.prompt ?? DEFAULT_PROMPT;
     const declaration = parseYaml(current.manifest);
     declaration.runtime = { ...declaration.runtime, version };

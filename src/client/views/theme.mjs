@@ -189,6 +189,7 @@ button.pa-row:hover,a.pa-row:hover,.pa-row.click:hover{background:var(--pa-hover
 .pa-menu.right{top:36px;right:0;width:280px}
 .pa-menu.up{bottom:36px;left:0;width:280px}
 .pa-menu.full{top:44px;left:0;right:0}
+.pa-menu.models{max-height:min(320px,45vh);overflow-y:auto}
 .pa-menu.history{top:40px;right:0;width:300px}
 .pa-menu-item{display:flex;align-items:center;gap:10px;width:100%;min-height:36px;padding:6px 10px;border-radius:var(--pa-r-sm);text-align:left;font-size:14px;line-height:22px}
 .pa-menu-item:hover{background:var(--pa-hover)}

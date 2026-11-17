@@ -72,3 +72,22 @@ test('a slow cloud settings read cannot recreate a disconnected binding', async 
  assert.equal((await pending).recordSource,'cloud');
  await assert.rejects(readFile(bindingPath), {code:'ENOENT'});
 }));
+
+test('a model edit is admitted by the running instance’s catalog before submitting a rollout', async () => fixture(async root => {
+ const manifest='name: assistant-test\nframework: personal-assistant\nartifact_type: ManagedRuntime\nmodel: model-a\nruntime:\n  name: personal-assistant\n  version: 0.2.2\n';
+ await writeFile(join(root,'assistant-binding.json'),JSON.stringify({format:'agentkit.personal-assistant-binding/v1',agentId:'ar-test',apiKey:'key',gatewayUrl:'https://gateway.example'}));
+ const submitted = [];
+ const service=createAssistantDesktop({storeDir:root,env:{},
+  listRuntimeModels: async scope => {
+   assert.deepEqual(scope,{agentId:'ar-test',botId:'default'});
+   return { models: [{id:'model-b',contextWindow:1048576}] };
+  },
+  getDeploymentClient:async()=>({
+   forAgent:()=>({get:async()=>({data:{Basic:{Name:'assistant-test'},Deployment:{ManagedRuntimeConfig:{Manifest:manifest}}}}),update:async payload=>{submitted.push(parse(payload.ManagedRuntimeConfig.Manifest));}}),
+  }),
+ });
+ await assert.rejects(service.settingsUpdate({agentId:'ar-test',botId:'default',model:'stale-model'}),{code:'ASSISTANT_SETTINGS_MODEL_NOT_AVAILABLE'});
+ assert.deepEqual(submitted,[]);
+ await service.settingsUpdate({agentId:'ar-test',botId:'default',model:'model-b'});
+ assert.equal(submitted[0].model,'model-b');
+}));

@@ -1,5 +1,5 @@
 /** 云端持久会话适配层。只由签名 control permit 授权，本机文件操作仅经显式授权的 device 通道。 */
-export function createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId = '', stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles, localDevices, runtimeInfo }) {
+export function createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId = '', stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles, localDevices, runtimeInfo, modelCatalog }) {
   const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
   const session = async (botId, sessionId) => {
     if (!(await stateStore.sessions(botId)).some(row => row.sessionId === sessionId)) throw fail('SESSION_NOT_FOUND', '当前助理不存在这个会话', 404);
@@ -12,6 +12,10 @@ export function createCloudSessionChannel({ assistantId, computerId, runtimeInst
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw fail('CLOUD_SESSION_REQUEST_INVALID', '会话请求格式错误');
     const scope = { agentId: assistantId, botId, computerId, executionTarget: 'cloud', ...(runtimeInstanceId ? { runtimeInstanceId, stateStorage: 'state-path' } : {}) };
     if (operation === 'personal-assistant.runtime.inspect' && runtimeInfo) return runtimeInfo();
+    if (operation === 'personal-assistant.models.list') {
+      if (!modelCatalog) throw fail('CLOUD_MODEL_CATALOG_UNAVAILABLE', '此实例暂不可读取模型目录，请检查运行时版本', 503);
+      return { ...scope, ...await modelCatalog() };
+    }
     if (operation.startsWith('personal-assistant.device.') && localDevices) {
       const action = operation.slice('personal-assistant.device.'.length);
       return action === 'execute' ? localDevices.execute(botId, payload) : localDevices.handle(botId, action, payload);

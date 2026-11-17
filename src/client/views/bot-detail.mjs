@@ -2,10 +2,10 @@
  * 「Bot 详情」视图（重新设计 DEMO：身份 / 模型 / 记忆 / 能力 / 资源 / 删除）。
  *
  * 纯函数：模型、记忆、能力、云电脑数据由 index.mjs 拉取后传入；
- * 记忆管理模式、模型菜单、删除二次确认等交互状态同样由 index.mjs 持有。
+ * 记忆管理模式和删除二次确认等交互状态同样由 index.mjs 持有。
  */
 
-import { avatar, badge, button, emptyState, group, icon, iconButton, link, menu, modelNote, moreRow, row, section, skeletonBlock, skeletonRows } from './ui.mjs';
+import { avatar, badge, button, emptyState, group, icon, iconButton, link, moreRow, row, section, skeletonBlock, skeletonRows } from './ui.mjs';
 import { statusBadge } from './bots-list.mjs';
 
 const CAPABILITY_ICON = { computer: 'monitor', files: 'folder', workspace: 'folder', calendar: 'calendar', browser: 'globe', mcp: 'bolt' };
@@ -29,16 +29,10 @@ function identity({ h, bot, actions }) {
     button({ h, label: '对话', variant: 'primary', icon: icon(h, 'chat', { size: 14 }), onClick: () => actions.onOpenChat?.(bot.id) }));
 }
 
-function modelSection({ h, bot, modelOptions, busy, menuOpen, actions }) {
-  const options = Array.isArray(modelOptions) ? modelOptions.filter(Boolean) : [];
-  const canSwitch = options.length > 0 && !busy;
-  return section({ h, title: '模型', right: h('span', { className: 'pa-cap' }, '下一条消息生效'), children: group({ h, visible: true, children: row({ h, children: [
-    h('div', { key: 'body', className: 'pa-grow' },
-      h('div', { className: 'pa-mono pa-ellipsis' }, bot.model || '默认模型'),
-      h('div', { className: 'pa-cap' }, bot.modelDetail || modelNote(bot.model))),
-    h('span', { key: 'switch', className: 'pa-anchor' },
-      button({ h, label: busy === 'model' ? '切换中…' : '切换', size: 'sm', disabled: !canSwitch, pressed: menuOpen, title: canSwitch ? '' : '暂时没有可切换的模型', icon: null, onClick: () => actions.onToggleModelMenu?.() }, ),
-      menuOpen ? menu({ h, className: 'right', 'aria-label': '选择模型', items: options.map(option => ({ id: option, label: option, mono: true, detail: modelNote(option), checked: option === bot.model, onClick: () => actions.onChangeModel?.(option) })) }) : null),
+function modelSection({ h, actions }) {
+  return section({ h, title: '模型', children: group({ h, children: row({ h, children: [
+    h('span', { key: 'body', className: 'pa-grow' }, '使用个人助理实例的模型'),
+    button({ h, key: 'settings', label: '打开模型设置', size: 'sm', onClick: () => actions.onOpenModelSettings?.() }),
   ] }) }) });
 }
 
@@ -112,8 +106,8 @@ function detailSkeleton({ h }) {
 
 export function renderBotDetail({
   h, loading = false, degraded = false, bot = null,
-  memory = null, capabilities = [], computer = null, modelOptions = [],
-  manageMemory = false, showAllMemory = false, modelBusy = '', modelMenuOpen = false,
+  memory = null, capabilities = [], computer = null,
+  manageMemory = false, showAllMemory = false,
   deleteConfirm = { open: false, text: '', busy: false, error: '' },
   actions = {},
 } = {}) {
@@ -123,7 +117,7 @@ export function renderBotDetail({
     h('button', { type: 'button', className: 'pa-back', 'aria-label': '返回', title: '返回总览', onClick: () => actions.onBack?.() }, icon(h, 'chevL', { size: 14 }), '总览'),
     identity({ h, bot, actions }),
     degraded ? h('div', { className: 'pa-note', role: 'status' }, icon(h, 'info', { size: 16, style: { marginTop: 2 } }), h('span', null, '详情接口暂不可用，下面是总览里的概要')) : null,
-    modelSection({ h, bot, modelOptions, busy: modelBusy, menuOpen: modelMenuOpen, actions }),
+    modelSection({ h, actions }),
     memorySection({ h, memory, manage: manageMemory, showAll: showAllMemory, actions }),
     capabilitySection({ h, capabilities, actions }),
     resourceSection({ h, computer, actions }),

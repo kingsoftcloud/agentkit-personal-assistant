@@ -18,6 +18,7 @@ const ENDPOINT = '/api/personal-assistant';
 // 所有会话操作必须经过云端绑定和具名 Bot 的签名 control 票据。
 const SESSION_OPERATIONS = Object.freeze([
   'personal-assistant.runtime.inspect',
+  'personal-assistant.models.list',
   'personal-assistant.sessions.list',
   'personal-assistant.session.create',
   'personal-assistant.session.snapshot',
@@ -656,16 +657,6 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     }
   }
 
-  async function updateBotModel(services, payload) {
-    const botId = requireBotId(payload.botId);
-    const model = String(payload.model ?? '').trim();
-    if (!model || model.length > 120 || /[\u0000-\u001f\u007f]/u.test(model)) throw fail('PERSONAL_ASSISTANT_MODEL_INVALID', '模型名称无效', 400);
-    try { services.registry.setModel(botId, model); }
-    catch { throw fail('PERSONAL_ASSISTANT_BOT_NOT_FOUND', '当前助理不存在或已被删除', 404); }
-    await persistBotRow(services.stateStore, { botId, model, updatedAt: new Date().toISOString() });
-    return { model };
-  }
-
   async function handleLocalOperation(operation, payload, signal) {
     const services = await ensureServices();
     if (operation === 'personal-assistant.local-access.status') return services.localAccess.status();
@@ -691,7 +682,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (operation === 'personal-assistant.bot.create') return createBot(services, payload);
     if (operation === 'personal-assistant.bot.delete') return deleteBot(services, payload);
     if (operation === 'personal-assistant.bot.memory.delete') return deleteBotMemory(services, payload);
-    if (operation === 'personal-assistant.bot.model.update') return updateBotModel(services, payload);
+    if (operation === 'personal-assistant.bot.model.update') throw fail('PERSONAL_ASSISTANT_INSTANCE_MODEL_REQUIRED', '所有 Bot 使用实例模型，请在个人助理设置中修改', 409);
     throw fail('PERSONAL_ASSISTANT_OPERATION_UNAVAILABLE', '当前面板不支持此操作', 404);
   }
 
@@ -880,7 +871,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
         ? { agentId: current.agentId, confirmAgentId: String(payload.confirmAgentId) }
         : upgrading ? { agentId: payload.agentId, botId: requireBotId(payload.botId), runtimeVersion: payload.runtimeVersion, imageDigest: payload.imageDigest, expectedVersion: payload.expectedVersion }
         : settingsWrite
-          ? { agentId: payload.agentId, model: payload.model, prompt: payload.prompt, runtimeVersion: payload.runtimeVersion,
+          ? { agentId: payload.agentId, ...(payload.botId ? { botId: payload.botId } : {}), model: payload.model, prompt: payload.prompt, runtimeVersion: payload.runtimeVersion,
               environmentVariables: payload.environmentVariables, deleteKeys: payload.deleteKeys }
           : operation === 'personal-assistant.settings.versions'
             ? { currentVersion: payload.currentVersion }
@@ -917,7 +908,7 @@ export function createPersonalAssistantHostGateway(config = {}, { env = process.
     if (!botId || botId.length > 64 || /[\u0000-\u001f]/u.test(botId)) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请选择已创建的助理');
     if (SESSION_OPERATIONS.includes(operation)) {
       if (botId === DIRECTORY_BOT_ID) throw fail('PERSONAL_ASSISTANT_BOT_REQUIRED', '请选择真实云端助理', 403);
-      if (!['personal-assistant.runtime.inspect', 'personal-assistant.sessions.list', 'personal-assistant.session.create', 'personal-assistant.file.list'].includes(operation)) requireSessionId(payload.sessionId);
+      if (!['personal-assistant.runtime.inspect', 'personal-assistant.models.list', 'personal-assistant.sessions.list', 'personal-assistant.session.create', 'personal-assistant.file.list'].includes(operation)) requireSessionId(payload.sessionId);
       if (payload.cursor !== undefined && (!Number.isSafeInteger(payload.cursor) || payload.cursor < 0)) throw fail('PERSONAL_ASSISTANT_REQUEST_INVALID', '增量游标无效');
       return cloudSessions.request({ agentId: current.agentId, botId }, operation, payload, signal);
     }
@@ -981,6 +972,7 @@ export function registerPersonalAssistantHostGateway(ctx, config = {}, { session
       getClient: cloud.getClient,
       getDeploymentClient: cloud.getDeploymentClient,
       inspectRuntime: (scope, signal) => gateway.request('personal-assistant.runtime.inspect', scope, signal),
+      listRuntimeModels: (scope, signal) => gateway.request('personal-assistant.models.list', scope, signal),
     }));
     return ownedDesktop;
   };
