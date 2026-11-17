@@ -21,7 +21,8 @@ const watch = argv.includes('--watch');
 const outDirArg = argv.includes('--out-dir') ? argv[argv.indexOf('--out-dir') + 1] : '';
 const outDir = outDirArg ? resolve(outDirArg.replace(/^~(?=$|\/)/u, process.env.HOME || '~')) : resolve(root, 'dist');
 
-const stamp = new Date().toISOString();
+const epoch = process.env.SOURCE_DATE_EPOCH;
+const stamp = new Date(epoch == null ? Date.now() : Number(epoch) * 1000).toISOString();
 const packageManifest = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
 const clientBuild = `${packageManifest.version || 'unknown'} @ ${stamp}`;
 

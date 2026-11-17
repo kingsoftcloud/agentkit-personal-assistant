@@ -1,6 +1,6 @@
 {
   "name": "@kingsoftcloud/agentkit-personal-assistant",
-  "version": "0.1.22",
+  "version": "0.2.0",
   "description": "Standalone personal assistant DSH plugin with multi-Bot profiles and an explicit Cloud Computer Broker boundary.",
   "homepage": "https://github.com/kingsoftcloud/agentkit-personal-assistant",
   "repository": {
@@ -62,20 +62,10 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-sidebar-right",
-        "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-layout",
-        "@deepseek-ai/dsh-client-ui-session",
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-workspace"
+        "@deepseek-ai/dsh-client-ui-renderer"
       ],
       "external": [
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-api-session-controller",
-        "@deepseek-ai/dsh-client-ui-session",
-        "@deepseek-ai/dsh-client-ui-conversation",
-        "@deepseek-ai/dsh-client-ui-workspace"
+        "@deepseek-ai/dsh-client-connection"
       ]
     },
     "bundle": {
@@ -87,6 +77,7 @@
     "esbuild": "0.27.7"
   },
   "dependencies": {
+    "ws": "8.23.0",
     "yaml": "2.8.1"
   },
   "publishConfig": {
@@ -98,5 +89,9 @@
     "agentkit",
     "personal-assistant",
     "cloud-computer"
+  ],
+  "bundleDependencies": [
+    "ws",
+    "yaml"
   ]
 }

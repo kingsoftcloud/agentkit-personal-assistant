@@ -28,7 +28,7 @@ jobs:
           node-version: "22"
           registry-url: https://registry.npmjs.org/
 
-      - run: npm install -g npm@^11.5.1
+      - run: npm install -g npm@11.16.0
       - run: npm --version
       - run: npm ci
       - run: npm test
@@ -48,4 +48,7 @@ jobs:
 
       - name: Publish to npm
         if: steps.published.outputs.exists != 'true'
-        run: npm publish --access public --provenance
+        shell: bash
+        run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          npm publish --access public --provenance

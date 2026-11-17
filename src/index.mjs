@@ -3,6 +3,7 @@ import { createComputerBrokerClient, createHttpComputerBrokerTransport } from '.
 import { startDshWebBridge } from './dsh-web-bridge.mjs';
 import { createComputerToolset, registerComputerTools } from './cloud-computer-tools.mjs';
 import { createScheduleManager } from './schedule-manager.mjs';
+import { registerLocalDeviceTools } from './local-device-tools.mjs';
 import { registerAutomationTools } from './automation-tools.mjs';
 import { workspaceDir } from './workspace.mjs';
 import { createDshTurnBridge, sessionControllerFromContext } from './dsh-session-bridge.mjs';
@@ -71,7 +72,7 @@ export function createRuntime(ctx, config = {}) {
   const platformPrompt = env.AGENTENGINE_MANIFEST_PATH ? loadPersonalAssistantManifest(env).prompt : (config.platformSystemPrompt ?? '');
   const computerBroker = config.computerBroker ?? createComputerBrokerClient({ transport: computerTransport });
   const scheduleManager = config.scheduleManager ?? createScheduleManager({ now: config.now });
-  let automationService;
+  let automationService, localDeviceService;
   const workspace = workspaceDir(config.workspace);
   const turnBridge = config.turnBridge ?? createDshTurnBridge({
     ctx,
@@ -80,7 +81,14 @@ export function createRuntime(ctx, config = {}) {
     platformPrompt,
     setupAgent: async (agent, botId) => {
       // 只限制这个 PA Agent；Host 文件、shell、subagent 等全局工具不能绕过电脑租约或读私有状态。
-      restrictPersonalAssistantToolScope(agent, botId, { getPolicy: () => registry.require(botId).toolPolicy });
+      restrictPersonalAssistantToolScope(agent, botId, { getPolicy: () => {
+        const policy = registry.require(botId).toolPolicy;
+        // A named Bot's live directory grant is the user's authority for this
+        // tool. Do not rewrite persisted Bot policy; explicit deny still wins.
+        return localDeviceService?.hasGrant(botId) && policy.mode === 'allowlist'
+          ? { ...policy, allow: [...policy.allow, 'assistant_local_read'] } : policy;
+      } });
+      if (localDeviceService) registerLocalDeviceTools({ agent, botId, service: () => localDeviceService });
       if (!identity.assistantId || !identity.computerId || !computerTransport) return;
       registerAutomationTools({ agent, botId, service: () => automationService });
       const toolset = createComputerToolset({ broker: computerBroker, agent, userId: identity.userId, assistantId: identity.assistantId, computerId: identity.computerId, botId, taskId: `dsh:${agent.id}` });
@@ -101,6 +109,7 @@ export function createRuntime(ctx, config = {}) {
     registry,
     computerBroker,
     scheduleManager,
+    setLocalDeviceService(value) { localDeviceService = value; },
     setAutomationService(value) { automationService = value; },
     workspace,
     turnBridge,

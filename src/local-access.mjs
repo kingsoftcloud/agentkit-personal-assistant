@@ -1,213 +1,173 @@
-/**
- * 本机授权状态机与持久化（个人助理面板 07 本机授权）。
- *
- * 「连接」与「授权」是两件事：connected 只表示 Host 还能拿到 DSH Host 的云连接服务；
- * authorized 才表示用户允许助理在本机执行 local-control.* 操作。未授权时任何
- * local-control.* 都必须被 Host 拒绝，不能依赖 UI 置灰。
- *
- * 授权记录只包含 scope 列表、风险确认开关与时间戳，不含凭据；持久化走
- * persistent-state 的 local-access 集合。状态目录不可用时退化为进程内状态：
- * 授权在本次会话内有效，重启后回到未授权（宁可重新问一次，也不静默放宽）。
- */
+/** Host-owned directory grants and the authenticated cloud worker. No shell or GUI authority. */
+import { constants } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
+import { open, readdir, realpath, stat } from 'node:fs/promises';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 
-/** 所有本机控制类 operation 的统一前缀；未授权时一律 403。 */
 export const LOCAL_CONTROL_OPERATION_PREFIX = 'personal-assistant.local-control.';
 export const LOCAL_ACCESS_NOT_AUTHORIZED = 'PERSONAL_ASSISTANT_LOCAL_NOT_AUTHORIZED';
 export const LOCAL_ACCESS_SCOPE_INVALID = 'PERSONAL_ASSISTANT_LOCAL_ACCESS_SCOPE_INVALID';
 export const LOCAL_ACCESS_INVALID = 'PERSONAL_ASSISTANT_LOCAL_ACCESS_INVALID';
 export const LOCAL_ACCESS_STATE_COLLECTION = 'local-access';
-/** 契约里允许授予的本机能力；grant 只接受这个集合的子集。 */
-export const LOCAL_ACCESS_SCOPES = Object.freeze(['session.create', 'window.input', 'file.read-write']);
-const STATE_VERSION = 1;
-const fail = (code, message, status) => Object.assign(new Error(message), { code, status });
-
-/** local-control.* 是授权前置校验的命名空间，不属于面板白名单。 */
-export function isLocalControlOperation(operation) {
-  return typeof operation === 'string' && operation.startsWith(LOCAL_CONTROL_OPERATION_PREFIX);
-}
-
-function normalizeScopes(value) {
-  if (!Array.isArray(value)) throw fail(LOCAL_ACCESS_INVALID, '本机授权范围格式错误', 400);
-  const scopes = [];
-  for (const item of value) {
-    const text = String(item ?? '').trim();
-    if (!LOCAL_ACCESS_SCOPES.includes(text)) throw fail(LOCAL_ACCESS_SCOPE_INVALID, '本机授权范围包含未知能力', 400);
-    if (!scopes.includes(text)) scopes.push(text);
-  }
-  return scopes;
-}
-
-function normalizeRecord(row) {
-  if (!row || typeof row !== 'object' || Array.isArray(row) || row.version !== STATE_VERSION) return undefined;
-  if (typeof row.authorized !== 'boolean') return undefined;
-  const raw = Array.isArray(row.scopes) ? row.scopes : [];
-  const scopes = raw.filter(item => LOCAL_ACCESS_SCOPES.includes(item));
-  // 存档里出现未知 scope 说明格式不兼容：整条作废比悄悄收窄权限更安全。
-  if (scopes.length !== raw.length) return undefined;
-  const stamp = value => typeof value === 'string' ? value.slice(0, 40) : null;
-  return Object.freeze({
-    authorized: row.authorized,
-    scopes: Object.freeze(scopes),
-    riskConfirm: row.riskConfirm === true,
-    grantedAt: row.authorized ? stamp(row.grantedAt) : null,
-    revokedAt: stamp(row.revokedAt),
-  });
-}
-
-const UNAUTHORIZED_RECORD = Object.freeze({
-  authorized: false,
-  scopes: Object.freeze([]),
-  riskConfirm: false,
-  grantedAt: null,
-  revokedAt: null,
-});
+export const LOCAL_ACCESS_SCOPES = Object.freeze(['file.read']);
+const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
+export const isLocalControlOperation = operation => typeof operation === 'string' && operation.startsWith(LOCAL_CONTROL_OPERATION_PREFIX);
+const inside = (root, path) => { const part = relative(root, path); return !isAbsolute(part) && part !== '..' && !part.startsWith(`..${sep}`); };
 
 export class LocalAccess {
-  /**
-   * @param {object} options
-   * @param {object|null} [options.stateStore] persistent-state 实例；null 表示只存在内存
-   * @param {() => boolean|Promise<boolean>} [options.probeConnection] DSH Host 连接可用性探测
-   * @param {() => Date|number} [options.now] 时间源（测试可注入）
-   * @param {string} [options.platform] 覆盖 process.platform（测试可注入）
-   * @param {string} [options.hostVersion] DSH Host 版本；拿不到时为空串
-   */
-  constructor({ stateStore = null, probeConnection, now, platform, hostVersion } = {}) {
-    this.stateStore = stateStore ?? null;
-    this.probeConnection = typeof probeConnection === 'function' ? probeConnection : () => true;
-    this.now = typeof now === 'function' ? now : () => new Date();
-    this.platform = String(platform ?? (typeof process === 'object' ? process.platform : '') ?? '').slice(0, 32);
-    this.hostVersion = typeof hostVersion === 'string' ? hostVersion.slice(0, 40) : '';
-    this.record = UNAUTHORIZED_RECORD;
-    /** 授权撤销时要中止的本机任务（由 local-control 处理函数通过 controlSignal() 领取）。 */
-    this.controllers = new Set();
-    this.ready = undefined;
+  constructor({ stateStore, transport, getTarget, platform = process.platform, hostVersion = '', now = () => new Date(), retryMs = 3000 } = {}) {
+    Object.assign(this, { stateStore, transport, getTarget, platform, hostVersion, now, retryMs });
+    this.record = { version: 3, deviceId: randomUUID(), authorized: false, scopes: [], roots: [] };
+    this.connectionId = randomUUID();
+    this.connected = false;
+    this.disposed = false;
   }
-
-  get authorized() {
-    return this.record.authorized === true;
+  get authorized() { return this.record.authorized; }
+  async load() {
+    return this.loading ||= (async () => {
+      if (this.stateStore) {
+        const row = (await this.stateStore.read(LOCAL_ACCESS_STATE_COLLECTION))[0];
+        // Earlier records did not bind the user's cloud account.
+        if (row?.version === 3 && typeof row.deviceId === 'string') this.record = row;
+      }
+      if (this.authorized) void this.start().catch(() => {});
+    })();
   }
-
-  /** 幂等恢复持久化状态；任何读盘/格式错误都退化为未授权，绝不抛错。 */
-  load() {
-    if (!this.ready) this.ready = this._restore();
-    return this.ready;
+  async persist() {
+    if (!this.stateStore) throw fail('LOCAL_STATE_UNAVAILABLE', 'Host 未提供授权存储目录', 503);
+    await this.stateStore.mutate(LOCAL_ACCESS_STATE_COLLECTION, rows => rows.splice(0, rows.length, this.record));
   }
-
-  async _restore() {
-    if (!this.stateStore) return;
-    try {
-      const rows = await this.stateStore.read(LOCAL_ACCESS_STATE_COLLECTION);
-      const row = Array.isArray(rows) ? rows.find(item => item && typeof item === 'object' && !Array.isArray(item)) : undefined;
-      const restored = normalizeRecord(row);
-      if (restored) this.record = restored;
-    } catch {
-      // 状态目录不可读（首次创建、权限、损坏）按未授权处理，面板仍能打开。
-    }
-  }
-
-  _stamp() {
-    const value = this.now();
-    return (value instanceof Date ? value : new Date(value)).toISOString();
-  }
-
-  async _persist() {
-    if (!this.stateStore) return false;
-    const row = Object.freeze({
-      version: STATE_VERSION,
-      authorized: this.record.authorized,
-      scopes: [...this.record.scopes],
-      riskConfirm: this.record.riskConfirm,
-      grantedAt: this.record.grantedAt,
-      revokedAt: this.record.revokedAt,
-      updatedAt: this._stamp(),
-    });
-    try {
-      await this.stateStore.mutate(LOCAL_ACCESS_STATE_COLLECTION, rows => {
-        rows.splice(0, rows.length, row);
-        return true;
-      });
-      return true;
-    } catch {
-      // 配额/权限/磁盘异常：授权在内存生效，重启后需要重新授权。
-      return false;
-    }
-  }
-
-  /** 三态由 UI 组合：authorized + connected=绿，未授权但连接=琥珀，连接不可用=灰。 */
   async status() {
     await this.load();
-    let connected = false;
-    try { connected = (await this.probeConnection()) === true; } catch { connected = false; }
-    return {
-      connected,
-      authorized: this.record.authorized,
-      scopes: [...this.record.scopes],
-      riskConfirm: this.record.riskConfirm,
-      grantedAt: this.record.grantedAt,
-      host: { platform: this.platform, hostVersion: this.hostVersion },
-    };
+    const { agentId, botId } = this.record.target || {};
+    return { available: Boolean(this.transport && this.stateStore), connected: this.connected, authorized: this.authorized,
+      scopes: this.record.scopes, roots: this.record.roots.map(({ id, path }) => ({ id, path })),
+      grantedAt: this.record.grantedAt || null, riskConfirm: true, deviceId: this.record.deviceId,
+      target: agentId ? { agentId, botId } : undefined, lastError: this.lastError || '', host: { name: hostname(), platform: this.platform, hostVersion: this.hostVersion } };
   }
-
-  async grant({ scopes, riskConfirm } = {}) {
-    const normalized = normalizeScopes(scopes);
-    if (riskConfirm !== undefined && typeof riskConfirm !== 'boolean') {
-      throw fail(LOCAL_ACCESS_INVALID, '高风险确认开关格式错误', 400);
+  async grant({ scopes, roots, target } = {}) {
+    await this.load();
+    if (!Array.isArray(scopes) || scopes.length !== 1 || scopes[0] !== 'file.read') throw fail(LOCAL_ACCESS_SCOPE_INVALID, '当前仅支持授权目录的只读访问');
+    if (!Array.isArray(roots) || !roots.length || roots.length > 8) throw fail(LOCAL_ACCESS_INVALID, '请选择 1 至 8 个本机目录');
+    if (!target?.agentId || !target?.botId || !target?.authority) throw fail(LOCAL_ACCESS_INVALID, '请先确认云账号并选择助理');
+    const directories = [];
+    for (const input of [...new Set(roots)]) {
+      if (typeof input !== 'string' || !isAbsolute(input)) throw fail(LOCAL_ACCESS_INVALID, '授权目录必须是绝对路径');
+      const path = await realpath(input);
+      if (!(await stat(path)).isDirectory()) throw fail(LOCAL_ACCESS_INVALID, '授权路径必须是目录');
+      directories.push({ id: randomUUID(), path });
     }
-    const grantedAt = this._stamp();
-    this.record = Object.freeze({
-      authorized: true,
-      scopes: Object.freeze(normalized),
-      riskConfirm: riskConfirm === true,
-      grantedAt,
-      revokedAt: null,
-    });
-    await this._persist();
-    return { authorized: true, grantedAt };
+    this.stop();
+    this.record = { version: 3, deviceId: this.record.deviceId, grantId: randomUUID(), authorized: true,
+      scopes: ['file.read'], roots: directories, target: { ...target }, grantedAt: this.now().toISOString() };
+    try { await this.persist(); } catch (error) { this.record.authorized = false; throw error; }
+    // A saved grant can connect after an image upgrade or a network outage.
+    // Report that grant even if its first connection attempt fails.
+    await this.start().catch(() => {});
+    return this.status();
   }
-
+  assertAuthorized(grantId = this.record.grantId) {
+    if (!this.authorized || grantId !== this.record.grantId) throw fail(LOCAL_ACCESS_NOT_AUTHORIZED, '本机目录尚未授权或授权已撤销', 403);
+  }
+  async execute(command, signal) {
+    this.assertAuthorized(command.grantId);
+    if (!['file.list', 'file.read'].includes(command.action)) throw fail('LOCAL_ACTION_UNSUPPORTED', '当前不支持此本机操作');
+    const root = this.record.roots.find(item => item.id === command.rootId);
+    if (!root) throw fail('LOCAL_ROOT_DENIED', '目录不在授权范围内', 403);
+    const input = command.path || '.';
+    if (typeof input !== 'string' || isAbsolute(input) || input.includes('\0')) throw fail('LOCAL_PATH_INVALID', '请使用授权目录内的相对路径');
+    const candidate = resolve(root.path, input);
+    if (!inside(root.path, candidate)) throw fail('LOCAL_PATH_DENIED', '路径超出授权目录', 403);
+    const path = await realpath(candidate);
+    if (!inside(root.path, path)) throw fail('LOCAL_PATH_DENIED', '链接指向授权目录之外', 403);
+    let result;
+    if (command.action === 'file.list') {
+      const entries = await readdir(path, { withFileTypes: true });
+      result = { entries: entries.slice(0, 200).map(item => ({ name: item.name, type: item.isDirectory() ? 'directory' : item.isFile() ? 'file' : 'link' })), truncated: entries.length > 200 };
+    } else {
+      const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+      try {
+        const info = await file.stat();
+        if (!info.isFile() || info.size > 64 * 1024) throw fail('LOCAL_FILE_LIMIT', '当前只读能力支持不超过 64 KiB 的文本文件', 413);
+        const bytes = Buffer.alloc(64 * 1024 + 1);
+        let bytesRead = 0;
+        while (bytesRead < bytes.length) {
+          const chunk = await file.read(bytes, bytesRead, bytes.length - bytesRead, bytesRead);
+          if (!chunk.bytesRead) break;
+          bytesRead += chunk.bytesRead;
+        }
+        if (bytesRead > 64 * 1024) throw fail('LOCAL_FILE_LIMIT', '文件超过 64 KiB', 413);
+        result = { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, bytesRead)), bytes: bytesRead };
+      } finally { await file.close(); }
+    }
+    signal?.throwIfAborted();
+    this.assertAuthorized(command.grantId);
+    return { deviceId: this.record.deviceId, requestId: command.requestId, ...result };
+  }
+  async assertCurrentTarget() {
+    const current = await this.getTarget();
+    const target = this.record.target;
+    if (!target || !current.authority || current.authority !== target.authority || current.agentId !== target.agentId) throw fail('LOCAL_ACCOUNT_CHANGED', '云账号或助理绑定已改变，请重新授权', 403);
+  }
+  async remote(operation, payload, signal) {
+    await this.assertCurrentTarget();
+    signal?.throwIfAborted();
+    return this.transport(this.record.target, `personal-assistant.device.${operation}`, payload, signal);
+  }
+  async start() {
+    if (!this.authorized || this.disposed) return;
+    if (this.starting) return this.starting;
+    const controller = this.controller = new AbortController();
+    const identity = { deviceId: this.record.deviceId, grantId: this.record.grantId, connectionId: this.connectionId };
+    const pending = (async () => {
+      await this.remote('register', { ...identity, name: hostname(), scopes: this.record.scopes,
+        roots: this.record.roots.map(({ id, path }) => ({ id, name: basename(path) })) }, controller.signal);
+      controller.signal.throwIfAborted();
+      this.connected = true; this.lastError = '';
+      void this.poll(identity, controller);
+    })().catch(error => {
+      if (this.controller !== controller || controller.signal.aborted) throw error;
+      this.lastError = error.message; this.connected = false;
+      if (!this.disposed && error.code !== 'LOCAL_ACCOUNT_CHANGED') this.retry = setTimeout(() => { void this.start().catch(() => {}); }, this.retryMs);
+      this.retry?.unref?.();
+      throw error;
+    }).finally(() => { if (this.starting === pending) this.starting = undefined; });
+    this.starting = pending;
+    return pending;
+  }
+  async poll(identity, controller) {
+    try {
+      while (!controller.signal.aborted) {
+        const { command } = await this.remote('poll', identity, controller.signal);
+        if (!command) continue;
+        await this.assertCurrentTarget();
+        let response;
+        try { response = { ok: true, value: await this.execute(command, controller.signal) }; }
+        catch (error) { response = { ok: false, error: { code: error.code || 'LOCAL_READ_FAILED', message: error.status ? error.message : '本机文件读取失败' } }; }
+        controller.signal.throwIfAborted();
+        await this.remote('result', { ...identity, requestId: command.requestId, ...response }, controller.signal);
+      }
+    } catch (error) {
+      if (this.controller !== controller) return;
+      this.connected = false; this.lastError = error.message;
+      if (!controller.signal.aborted && !this.disposed && error.code !== 'LOCAL_ACCOUNT_CHANGED') {
+        this.retry = setTimeout(() => { void this.start().catch(() => {}); }, this.retryMs); this.retry.unref?.();
+      }
+    }
+  }
+  stop() { clearTimeout(this.retry); this.controller?.abort(); this.starting = undefined; this.connected = false; }
   async revoke() {
-    // 先同步失效并中止在途任务，再落盘：撤销授权不允许存在“还没生效”的窗口。
-    this.record = Object.freeze({
-      authorized: false,
-      scopes: Object.freeze([]),
-      riskConfirm: false,
-      grantedAt: null,
-      revokedAt: this._stamp(),
-    });
-    for (const controller of [...this.controllers]) {
-      try { controller.abort(); } catch { /* 单个任务的中止失败不影响撤销 */ }
+    await this.load();
+    const old = this.record;
+    this.stop();
+    this.record = { version: 3, deviceId: old.deviceId, authorized: false, scopes: [], roots: [] };
+    await this.persist();
+    if (old.target && this.transport) {
+      try { await this.transport(old.target, 'personal-assistant.device.revoke', { deviceId: old.deviceId, grantId: old.grantId }, AbortSignal.timeout(5000)); } catch { /* Host already refuses every old request; cloud presence expires. */ }
     }
-    this.controllers.clear();
-    await this._persist();
     return { authorized: false };
   }
-
-  /** local-control.* 的前置校验；未授权直接 403。 */
-  assertAuthorized() {
-    if (!this.record.authorized) throw fail(LOCAL_ACCESS_NOT_AUTHORIZED, '本机尚未授权；请先允许面板控制本机后重试', 403);
-    return true;
-  }
-
-  /** 供未来的本机控制实现领取中止信号；撤销授权时统一 abort。 */
-  controlSignal() {
-    const controller = new AbortController();
-    if (!this.record.authorized) {
-      controller.abort();
-      return controller;
-    }
-    this.controllers.add(controller);
-    controller.signal.addEventListener('abort', () => this.controllers.delete(controller), { once: true });
-    return controller;
-  }
-
-  dispose() {
-    for (const controller of [...this.controllers]) {
-      try { controller.abort(); } catch { /* ignore */ }
-    }
-    this.controllers.clear();
-  }
+  dispose() { this.disposed = true; this.stop(); }
 }
-
-export function createLocalAccess(options) {
-  return new LocalAccess(options);
-}
+export const createLocalAccess = options => new LocalAccess(options);

@@ -9,6 +9,15 @@
 export const THEME_STYLE_ID = 'pa-theme';
 
 const tokens = `
+.pa-workspace{height:100%;min-height:0;display:flex;overflow:hidden;background:var(--dsw-alias-background,#fff)}
+.pa-workspace-assistant{flex:1;min-width:0;min-height:0;overflow:hidden}
+.pa-workspace-assistant[hidden]{display:none}
+.pa-workspace-computer{display:flex;flex-direction:column;width:48%;min-width:320px;min-height:0;border-left:1px solid var(--dsw-alias-border-default,#ddd)}
+.pa-workspace[data-computer-expanded="true"] .pa-workspace-computer{width:100%;border:0}
+.pa-workspace-computer-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-default,#ddd)}
+.pa-workspace-computer-bar strong{flex:1;font-weight:500}
+.pa-workspace-computer-bar button{font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-default,#ddd);background:transparent;border-radius:8px;padding:4px 10px;cursor:pointer}
+@media(max-width:900px){.pa-workspace[data-computer-open="true"]{flex-direction:column}.pa-workspace-computer{width:100%;height:48%;min-width:0;border-left:0;border-top:1px solid var(--dsw-alias-border-default,#ddd)}.pa-workspace[data-computer-expanded="true"] .pa-workspace-computer{height:100%}}
 .pa{
   --pa-font:var(--dsw-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif);
   --pa-mono:var(--ds-font-family-code, 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei');
@@ -275,7 +284,7 @@ const chat = `
 .pa-composer-wrap{flex:0 0 auto;min-width:0;padding:0 33px 16px 24px}
 .pa-composer{max-width:760px;margin:0 auto;border-radius:var(--pa-r-xl);background:var(--pa-bg);box-shadow:inset 0 0 0 1px var(--pa-line-strong),0 2px 12px rgba(15,17,21,.04);padding:12px 12px 10px 16px;display:flex;flex-direction:column;gap:8px;position:relative;transition:box-shadow .15s var(--pa-ease)}
 .pa-composer:focus-within{box-shadow:inset 0 0 0 1px var(--pa-ink-3),0 2px 12px rgba(15,17,21,.06)}
-.pa-composer textarea{border:0;outline:0;resize:none;background:transparent;width:100%;min-width:0;min-height:44px;max-height:160px;padding:0;font-size:14px;line-height:22px;color:inherit}
+.pa .pa-composer textarea{border:0;outline:0;resize:none;background:transparent;width:100%;min-width:0;min-height:44px;max-height:160px;padding:0;font-size:14px;line-height:22px;color:inherit}
 .pa-composer textarea::placeholder{color:var(--pa-ink-4)}
 .pa-composer-bar{display:flex;align-items:center;gap:6px;margin-left:-6px}
 .pa-attach-row{display:flex;flex-wrap:wrap;gap:8px}
