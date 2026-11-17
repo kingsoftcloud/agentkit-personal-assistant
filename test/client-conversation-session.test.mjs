@@ -71,11 +71,12 @@ test('已有会话指针但云端返回空目录时不自动造一个新会话',
   assert.match(viewState.text(), /历史会话暂时不可见/);
 });
 
-test('新会话只能由显式按钮创建，并在创建后打开返回的 sessionId', async t => {
+test('快速连点新会话只创建一次，并打开云端返回的会话', async t => {
   const viewState = view(t);
   await viewState.settle();
   const button = viewState.nodes().find(node => node.props['aria-label'] === '新建会话');
   assert.ok(button);
+  button.props.onClick();
   button.props.onClick();
   await viewState.settle();
   assert.equal(viewState.requests.filter(row => row.operation.endsWith('.session.create')).length, 1);

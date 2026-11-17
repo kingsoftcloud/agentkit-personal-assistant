@@ -6,7 +6,7 @@ function fixture() {
   const registrations = [], surfaces = new Set(), opens = [];
   const sidebarRight = {
     registerPanelSurface(id) { assert.equal(surfaces.has(id), false); surfaces.add(id); return () => surfaces.delete(id); },
-    openPanelTab(panelId, kind) { assert.equal(surfaces.has(panelId), true); opens.push({ panelId, kind }); },
+    openPanelTab(panelId, kind, title) { assert.equal(surfaces.has(panelId), true); opens.push({ panelId, kind, title }); },
     setPanelExpanded(panelId, expanded) { opens.push({ panelId, expanded }); },
   };
   const slots = {
@@ -36,9 +36,8 @@ test('唯一云端绑定传入原生工作面板，重开与收起只操作同�
   h.workbench.collapse(); h.workbench.open();
   // open() 只切前台，不能再强制展开：展开/全屏归 DSH 原生控件，插件越权会让每次打开都变全屏。
   assert.deepEqual(h.opens, [
-    { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
     { panelId: 'personal-assistant', expanded: false },
-    { panelId: 'personal-assistant', kind: 'personal-assistant-computer' },
+    { panelId: 'personal-assistant', kind: 'personal-assistant-computer', title: '云电脑' },
   ], 'open() 不得再下发 expanded=true');
   h.workbench.dispose();
 });
@@ -57,7 +56,7 @@ test('原生 tab 向电脑内容透传云端身份、可见与全屏状态，不
 test('旧宿主无原生 root panel 能力时明确要求更新，不退回固定双栏', () => {
   const workbench = createAssistantWorkbench({});
   assert.equal(workbench.available, false);
-  assert.match(workbench.unavailableReason, /原生侧栏组件需要更新/u);
+  assert.match(workbench.unavailableReason, /请更新 Studio/u);
   assert.throws(() => workbench.bind({ agentId: 'ar-cloud', botId: 'default' }, () => {}), { code: 'PERSONAL_ASSISTANT_NATIVE_SIDEBAR_REQUIRED' });
   workbench.dispose();
 });

@@ -10,14 +10,6 @@ export const THEME_STYLE_ID = 'pa-theme';
 
 const tokens = `
 .pa-workspace{height:100%;min-height:0;display:flex;overflow:hidden;background:var(--dsw-alias-background,#fff)}
-.pa-workspace-assistant{flex:1;min-width:0;min-height:0;overflow:hidden}
-.pa-workspace-assistant[hidden]{display:none}
-.pa-workspace-computer{display:flex;flex-direction:column;width:48%;min-width:320px;min-height:0;border-left:1px solid var(--dsw-alias-border-default,#ddd)}
-.pa-workspace[data-computer-expanded="true"] .pa-workspace-computer{width:100%;border:0}
-.pa-workspace-computer-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--dsw-alias-border-default,#ddd)}
-.pa-workspace-computer-bar strong{flex:1;font-weight:500}
-.pa-workspace-computer-bar button{font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-default,#ddd);background:transparent;border-radius:8px;padding:4px 10px;cursor:pointer}
-@media(max-width:900px){.pa-workspace[data-computer-open="true"]{flex-direction:column}.pa-workspace-computer{width:100%;height:48%;min-width:0;border-left:0;border-top:1px solid var(--dsw-alias-border-default,#ddd)}.pa-workspace[data-computer-expanded="true"] .pa-workspace-computer{height:100%}}
 .pa{
   --pa-font:var(--dsw-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif);
   --pa-mono:var(--ds-font-family-code, 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei');
@@ -210,14 +202,19 @@ button.pa-row:hover,a.pa-row:hover,.pa-row.click:hover{background:var(--pa-hover
 .pa-dialog-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
 .pa-toast{position:absolute;left:50%;top:64px;transform:translateX(-50%);z-index:60;max-width:calc(100% - 48px);padding:9px 16px;border-radius:18px;background:var(--pa-ink);color:var(--pa-on-ink);font-size:13px;line-height:20px;box-shadow:var(--pa-shadow-pop);animation:pa-toast .2s var(--pa-ease)}
 .pa-toast.danger{background:var(--pa-danger);color:#fff}
-.pa-local-pop{top:48px;right:12px;width:340px;padding:16px;display:flex;flex-direction:column;gap:14px}
+.pa-local-pop{top:48px;right:12px;width:min(390px,calc(100% - 24px));max-height:calc(100% - 60px);overflow:auto;padding:16px;display:flex;flex-direction:column;gap:14px}
 .pa-local-head{display:flex;align-items:center;gap:12px}
 .pa-local-ic{flex:none;width:36px;height:36px;border-radius:var(--pa-r-sm);background:var(--pa-fill-1);display:grid;place-items:center;color:var(--pa-ink-2)}
-.pa-switch-row{display:flex;align-items:flex-start;gap:12px}
-.pa-scope-list{display:flex;flex-direction:column;gap:2px;padding:6px;border-radius:var(--pa-r-sm);background:var(--pa-bg-sunken)}
-.pa-scope{display:flex;align-items:center;gap:10px;width:100%;min-height:32px;padding:4px 8px;border-radius:6px;text-align:left;font-size:13px;line-height:20px}
-.pa-scope:not(:disabled):hover{background:var(--pa-hover)}
-.pa-scope:disabled{cursor:default}
+.pa-local-folders{display:flex;flex-direction:column;align-items:stretch;gap:10px}
+.pa-local-folders>.pa-btn{align-self:flex-start}
+.pa-local-heading,.pa-local-folder-name{font-weight:550;font-size:13px;line-height:18px}
+.pa-local-empty{color:var(--pa-ink-3);border:1px dashed var(--pa-line-strong);border-radius:var(--pa-r-sm);padding:12px;font-size:13px}
+.pa-local-folder-list{list-style:none;margin:0;padding:0;border:1px solid var(--pa-line);border-radius:var(--pa-r-sm)}
+.pa-local-folder{display:flex;align-items:center;gap:8px;padding:8px}
+.pa-local-folder+.pa-local-folder{border-top:1px solid var(--pa-line-soft)}
+.pa-local-folder-icon{display:grid;place-items:center;color:var(--pa-ink-3);width:26px;flex:none}
+.pa-local-mode{max-width:75px;flex:none;color:var(--pa-ink);background:var(--pa-bg);border:1px solid var(--pa-line);border-radius:6px;font:inherit;font-size:12px;padding:4px}
+.pa-local-actions{display:flex;justify-content:flex-end;gap:8px}
 .pa-between{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .pa-center{flex:1 1 0px;min-height:0;overflow-y:auto;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px 24px}
 .pa-center-col{width:100%;max-width:440px;display:flex;flex-direction:column;align-items:center;gap:24px;text-align:center}

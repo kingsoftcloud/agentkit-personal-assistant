@@ -1,4 +1,4 @@
-/** 云端持久会话适配层。只由签名 control permit 授权，本机只读操作仅经显式授权的 device 通道。 */
+/** 云端持久会话适配层。只由签名 control permit 授权，本机文件操作仅经显式授权的 device 通道。 */
 export function createCloudSessionChannel({ assistantId, computerId, runtimeInstanceId = '', stateStore, registry, sessionCreate, turnWrite, scheduleWrite, cloudFiles, localDevices, runtimeInfo }) {
   const fail = (code, message, status = 400) => Object.assign(new Error(message), { code, status });
   const session = async (botId, sessionId) => {

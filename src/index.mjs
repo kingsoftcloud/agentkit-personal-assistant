@@ -85,8 +85,12 @@ export function createRuntime(ctx, config = {}) {
         const policy = registry.require(botId).toolPolicy;
         // A named Bot's live directory grant is the user's authority for this
         // tool. Do not rewrite persisted Bot policy; explicit deny still wins.
-        return localDeviceService?.hasGrant(botId) && policy.mode === 'allowlist'
-          ? { ...policy, allow: [...policy.allow, 'assistant_local_read'] } : policy;
+        const canRead = localDeviceService?.hasGrant(botId);
+        const canWrite = localDeviceService?.hasGrant(botId, 'file.write');
+        return { ...policy,
+          allow: canRead && policy.mode === 'allowlist' ? [...policy.allow, 'assistant_local_read', ...(canWrite ? ['assistant_local_write'] : [])] : policy.allow,
+          deny: canWrite ? policy.deny : [...policy.deny, 'assistant_local_write'],
+        };
       } });
       if (localDeviceService) registerLocalDeviceTools({ agent, botId, service: () => localDeviceService });
       if (!identity.assistantId || !identity.computerId || !computerTransport) return;

@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { LOCAL_FILE_ACTIONS, validateLocalWrite } from '../src/local-file-contract.mjs';
 const fail = (code, message, status = 409) => Object.assign(new Error(message), { code, status });
 const validId = value => typeof value === 'string' && /^[a-zA-Z0-9._:-]{1,128}$/u.test(value);
 
@@ -19,7 +20,7 @@ export function createLocalDeviceService({ stateStore, now = Date.now, pollMs = 
     for (const row of rows) if (['queued', 'running'].includes(row.status)) Object.assign(row, { status: 'interrupted', finishedAt: now() });
   });
   const publicDevice = device => ({ deviceId: device.deviceId, name: device.name, roots: device.roots, scopes: device.scopes, connected: device.expiresAt > now() });
-  const list = botId => [...devices.values()].filter(device => device.botId === botId).map(publicDevice);
+  const list = botId => [...devices.values()].filter(device => device.botId === botId && device.expiresAt > now()).map(publicDevice);
   function current(botId, input) {
     const device = devices.get(keyOf(botId, input.deviceId));
     if (!device || device.expiresAt <= now() || device.grantId !== input.grantId || device.connectionId !== input.connectionId) throw fail('LOCAL_DEVICE_OFFLINE', '本机连接或授权已失效');
@@ -37,10 +38,13 @@ export function createLocalDeviceService({ stateStore, now = Date.now, pollMs = 
   function revoke(device) {
     devices.delete(keyOf(device.botId, device.deviceId));
     device.wake?.();
-    for (const job of pending.values()) if (job.device === device) void settle(job, fail('LOCAL_GRANT_REVOKED', '本机授权已撤销', 403));
+    for (const job of pending.values()) if (job.device === device) void settle(job, job.delivered && job.command.action === 'file.write'
+      ? fail('LOCAL_WRITE_UNCONFIRMED', '授权已撤销；重新授权后可读取文件核对这次写入结果', 409)
+      : fail('LOCAL_GRANT_REVOKED', '本机授权已撤销', 403));
   }
   async function handle(botId, operation, input) {
     await ready;
+    if (operation === 'capabilities') return { fileWrite: true };
     if (operation === 'list') return { devices: list(botId) };
     if (!validId(input.deviceId) || !validId(input.grantId)) throw fail('LOCAL_DEVICE_INVALID', '设备或授权标识无效', 400);
     if (operation === 'revoke') {
@@ -56,7 +60,8 @@ export function createLocalDeviceService({ stateStore, now = Date.now, pollMs = 
       if (previous && previous.expiresAt > now() && previous.connectionId !== input.connectionId) throw fail('LOCAL_DEVICE_BUSY', '此设备已有在线连接');
       if (previous) revoke(previous);
       devices.set(key, { botId, deviceId: input.deviceId, grantId: input.grantId, connectionId: input.connectionId,
-        name: String(input.name || '本机').slice(0, 128), roots: input.roots.map(({ id, name }) => ({ id, name })), scopes: ['file.read'], queue: [], expiresAt: now() + leaseMs });
+        name: String(input.name || '本机').slice(0, 128), roots: input.roots.map(({ id, name, writable }) => ({ id, name, writable: writable === true })),
+        scopes: input.roots.some(root => root.writable === true) ? ['file.read', 'file.write'] : ['file.read'], queue: [], expiresAt: now() + leaseMs });
       return { connected: true, protocol: 'personal-assistant-local-read/v1' };
     }
     const device = current(botId, input);
@@ -71,7 +76,10 @@ export function createLocalDeviceService({ stateStore, now = Date.now, pollMs = 
         });
         current(botId, input);
         const command = device.queue.shift() || null;
-        if (command) await save({ requestId: command.requestId, status: 'running', startedAt: now() });
+        const job = command && pending.get(command.requestId);
+        if (!job) return { command: null };
+        job.delivered = true;
+        await save({ requestId: command.requestId, status: 'running', startedAt: now() });
         return { command };
       } finally { device.polling = false; }
     }
@@ -93,24 +101,33 @@ export function createLocalDeviceService({ stateStore, now = Date.now, pollMs = 
   async function execute(botId, input) {
     await ready;
     if (input.action === 'devices') return { devices: list(botId) };
-    if (!['file.list', 'file.read'].includes(input.action)) throw fail('LOCAL_ACTION_UNSUPPORTED', '只支持授权目录的只读访问', 400);
+    if (!LOCAL_FILE_ACTIONS.includes(input.action)) throw fail('LOCAL_ACTION_UNSUPPORTED', '当前不支持此本机文件操作', 400);
     const device = devices.get(keyOf(botId, input.deviceId));
-    if (!device || device.expiresAt <= now()) throw fail('LOCAL_DEVICE_OFFLINE', '本机离线，请打开已授权的 DSH Host');
-    if (!device.roots.some(root => root.id === input.rootId)) throw fail('LOCAL_ROOT_DENIED', '目录不在授权范围内', 403);
+    if (!device || device.expiresAt <= now()) throw fail('LOCAL_DEVICE_OFFLINE', '该设备不在线或授权已变更，请重新查询本轮在线设备');
+    const root = device.roots.find(root => root.id === input.rootId);
+    if (!root) throw fail('LOCAL_ROOT_DENIED', '目录不在授权范围内', 403);
     if (typeof input.path !== 'string' || input.path.length > 4096) throw fail('LOCAL_PATH_INVALID', '需要授权目录内的相对路径', 400);
-    if ([...pending.values()].filter(job => job.device === device).length >= 8) throw fail('LOCAL_DEVICE_BUSY', '此设备已有多个读取任务');
+    const writing = input.action === 'file.write';
+    if (writing) {
+      if (!root.writable) throw fail('LOCAL_WRITE_DENIED', '该目录只读，写入需要单独授权', 403);
+      validateLocalWrite(input);
+    }
+    if ([...pending.values()].filter(job => job.device === device).length >= 8) throw fail('LOCAL_DEVICE_BUSY', '此设备已有多个等待的文件操作');
     const command = { requestId: randomUUID(), grantId: device.grantId, action: input.action, rootId: input.rootId, path: input.path };
+    if (writing) Object.assign(command, { text: input.text, expectedSha256: input.expectedSha256 });
     await save({ requestId: command.requestId, botId, deviceId: device.deviceId, grantId: device.grantId, action: input.action, status: 'queued', createdAt: now() });
     return new Promise((resolve, reject) => {
       const job = { command, device, resolve, reject };
       job.timer = setTimeout(() => {
         device.queue = device.queue.filter(item => item.requestId !== command.requestId);
-        void settle(job, fail('LOCAL_READ_TIMEOUT', '本机读取未及时返回，请核对设备状态', 504));
+        void settle(job, writing && job.delivered
+          ? fail('LOCAL_WRITE_UNCONFIRMED', '尚未确认本机写入结果。先读取文件核对，再决定是否重试', 504)
+          : fail(writing ? 'LOCAL_WRITE_TIMEOUT' : 'LOCAL_READ_TIMEOUT', '本机未及时返回，请核对设备状态', 504));
       }, timeoutMs);
       pending.set(command.requestId, job); device.queue.push(command); device.wake?.();
     });
   }
   return { ready, handle, execute,
-    hasGrant: botId => list(botId).some(device => device.connected),
+    hasGrant: (botId, scope = 'file.read') => list(botId).some(device => device.scopes.includes(scope)),
     dispose() { for (const device of [...devices.values()]) revoke(device); } };
 }
